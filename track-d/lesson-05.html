@@ -1,0 +1,165 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>D5 WebGPU &amp; WGSL — GPU Mastery</title>
+<link rel="stylesheet" href="../assets/style.css">
+</head>
+<body data-lesson="dl5">
+<nav><div class="inner">
+  <a class="logo" href="../index.html">GPU<span>Mastery</span></a>
+  <a class="item" href="../index.html">Home</a>
+  <a class="item on" href="../curriculum.html">Curriculum</a>
+  <a class="item" href="../labs.html">Labs</a>
+  <a class="item" href="../setup.html">Lab setup</a>
+  <a class="item" href="../prompt.html">Generator prompt</a>
+</div></nav>
+<div class="wrap">
+
+<div class="lesson-top">
+  <div><span class="badge">Track D · Lesson 5</span><span class="badge dim">≈ 3 h</span></div>
+  <button id="donebtn" class="donebtn">Mark lesson complete</button>
+</div>
+<h1>WebGPU &amp; WGSL — the universal GPU lab you already have installed</h1>
+<p class="lead">Every other backend in this track needs a driver, a toolchain, or specific hardware. WebGPU needs a browser — which means ~5 billion devices are now GPU-compute targets you reach with zero install. Today you will see that a WGSL compute shader is a CUDA kernel with decorators, run the 5.8 reduction on your own GPU from a web page, and learn the one discipline the browser forces on you: code to the guaranteed baseline, feature-detect everything else.</p>
+
+<h2>Concept</h2>
+
+<h3>The universal lab: adapter to device to queue to pipeline</h3>
+<div class="diagram" data-diagram="d5-pipeline" data-caption="WebGPU's setup: request an adapter (the physical GPU), get a device and its queue (5.9), make buffers and a bind group, compile a WGSL pipeline, dispatch workgroups."></div>
+<p>WebGPU is the modern, explicit successor to WebGL, and as of 2026 it ships in every major browser — Chrome and Edge (since 113), Firefox (141 on Windows, 145 on macOS), and Safari (26) — reaching roughly 82% of users. Its object model will feel familiar because it is the same shapes you learned on CUDA: you request an <code>adapter</code> (a physical GPU), get a <code>device</code> and its <code>queue</code> (5.9's stream), allocate <code>buffer</code>s, bundle them into a <code>bindGroup</code> (the descriptors a shader sees), compile a WGSL <code>computePipeline</code>, and <code>dispatchWorkgroups</code> (5.2's grid launch). Under the hood two engines do the real work and — importantly — both run <em>outside</em> the browser too: <strong>Dawn</strong> (C++, powers Chrome, maps to D3D12/Metal/Vulkan) and <strong>wgpu</strong> (Rust, powers Firefox). That "standalone" fact is why WebGPU is a serious portability target, not just a web toy: the same WGSL runs in a browser tab, in a native app via wgpu/Dawn, and — for you, right now — in a lab page this site hosts.</p>
+
+<h3>WGSL: a CUDA kernel with decorators</h3>
+<div class="diagram" data-diagram="d5-wgsl" data-caption="A WGSL compute kernel annotated: @group/@binding wire the buffers, @workgroup_size is blockDim, global_invocation_id is the 5.2 index, var&lt;workgroup&gt; is __shared__, workgroupBarrier is __syncthreads."></div>
+<p>Open the <a href="lab-webgpu.html">WebGPU Live Lab</a> in this course and read its shader — it is the 5.8 reduction, and every line maps to something you know:</p>
+<pre><code>@group(0) @binding(0) var&lt;storage, read&gt; input: array&lt;f32&gt;;   // a buffer, bound to a slot
+@compute @workgroup_size(256)                               // @workgroup_size == blockDim (5.2)
+fn main(@builtin(global_invocation_id) gid: vec3&lt;u32&gt;, ...){ // gid.x == the 5.2 global index
+    var&lt;workgroup&gt; scratch: array&lt;f32, 256u&gt;;                // var&lt;workgroup&gt; == __shared__ (5.5)
+    scratch[lid.x] = sum;
+    workgroupBarrier();                                     // workgroupBarrier() == __syncthreads()
+    // ... tree reduction in shared memory, exactly 5.8 ...
+}</code></pre>
+<p>The déjà vu is the whole point: <code>@workgroup_size</code> is your block dimension, <code>global_invocation_id</code> is the <code>blockIdx*blockDim+threadIdx</code> identity (5.2), <code>var&lt;workgroup&gt;</code> is shared memory (5.5), and <code>workgroupBarrier()</code> is <code>__syncthreads()</code> — with the same law that the barrier lives <em>outside</em> the divergence guard (5.6). You are writing the reduction you already wrote, in a language that is CUDA's concepts with a decorator syntax. The bind-group indirection (<code>@group</code>/<code>@binding</code>) is the one genuinely new idea, and it is just the explicit "which buffer is argument 0" wiring that CUDA did implicitly through kernel parameters.</p>
+
+<h3>The baseline versus extensions honesty</h3>
+<div class="diagram" data-diagram="d5-limits" data-caption="WebGPU's portability tax: shared memory and barriers are guaranteed baseline; subgroups, timestamp-query, and f16 are optional extensions you must feature-detect."></div>
+<p>Portability at browser scale forces one hard discipline: the guaranteed feature set is deliberately small, and everything powerful is an optional extension you must check for. Shared memory (<code>var&lt;workgroup&gt;</code>) and <code>workgroupBarrier</code> are baseline — always there. But <strong>subgroups</strong> (WGSL's warp-shuffle equivalent) only shipped in Chrome 134 (February 2025) and are not universally available, so a portable kernel cannot assume them. <strong>timestamp-query</strong> (your 5.10-style GPU timing) has been in Chrome since 121, but its results are quantized to ~100µs for security, and it is an opt-in feature. <strong>f16</strong> is common but not everywhere. The rule the browser enforces is exactly OpenCL 3.0's "features are optional, query them" (D4) and the same shape as any portable API: write to the baseline, then <code>adapter.features.has('subgroups')</code> before you touch an extension, with a baseline fallback path. This is the 90/10 tax (D1) in its purest form — the portable core is easy, and the fast-path features cost you a feature-detect-and-fallback branch.</p>
+
+<h2>Worked example</h2>
+<div class="card">
+<p><strong>Task:</strong> Run the 5.8 reduction on your GPU from a web page and validate it against a CPU oracle — the fixture doctrine (M2 L6), in the browser. The <a href="lab-webgpu.html">Live Lab</a> does exactly this; the numbers below were produced by simulating its two-level reduction (grid-stride workgroup partials, then a host sum of the 64 partials) at fp32. Prediction first: will a GPU fp32 tree reduction match a CPU fp64 sum bitwise, or only within a budget — and how big is the error on 1M random floats?</p>
+<pre><code>Prediction: NOT bitwise (fp32 tree order != fp64 serial order — M1 L8);
+  within a budget of ~N*1e-3. For N=1M, expect error well under 1049.
+Result (executed simulation of the lab's exact algorithm):
+  N=64K : gpu 32759.6350  cpu 32759.6354  err 3.8e-4   within budget(66)   OK
+  N=1M  : gpu 524594.8325 cpu 524594.8323 err 2.6e-4   within budget(1049) OK
+  N=4M  : gpu 2095693.783 cpu 2095693.777 err 6.7e-3   within budget(4194) OK
+  all-ones 1M -> gpu = 1048576 exactly (integer sums are exact in fp32 to 2^24)</code></pre>
+<p><strong>What to internalize:</strong> three lessons converge here. First, the algorithm is <em>identical</em> to the CUDA reduction — grid-stride load (5.2), workgroup tree with a barrier (5.5/5.8), one partial per workgroup, final sum on the host — only the syntax changed, which is the entire thesis of Track D. Second, correctness is judged by <em>budget, not bitwise</em> (M1 L8): the GPU reduces in a different order than the serial CPU sum, so a few parts in 10^6 of disagreement is correct, and a test demanding equality would wrongly fail a right answer. Third, and this is what makes WebGPU special: you just ran this on real GPU hardware with no CUDA install, no driver setup, no cloud account — a web page reached your GPU. That is a genuinely new capability for teaching, demos, and shipping compute to users, and it is why this course can <em>host</em> its own lab.</p>
+</div>
+
+<h2>Key points</h2>
+<ul class="keypoints">
+<li>WebGPU ships in every major browser (Chrome/Edge 113+, Firefox 141+, Safari 26+, ~82% of users) and its engines Dawn (C++) and wgpu (Rust) run standalone too — so the same WGSL targets the browser AND native apps.</li>
+<li>WebGPU's object model is CUDA's shapes renamed: adapter/device/queue (5.9), buffers, bind groups (explicit argument wiring), a compiled pipeline, and dispatchWorkgroups (5.2).</li>
+<li>WGSL is a CUDA kernel with decorators: @workgroup_size = blockDim, global_invocation_id = the 5.2 index, var&lt;workgroup&gt; = __shared__ (5.5), workgroupBarrier() = __syncthreads().</li>
+<li>The 5.8 reduction runs unchanged in WGSL and matches a CPU oracle within an fp32 budget (executed: 2.6e-4 error on 1M), correctness judged by budget not bitwise (M1 L8) — provable live in the course's lab.</li>
+<li>The guaranteed baseline is small — shared memory and barriers yes; subgroups (Chrome 134+), timestamp-query (Chrome 121+, quantized 100µs), and f16 are optional extensions.</li>
+<li>Browser-scale portability forces the discipline "code to the baseline, feature-detect the rest" (adapter.features.has) with a fallback — OpenCL 3.0's optional-features model (D4) and D1's 90/10 tax in purest form.</li>
+</ul>
+
+<h2>Quiz</h2>
+<div class="quiz">
+  <div class="q">1. A developer writes a fast WGSL reduction using <code>subgroupAdd</code> (the warp-shuffle equivalent), tests it in Chrome where it flies, and ships. Bug reports flood in from Firefox and Safari users: the feature silently does nothing or the pipeline fails to create. What went wrong and what is the correct pattern?</div>
+  <button class="opt">Firefox and Safari do not support WebGPU at all; drop support for them</button>
+  <button class="opt" data-c="1">Subgroups are an optional extension (shipped in Chrome 134, not universal), so the developer used a non-baseline feature without detecting it. The pipeline that requires subgroups cannot be created where the feature is absent. The correct pattern is to feature-detect — check adapter.features.has('subgroups') and requestDevice with it in requiredFeatures only if present — and provide a baseline fallback using var&lt;workgroup&gt; + workgroupBarrier (guaranteed everywhere). Code to the baseline; treat subgroups as a fast path, not a given</button>
+  <button class="opt">The reduction algorithm is wrong; subgroups always fail</button>
+  <button class="opt">Recompile the WGSL for each browser separately</button>
+  <div class="expl">Option 1 is factually wrong (all three ship WebGPU as of 2026). Option 4 misunderstands WGSL — it is compiled at runtime by each browser's engine, not per-browser by you. The correct answer names the mechanism (an optional extension used unconditionally) and the fix (feature-detect + baseline fallback), which is the browser edition of D4's "SVM is optional, query it" and D1's 90/10 tax: the portable core is free, the fast-path feature costs a detect-and-fallback branch. The general law: at browser scale, "works in my Chrome" certifies exactly one engine.</div>
+</div>
+<div class="quiz">
+  <div class="q">2. Your WebGPU reduction returns 524594.83 while the CPU <code>fp64</code> sum returns 524594.83<strong>23</strong> — they differ in the 7th digit. A teammate flags it as a GPU bug. Is it?</div>
+  <button class="opt">Yes — the GPU is computing the wrong answer and must be debugged</button>
+  <button class="opt" data-c="1">No — it is correct within the fp32 budget. The GPU reduces in a tree order (partials, then host sum) while the CPU sums serially in fp64, and fp32 addition is non-associative (M1 L8), so a disagreement of a few parts in 10^6 on a million-element sum is expected and right. The fixture must use an error budget (roughly N*1e-3 here), not bitwise equality; demanding equality would fail a correct reduction. The all-ones case (exact integer sum) confirms the algorithm — only the floating-point rounding differs</button>
+  <button class="opt">Yes — any difference from the fp64 result is a defect</button>
+  <button class="opt">No — but only because WebGPU uses fp64 internally</button>
+  <div class="expl">Option 4 is a factual trap: WebGPU's baseline is fp32, not fp64 (f16 is an extension, fp64 generally unavailable). Options 1/3 apply a bitwise-equality standard that M1 L8 spent a whole lesson dismantling — floating-point sums depend on order, and parallel reductions reorder by design. The correct answer is the reduction's correctness policy from 5.8 and 5.11, cross-vendor: budget-based fixtures, with the exact-integer case as the algorithm check. This is the same "do not expect bitwise across execution orders" lesson that governs every backend in this track.</div>
+</div>
+
+<h2>Exercises</h2>
+<details><summary>Exercise 1 — Open this course's <a href="lab-webgpu.html">WebGPU Live Lab</a> in a WebGPU browser and run the reduction at all four sizes with both fills. Record your GPU's reported name, the absolute error at N=4M, and whether timestamp-query was available (and if so, the compute time). Confirm the all-ones case returns exactly N.</summary><div class="body">
+<p>Expected: the reduction matches the CPU oracle within the budget at every size (error grows slowly with N because more fp32 adds accumulate rounding — M1 L8), and all-ones returns the exact N (integer sums are exact in fp32 up to 2^24). Whether you see a timing depends on your browser — Chrome exposes timestamp-query (quantized ~100µs); Safari/Firefox may not, in which case the lab honestly reports "n/a." The device name may be hidden by the browser for privacy (WebGPU deliberately limits fingerprinting) — that is expected, not a bug. Deliverable: your device string, the N=4M error, and the timing (or "n/a"). You just measured a GPU kernel from a web page — note how much less ceremony that was than a CUDA toolchain install (5.1).</p>
+</div></details>
+<details><summary>Exercise 2 — Modify the lab's WGSL on your machine: change <code>@workgroup_size(256)</code> to 64 and 128 and observe whether the result stays correct and whether timing changes; then add a fused map (square each element before summing, computing the sum of squares). Predict each outcome before running.</summary><div class="body">
+<p>Predictions and results: changing <code>@workgroup_size</code> keeps the result correct ONLY if you also update the shared array <code>array&lt;f32, 256u&gt;</code> and the initial halving stride to match the new size — otherwise the tree reads past the live data and you get a bug (a sharp lesson in matching shared-memory size to block size, 5.5). Timing may shift with occupancy (5.6) — smaller workgroups can mean more or less overlap depending on your GPU. Adding the square (<code>sum = sum + input[i]*input[i]</code>) is a fused map-reduce (Track A's fusion idea, A5) — it computes the sum of squares in the same passes, changing the answer but not the structure. Deliverable: a note on which change required also editing the shared-array size, and the sum-of-squares result checked against a CPU reference. The point: WGSL is editable and immediate — the browser is a real REPL for GPU compute.</p>
+</div></details>
+
+<hr>
+<h1>Go deeper — the browser's GPU, in full</h1>
+
+<h2>1. Buffers, bind groups, and the pipeline</h2>
+<pre><code>concept          WebGPU object                 CUDA analogue
+───────────────  ────────────────────────────  ─────────────────────────
+device memory    GPUBuffer (usage flags)       cudaMalloc + purpose flags
+kernel arguments  bind group (@group/@binding)  kernel parameters (implicit)
+compiled kernel   GPUComputePipeline            a loaded kernel (5.1 module)
+launch            pass.dispatchWorkgroups(n)    kernel&lt;&lt;&lt;n, wgsize&gt;&gt;&gt;()
+readback          COPY_SRC -> MAP_READ buffer   cudaMemcpy D2H
+the one new idea: buffers are explicitly TYPED by usage (STORAGE, COPY_DST,
+MAP_READ...) — you declare what a buffer is FOR at creation, and the runtime
+enforces it. It is 5.3's ownership discipline turned into required API flags.</code></pre>
+<p>The usage-flags system is WebGPU's safety model: a buffer you will read back on the CPU needs <code>MAP_READ</code>, a buffer a shader writes needs <code>STORAGE</code>, and you cannot map a storage buffer directly (hence the copy-to-a-readback-buffer step in the lab). It is more ceremony than <code>cudaMemcpy</code>, but it makes an entire class of misuse a validation error instead of undefined behavior — the same trade as WebGPU's overall design.</p>
+
+<h2>2. Baseline vs extensions, and honest timing</h2>
+<pre><code>feature              status       detect with
+───────────────────  ───────────  ─────────────────────────────────
+var&lt;workgroup&gt; + barrier  BASELINE  always available
+subgroups (warp ops)  extension    adapter.features.has('subgroups')   [Chrome 134+]
+timestamp-query       extension    adapter.features.has('timestamp-query') [Chrome 121+]
+f16                   extension    adapter.features.has('shader-f16')
+timing caveat: timestamp-query is quantized to ~100µs (a security/fingerprinting
+defense) — fine for "is this pass 3ms or 30ms" (5.10's regimes), useless for
+sub-100µs microbenchmarks. Enable finer timing only behind a dev flag.</code></pre>
+
+<h2>3. The same WGSL, outside the browser</h2>
+<pre><code>Dawn (C++, Google)  and  wgpu (Rust, Mozilla)  are the two implementations —
+and both are STANDALONE libraries. So WGSL/WebGPU is a native portability
+target too:
+  · a native app links wgpu/Dawn -> runs WGSL on D3D12/Metal/Vulkan under the hood
+  · one shader language spans web delivery AND native apps
+  · this is why WebGPU sits on D1's "portable API" rung alongside OpenCL, but with
+    a cleaner, safer, more modern API and a browser distribution channel OpenCL lacks
+takeaway: "WebGPU" is misnamed — it is a portable GPU API that happens to also
+run in browsers, not a browser-only toy.</code></pre>
+
+<h2>Gotchas</h2>
+<div class="gotcha"><strong>Assuming subgroups (or any extension) is present.</strong> subgroups shipped in Chrome 134 and are not universal; a pipeline requiring them fails where they are absent. Feature-detect and keep a baseline fallback (quiz 1).</div>
+<div class="gotcha"><strong>Expecting bitwise-identical sums.</strong> WGSL is fp32 baseline and reductions reorder (M1 L8) — use budget fixtures, not equality (quiz 2). Demanding equality fails correct code.</div>
+<div class="gotcha"><strong>Mapping a storage buffer directly.</strong> You cannot — storage buffers are not host-mappable. Copy to a separate <code>MAP_READ</code> buffer first (the lab's readBuf). The usage flags enforce this at validation time.</div>
+<div class="gotcha"><strong>Trusting timestamp-query for microbenchmarks.</strong> It is quantized to ~100µs for security, so sub-100µs measurements are meaningless. Use it for pass-level regimes (5.10), not fine timing, unless a dev flag lifts the quantization.</div>
+<div class="gotcha"><strong>Barrier inside a divergence guard.</strong> <code>workgroupBarrier()</code> must be reached by all invocations in the workgroup — putting it inside <code>if (lid.x &lt; s)</code> is 5.6's classic deadlock/UB, same law as <code>__syncthreads()</code>. Keep the barrier outside the guard (the lab does).</div>
+<div class="gotcha"><strong>Shared-array size not matching workgroup size.</strong> <code>var&lt;workgroup&gt; scratch: array&lt;f32, 256u&gt;</code> must match <code>@workgroup_size(256)</code> and the reduction's starting stride — change one, change all three, or the tree reads garbage (Exercise 2's trap).</div>
+
+<h2>Scenario — the demo that only worked on the presenter's laptop</h2>
+<p>A team builds an in-browser image-processing demo — GPU-accelerated filters via WebGPU — to show at a conference. It is beautiful on the developer's Chrome, so they ship the demo link. At the conference, half the audience opening it on Safari and Firefox see either a blank canvas or a console full of pipeline-creation errors. The post-mortem finds two baseline-versus-extension sins. First, a blur kernel used <code>subgroupAdd</code> for a fast reduction because "it made the FPS counter look great" — a Chrome-134 extension that simply is not there on the other engines, so the pipeline failed to create and the whole render fell over. Second, they had used <code>timestamp-query</code> to drive an on-screen profiler overlay and required the feature unconditionally, so browsers without it crashed at startup. The fix is the discipline this lesson exists to teach: check <code>adapter.features.has(...)</code> for every non-baseline feature, request only what is present, and provide a baseline path (a <code>var&lt;workgroup&gt;</code> + <code>workgroupBarrier</code> reduction that runs everywhere; a profiler overlay that hides itself when timing is unavailable — exactly what the course's lab does when it reports "n/a"). Shipped again, the demo runs on every engine, a little slower where subgroups are missing, which is the 90/10 tax paid honestly. The moral is WebGPU's version of D2's "a test certifies the machine it ran on": "works in my browser" certifies one engine, and browser-scale portability means your baseline path is the product — the extensions are garnish you must be able to live without.</p>
+
+<h2>Practice</h2>
+<details><summary>1. Translate each to WGSL: <code>&lt;&lt;&lt;64, 256&gt;&gt;&gt;</code>, <code>__shared__ float s[256]</code>, <code>__syncthreads()</code>, <code>threadIdx.x</code>, <code>blockIdx.x*blockDim.x+threadIdx.x</code>.</summary><div class="body">Launch: <code>@compute @workgroup_size(256)</code> in the shader + <code>dispatchWorkgroups(64)</code> on the host (the split is deliberate — block size is a shader decorator, grid size is a host call). Shared: <code>var&lt;workgroup&gt; s: array&lt;f32, 256u&gt;;</code>. Barrier: <code>workgroupBarrier()</code>. threadIdx.x: <code>local_invocation_id.x</code>. Global index: <code>global_invocation_id.x</code>. Every row is D1's translation table — the reduction you wrote in 5.8 ports by renaming, exactly as the lab shows.</div></details>
+<details><summary>2. Why must a WebGPU app feature-detect subgroups but not workgroupBarrier?</summary><div class="body">Because <code>workgroupBarrier</code> and <code>var&lt;workgroup&gt;</code> shared memory are part of WebGPU's guaranteed baseline — every conformant implementation has them — while subgroups are an optional extension that shipped in Chrome 134 and is not present on all engines/devices. Requesting a device or creating a pipeline that requires subgroups fails where the feature is absent, so you must query <code>adapter.features.has('subgroups')</code> and fall back to a baseline reduction. The baseline never needs detection (it is the contract); extensions always do (they are privileges). Same model as OpenCL's optional features (D4).</div></details>
+<details><summary>3. Explain why the lab copies partials to a separate buffer before reading them on the CPU, instead of mapping the storage buffer directly.</summary><div class="body">WebGPU's usage flags forbid it: a buffer used as <code>STORAGE</code> (writable by the shader) cannot also be host-mapped for reading — those usages are mutually exclusive by design, to keep the memory model safe and let the driver place buffers optimally. So the pattern is: shader writes the <code>STORAGE | COPY_SRC</code> partials buffer, an encoder command copies it into a separate <code>COPY_DST | MAP_READ</code> buffer, and only that second buffer is mapped on the CPU. It is more steps than <code>cudaMemcpy</code>, but the flags make illegal access a validation error instead of undefined behavior — WebGPU's safety-over-brevity trade (Go-deeper section 1).</div></details>
+<details><summary>4. WebGPU baseline is fp32. What does that mean for porting an fp16-heavy ML kernel (Track A's mixed precision) to the browser?</summary><div class="body">You cannot assume f16 — it is the <code>shader-f16</code> extension, present on many but not all devices — so a portable browser port either feature-detects f16 and falls back to fp32, or accepts fp32 throughout. That has real consequences from Track A's A6: no baseline tensor-core-style fp16 accumulation, larger memory traffic (fp32 is 2x the bytes of fp16 — 4.6), and different numeric budgets (M1 L8). The honest plan mirrors the whole track: get correctness on the fp32 baseline everywhere, then use f16 as a detected fast path where available. "Portable ML in the browser" means baseline-fp32 first, f16 as garnish.</div></details>
+<details><summary>5. A native desktop app wants one GPU codebase for Windows, macOS, and Linux without writing D3D12/Metal/Vulkan three times. How does WebGPU help without a browser involved?</summary><div class="body">By linking Dawn (C++) or wgpu (Rust) as a standalone library: both implement WebGPU/WGSL natively and map to D3D12 on Windows, Metal on macOS, and Vulkan on Linux under the hood. So the app writes WGSL and WebGPU API calls once, and the library translates to each platform's native GPU API — no browser, no three-way rewrite. This is why WebGPU sits on D1's "portable API" rung as a genuine native option (Go-deeper section 3): the "Web" in the name undersells it. The trade vs Vulkan-directly is a slightly higher-level, safer API for a small abstraction cost — the usual 90/10.</div></details>
+<details><summary>6. On the lab, the all-ones sum is exact but the random-fill sum differs from fp64 in the 7th digit. Reconcile these two facts with one principle.</summary><div class="body">One principle: fp32 represents integers exactly up to 2^24, but real-valued sums are order-dependent because fp32 addition is non-associative (M1 L8). All-ones sums are integer additions staying well under 2^24, so every partial and the final total are exact — no rounding to disagree about. Random floats accumulate rounding at each of the ~million adds, and the GPU's tree order rounds differently than the CPU's serial fp64 order, producing a few parts in 10^6 of disagreement that is correct, not buggy. Same reduction, two inputs, one rule: exactness is about magnitude and integer-ness; the 7th-digit wobble is about floating-point order — which is why fixtures use budgets (quiz 2).</div></details>
+<details><summary>7. The interview closer: "Why is the browser a legitimate GPU-compute target, and when would you actually ship WebGPU?" Deliver the spoken skeleton.</summary><div class="body">"WebGPU is legitimate because it is a real, explicit GPU API — compute shaders, storage buffers, workgroups, shared memory, barriers — not a graphics toy, and WGSL is genuinely just CUDA's concepts with decorators: @workgroup_size is blockDim, global_invocation_id is the thread index, var&lt;workgroup&gt; is shared memory, workgroupBarrier is __syncthreads. It ships in every major browser now, ~82% of users, and crucially its engines Dawn and wgpu run standalone, so the same WGSL targets native apps across Windows, macOS, and Linux without writing D3D12/Metal/Vulkan three times. I would ship WebGPU when I want zero-install distribution — an in-browser demo, tool, or client-side inference that reaches any device with a link — or when I want one GPU codebase across web and native. What I plan around is the baseline: the guaranteed feature set is small, so I code to var&lt;workgroup&gt; and barriers and feature-detect subgroups, f16, and timestamp-query with a fallback, because 'works in my Chrome' certifies exactly one engine. And I judge correctness by budget, not bitwise — it is fp32 and reductions reorder. So: WebGPU for reach and web-plus-native portability, with the discipline that my baseline path is the actual product and the extensions are a fast path I can live without.' That baseline-first discipline is the hire signal — it shows I have shipped to more than my own laptop."</div></details>
+
+<div class="pager">
+  <a href="lesson-04.html">← OpenCL Today</a>
+  <a href="lesson-06.html">Next: Kokkos &amp; RAJA →</a>
+</div>
+<div class="footer">GPU Mastery · Track D · Lesson 5 — works offline · progress saved in your browser</div>
+</div>
+<script src="../assets/diagramsD.js"></script>
+<script src="../assets/app.js"></script>
+</body>
+</html>

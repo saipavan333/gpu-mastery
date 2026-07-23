@@ -1,0 +1,169 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>C5 Textures, Sampling, Mipmaps — GPU Mastery</title>
+<link rel="stylesheet" href="../assets/style.css">
+</head>
+<body data-lesson="cl5">
+<nav><div class="inner">
+  <a class="logo" href="../index.html">GPU<span>Mastery</span></a>
+  <a class="item" href="../index.html">Home</a>
+  <a class="item on" href="../curriculum.html">Curriculum</a>
+  <a class="item" href="../labs.html">Labs</a>
+  <a class="item" href="../setup.html">Lab setup</a>
+  <a class="item" href="../prompt.html">Generator prompt</a>
+</div></nav>
+<div class="wrap">
+
+<div class="lesson-top">
+  <div><span class="badge">Track C · Lesson 5</span><span class="badge dim">≈ 3 h</span></div>
+  <button id="donebtn" class="donebtn">Mark lesson complete</button>
+</div>
+<h1>Textures, Sampling &amp; Mipmaps — filtering, gamma, and the bandwidth budget</h1>
+<p class="lead">A texture lookup looks trivial and hides three deep ideas: filtering (blending texels so surfaces don't pixelate), mipmaps (prefiltered shrinks chosen by the quad's derivatives from C2), and gamma (why 0.5 is not half-bright, and why lighting must happen in linear space). Get gamma wrong and every image in your game is subtly muddy; each of these is a short NumPy experiment, and you'll run them.</p>
+
+<p class="small dim">Lab note: the sampling and gamma math is pure NumPy (executed below); textures run on any GPU. The mipmap-derivative link ties straight back to C2's 2×2 quad — the same helper lanes now have a job.</p>
+
+<h2>Concept</h2>
+
+<h3>Bilinear filtering: a sample is a blend of four texels</h3>
+<div class="diagram" data-diagram="c5-bilinear" data-caption="A texture coordinate rarely lands on a texel center; bilinear filtering blends the four surrounding texels — two lerps horizontally, one vertically — in fixed-function silicon."></div>
+<p>A UV coordinate almost never hits a texel center, so the sampler blends the four surrounding texels. Bilinear filtering is a lerp of lerps: with fractional position <code>(fx, fy)</code>, interpolate the top two texels by fx, the bottom two by fx, then interpolate those two results by fy. The crucial fact is that the sampler does this in <strong>fixed-function silicon</strong> for free — doing it yourself with four taps plus arithmetic is slower and pointless. Without filtering (nearest-neighbor), a texture magnified up close shows blocky texels; bilinear smooths it. The sampler also handles wrap modes (repeat, clamp, mirror) at the edges. Filtering is the first line of defense against aliasing, but it's not enough on its own for <em>minification</em> (a texture shrunk smaller than its texel count) — that's what mipmaps are for.</p>
+
+<h3>Mipmaps: prefiltered shrinks chosen by derivatives</h3>
+<div class="diagram" data-diagram="c5-mip" data-caption="A mipmap chain is the texture at successive half-resolutions, each prefiltered. The 2×2 quad's derivatives (C2) measure how fast UV changes per pixel and pick the level with ~1 texel per pixel."></div>
+<p>When a textured surface is far away, many texels map to one pixel — sampling just one of them aliases (shimmers as the camera moves). The fix is <strong>mipmaps</strong>: precompute the texture at half, quarter, eighth resolution (each level prefiltered from the one above), and at render time pick the level where roughly one texel covers one pixel. How does the hardware know which level? The 2×2 quad from C2: it computes the screen-space derivatives of the UV (how fast UV changes from one pixel to the next) and picks the mip accordingly — this is the job the helper lanes exist for. The memory cost is small and worth computing:</p>
+<pre><code>mipmap extra memory = (1/4) + (1/16) + (1/64) + ... = sum (1/4)^k = 1/3  (executed: 0.3333)
+so a full mip chain costs +33% memory — and buys the elimination of minification
+aliasing AND better cache behavior (distant surfaces read tiny, cache-friendly levels).</code></pre>
+<p>Trilinear filtering blends between two adjacent mip levels (to hide the seams where the level switches), and anisotropic filtering samples the texture multiple times along the direction of greatest compression (for surfaces at grazing angles, like a road stretching to the horizon) — the highest-quality, and it's a per-sample cost you budget.</p>
+
+<h3>sRGB and gamma: 0.5 is not half-bright</h3>
+<div class="diagram" data-diagram="c5-srgb" data-caption="sRGB stores color non-linearly (matching the eye); 0.5 in sRGB is only ~0.22 in linear light. Do lighting in linear space and let the hardware convert at the texture read and the framebuffer write."></div>
+<p>This is the one that silently ruins images. Color textures are stored in <strong>sRGB</strong>, a non-linear encoding that matches human perception (we're more sensitive to dark tones, so sRGB gives them more of the byte range). The consequence, executed:</p>
+<pre><code>sRGB 0.5 → linear:  0.5^2.2 ≈ 0.2176   (exact piecewise sRGB: 0.2140)
+so a "50% grey" texel is only ~22% of the light of white — NOT half.
+average two lit sRGB values directly → the result is too dark ("muddy blend",
+  dark fringes on transparency, wrong-looking gradients).</code></pre>
+<p>The discipline every correct renderer follows: sample sRGB textures through an sRGB image format so the hardware converts them to <strong>linear</strong> light for you; do <em>all</em> lighting and blending math in linear space (where adding light is physically meaningful); then write to an sRGB target so the hardware encodes back for the display. Linear in the middle, sRGB at the ends. Skip this — do lighting on raw sRGB values — and everything is subtly, pervasively wrong: too-dark midtones, muddy blends, incorrect highlights. It's M1 L8's "know what your numbers actually represent" as a rendering law: a texel's byte is not its brightness until you decode the gamma.</p>
+
+<h3>Compressed formats: textures are bandwidth citizens</h3>
+<p>Textures are often a renderer's biggest memory and bandwidth consumer (4.6), so GPUs support compressed formats — BC (Block Compression, desktop) and ASTC (mobile) — that stay compressed in memory and are decompressed by the sampler on the fly, at a fixed ratio (typically 4:1 to 8:1). The trade: a small, usually-imperceptible quality loss for a large bandwidth and memory win. Since C2 established that many frames are bandwidth-bound, compressed textures are one of the highest-leverage optimizations — 4.6's bus economics applied to the single biggest thing crossing the bus.</p>
+
+<h2>Worked example</h2>
+<div class="card">
+<p><strong>Task:</strong> Demonstrate the gamma bug numerically — show that blending two colors in sRGB gives a different (wrong) result than blending in linear light. Prediction first: blend 0% and 100% grey (0.0 and 1.0) at 50% — does it matter whether you blend in sRGB or linear, and which is "correct"?</p>
+<pre><code>blend black (0.0) and white (1.0) at t=0.5:
+  in sRGB space:   0.5·0.0 + 0.5·1.0 = 0.5 (sRGB) → decode → linear 0.5^2.2 = 0.218
+  in linear space: decode ends first (0.0, 1.0), blend → 0.5 linear → encode → sRGB 0.5^(1/2.2)=0.73
+Prediction: the two disagree, and linear is correct.
+Result: the sRGB blend yields linear 0.218 (a dark grey); the linear blend yields
+  linear 0.5 (true middle grey), which displays as sRGB ~0.73. The naive sRGB
+  blend is more than 2× too dark in linear light — the classic muddy midtone.</code></pre>
+<p><strong>What to internalize:</strong> a 50/50 blend of black and white should be middle grey in <em>light</em>, and only the linear-space blend produces it — the sRGB blend produces something less than a quarter of the light, visibly too dark. This single arithmetic fact is behind a whole family of "why does my game look muddy / why are my transparent edges dark / why do my gradients band" complaints: they're all lighting or blending done on gamma-encoded values that should have been decoded to linear first. The fix is architectural, not per-shader: mark color textures as sRGB (hardware decodes on read), do everything in linear, mark the output as sRGB (hardware encodes on write). Get the pipeline's color space right once and an entire class of subtle image bugs never appears. It's the perfect graphics example of M1 L8's core lesson — a number is meaningless until you know what it represents, and an sRGB 0.5 represents 0.22 units of light, not 0.5.</p>
+</div>
+
+<h2>Key points</h2>
+<ul class="keypoints">
+<li>Bilinear filtering blends the four texels around a sample (a lerp of lerps) in fixed-function silicon — free versus doing four taps yourself; it fixes magnification blockiness.</li>
+<li>Mipmaps are prefiltered half-resolution chains that fix minification aliasing; the hardware picks the level from the 2×2 quad's UV derivatives (C2 — the helper lanes' purpose), costing +1/3 memory (executed: sum (1/4)^k = 0.333).</li>
+<li>Trilinear blends adjacent mip levels; anisotropic filtering samples along the direction of greatest compression for grazing-angle surfaces (a per-sample cost to budget).</li>
+<li>sRGB stores color non-linearly to match the eye, so sRGB 0.5 ≈ 0.218 linear (executed) — a "50% grey" texel is ~22% of white's light, not half.</li>
+<li>Do lighting/blending in linear space: sample sRGB textures (hardware decodes), compute in linear, write to sRGB (hardware encodes) — skip it and every image is subtly muddy (M1 L8 for color).</li>
+<li>Compressed textures (BC/ASTC) stay compressed in memory and decompress in the sampler at 4:1–8:1 — a large bandwidth/memory win (4.6) for the renderer's biggest data.</li>
+</ul>
+
+<h2>Quiz</h2>
+<div class="quiz">
+  <div class="q">1. A game's art looks "muddy" — midtones too dark, transparent edges have dark fringes, gradients band. An artist keeps brightening textures to compensate, which helps some assets and breaks others. What's the root cause and the real fix?</div>
+  <button class="opt">The monitor is miscalibrated; adjust its gamma</button>
+  <button class="opt" data-c="1">The renderer is doing lighting and blending on gamma-encoded (sRGB) values instead of linear light. Since sRGB 0.5 is only ~0.22 in linear (executed), blending and lighting on those values comes out too dark and produces dark transparency fringes and banded gradients. Brightening textures is a per-asset hack that can't fix a pipeline-wide encoding error. The real fix is architectural: mark color textures sRGB (hardware decodes to linear on read), do ALL lighting/blending in linear space, and write to an sRGB target (hardware encodes for display) — get the color space right once and the whole class of bugs disappears</button>
+  <button class="opt">The textures are too low-resolution; use higher-res art</button>
+  <button class="opt">The mipmaps are wrong; regenerate them</button>
+  <div class="expl">The artist's per-asset brightening that "helps some, breaks others" is the fingerprint of a systemic gamma error, not an asset problem (options 2/3/4 all treat symptoms per-asset). Option 1 externalizes it to hardware. The correct answer identifies the root cause — computing on sRGB values that should be linear — with the executed 0.22 number, and gives the architectural fix (decode on read, linear in the middle, encode on write). This is M1 L8's "a number needs an interpretation" as a whole-pipeline discipline: the muddy look is a units error, and you fix units once, not per-asset.</div>
+</div>
+<div class="quiz">
+  <div class="q">2. A textured road stretching to the horizon shimmers and aliases in the distance despite bilinear filtering being on. What's missing, and why doesn't bilinear alone fix it?</div>
+  <button class="opt">Nothing's missing; increase the texture resolution until it stops</button>
+  <button class="opt" data-c="1">Mipmaps (and ideally anisotropic filtering) are missing. Bilinear filtering blends 4 texels around ONE sample point, which fixes magnification (texture bigger than screen) but not MINIFICATION — in the distance many texels map to one pixel, and sampling 4 of thousands still aliases. Mipmaps fix it by prefiltering the texture to lower resolutions and picking the level with ~1 texel per pixel (via the quad's derivatives, C2). The road at a grazing angle is compressed much more in one direction, so anisotropic filtering — sampling along that direction — is what makes it crisp rather than blurry</button>
+  <button class="opt">Bilinear is the wrong filter; switch to nearest-neighbor</button>
+  <button class="opt">The far plane is too far; pull it in</button>
+  <div class="expl">Option 1 (higher res) makes it worse — more texels per pixel means more aliasing without mips. Option 3 (nearest) removes filtering entirely, aliasing harder. The correct answer distinguishes magnification (bilinear's job) from minification (mipmaps' job): bilinear samples 4 texels at one point, which can't represent the thousands of texels a distant pixel covers, so it shimmers. Mipmaps prefilter and the quad-derivatives pick the level; anisotropic handles the grazing-angle compression of a receding road. Knowing that bilinear fixes magnification but mipmaps fix minification is the core sampling insight.</div>
+</div>
+
+<h2>Exercises</h2>
+<details><summary>Exercise 1 — In NumPy, demonstrate the gamma bug: blend two sRGB colors (e.g. a saturated red and green, or black and white) at 50% both in sRGB space and in linear space (decode, blend, re-encode). Show the results differ and that the linear blend is the physically correct middle. Then compute sRGB 0.5 → linear both with the 2.2 approximation and the exact piecewise sRGB curve.</summary><div class="body">
+<pre><code>sRGB 0.5 → linear: 2.2-power = 0.2176 ; exact piecewise = 0.2140 (executed)
+black/white 50% blend: sRGB-space → 0.218 linear (too dark);
+                       linear-space → 0.5 linear (correct middle, displays sRGB 0.73)
+</code></pre>
+<p>Expected: the two blend paths give visibly different colors, and the linear one is the true 50% of light. The red+green case is even more striking — blending in sRGB gives a dark muddy brown, in linear a bright yellow-ish mix. Deliverable: the two blended colors side by side and the two sRGB-to-linear numbers. Doing this by hand makes "always work in linear" stop being a rule you follow and start being a fact you've seen: sRGB 0.5 really is 0.22 of the light, so math on it is math on the wrong quantity (M1 L8).</p>
+</div></details>
+<details><summary>Exercise 2 — Verify the mipmap memory series and reason about cache: compute sum (1/4)^k for a full chain and confirm it's 1/3. Then argue why mipmaps improve texture-cache behavior for distant objects, connecting to 4.5's locality.</summary><div class="body">
+<p>Expected: the geometric series (1/4 + 1/16 + ...) sums to 1/3, so a full mip chain adds ~33% memory (executed: 0.3333). The cache argument: a distant object samples a SMALL mip level (few KB) instead of the full-resolution base (many MB), so its texture reads hit a tiny, cache-resident working set — far better locality (4.5) than thrashing the huge base texture would give. So mipmaps aren't just anti-aliasing; they're a bandwidth and cache optimization (distant = small level = cache-friendly), which is why they're on by default in every renderer despite the 33% cost. Deliverable: the series sum and a one-paragraph note linking mip level to working-set size and cache behavior. Mipmaps are 4.5's locality engineered into the asset.</p>
+</div></details>
+
+<hr>
+<h1>Go deeper — the sampler as a hardware unit</h1>
+
+<h2>1. The filtering ladder</h2>
+<pre><code>filter          samples         fixes                    cost
+──────────────  ──────────────  ───────────────────────  ──────────────
+nearest         1 texel         nothing (blocky)         cheapest
+bilinear        4 texels        magnification blockiness  ~free (silicon)
+trilinear       8 (2 mip levels) mip-level seams          2× bilinear taps
+anisotropic Nx  up to N×        grazing-angle blur        up to N× taps (budget it)
+rule: bilinear+mipmaps+trilinear is the sane default; crank anisotropy (4×–16×)
+on surfaces seen at grazing angles (floors, roads, terrain) where it visibly helps.
+the quad's derivatives (C2) drive mip selection AND the anisotropy direction.</code></pre>
+
+<h2>2. The color-space pipeline, drawn</h2>
+<pre><code>sRGB texture → [hardware decode on read] → LINEAR → your lighting/blending math
+  → LINEAR result → [hardware encode on write] → sRGB framebuffer → display
+do's:  mark color textures as sRGB formats; mark the swapchain/target sRGB;
+       keep normal maps / roughness / metallic as LINEAR (they're data, not color!)
+don'ts: light on sRGB values (muddy); store normals as sRGB (decodes your data wrongly);
+        gamma-correct twice (double-encoded, washed out)
+the subtle one: data textures (normal, roughness, AO) are NOT color — they must be
+LINEAR, or the hardware's sRGB decode corrupts your carefully-authored values.</code></pre>
+
+<h2>3. Textures as the bandwidth budget</h2>
+<pre><code>textures are usually the biggest thing crossing the bus (4.6):
+  · compressed formats (BC7 desktop, ASTC mobile): 4:1–8:1, decoded in the sampler
+    → the single highest-leverage memory/bandwidth win in most renderers
+  · mipmaps: distant objects read tiny levels → less bandwidth + cache-friendly (4.5)
+  · texture atlases / arrays / bindless (C4): fewer bind changes, better batching
+budgeting: a 4K texture uncompressed is ~64 MB; BC7 makes it ~16 MB. Multiply by
+hundreds of textures and compression is the difference between fitting in VRAM or not.</code></pre>
+
+<h2>Gotchas</h2>
+<div class="gotcha"><strong>Doing lighting on sRGB values.</strong> sRGB 0.5 ≈ 0.22 linear, so lighting/blending on encoded values is math on the wrong quantity → muddy midtones, dark transparency fringes. Decode to linear on read, encode on write (quiz 1).</div>
+<div class="gotcha"><strong>Storing normal/roughness/AO maps as sRGB.</strong> These are DATA, not color — an sRGB decode corrupts them. Mark data textures LINEAR; only color/albedo textures are sRGB. Mixing this up is a common, subtle materials bug.</div>
+<div class="gotcha"><strong>No mipmaps on minified textures.</strong> Bilinear fixes magnification, not minification — distant textures shimmer without mipmaps. Generate mips; they cost +33% memory and are almost always worth it (quiz 2).</div>
+<div class="gotcha"><strong>Gamma-correcting twice.</strong> Decoding an already-linear value, or encoding an already-sRGB output again, washes the image out. Know each texture's and target's color space and apply the conversion exactly once (Go-deeper §2).</div>
+<div class="gotcha"><strong>Cranking 16× anisotropy everywhere.</strong> Anisotropic filtering is a per-sample multiplier; applying max anisotropy to every surface wastes texture bandwidth. Use it where grazing angles make it visible (floors, roads), lower elsewhere.</div>
+<div class="gotcha"><strong>Shipping uncompressed textures.</strong> A few hundred 4K uncompressed textures won't fit in VRAM; compressed (BC7/ASTC) they do, at imperceptible quality loss. Compression is the default, not an optimization to skip (4.6).</div>
+
+<h2>Scenario — the muddy game that a units error explained</h2>
+<p>A studio's game looks subtly wrong in a way nobody can pin down: midtones are dingy, skin looks lifeless, transparent particle edges have dark halos, and smooth gradients band. The art team compensates the only way they know — brightening and re-saturating textures — which improves some scenes and wrecks others, and the inconsistency grows until the game looks worse than when they started. A graphics engineer new to the team asks a single question from this lesson: "are we lighting in linear space?" The answer, buried in the pipeline, is no — color textures were being sampled as raw values and fed straight into lighting and blending, so every calculation operated on sRGB-encoded numbers where a "0.5" grey is really 0.22 units of light. Every lit midtone came out too dark, every alpha blend darkened its edges, every gradient banded because the encoding is non-linear where the math assumed linear. He proves it in a scratch script — the black/white 50% blend giving 0.218 instead of 0.5 (the executed worked example) — and then fixes it architecturally: color textures marked sRGB so the hardware decodes on read, all lighting and blending moved to linear, the framebuffer marked sRGB so the hardware encodes on write, and crucially the normal/roughness/AO maps switched to linear because they're data, not color. The muddiness vanishes across the entire game at once, and the art team's frantic per-asset brightening — which was fighting the encoding error one texture at a time — gets reverted, because the assets were fine; the pipeline was computing on the wrong quantity. The morals are C5's and the course's. First, a whole game's worth of "looks slightly off" was one units error, invisible because sRGB 0.5 and linear 0.5 are both "0.5" until you know what the number means — M1 L8's deepest lesson, that a value is meaningless without its interpretation, rendered in pixels. Second, the right fix for a systemic error is systemic: brightening textures treated the symptom per-asset and could never converge, while fixing the color-space pipeline once fixed everything. The engineers who reach for the gamma question when a game looks muddy save the months that per-asset compensation burns.</p>
+
+<h2>Practice</h2>
+<details><summary>1. Why does bilinear filtering fix magnification but not minification, and what fixes minification?</summary><div class="body">Bilinear blends the 4 texels around a single sample point. Under magnification (texture larger than its screen footprint, so few texels per pixel) those 4 texels are a good local approximation, smoothing the blockiness — it works. Under minification (texture smaller than its texel count on screen, so MANY texels per pixel), sampling 4 of potentially thousands of texels can't represent the average of all of them, so the result shimmers and aliases as the camera moves. Minification is fixed by mipmaps: prefiltered lower-resolution versions where ~1 texel maps to 1 pixel, chosen by the quad's UV derivatives (C2), optionally with anisotropic filtering for grazing angles. Bilinear = magnification; mipmaps = minification.</div></details>
+<details><summary>2. Compute sRGB 0.75 → linear (2.2 approximation) and explain what a 50/50 linear blend of sRGB 0.0 and sRGB 1.0 should display as.</summary><div class="body">sRGB 0.75 → linear ≈ 0.75^2.2 ≈ 0.53. For the blend: decode 0.0→0.0 and 1.0→1.0 (linear), blend at 50% → linear 0.5 (true middle grey, half the light of white), then encode back to sRGB: 0.5^(1/2.2) ≈ 0.73. So a correct 50/50 blend of black and white displays as sRGB ~0.73, NOT sRGB 0.5. (Blending in sRGB directly would give sRGB 0.5 = linear 0.22, far too dark.) The lesson: perceptually-correct middle grey is sRGB ~0.73 because the encoding is non-linear — which is exactly why blending must happen in linear space.</div></details>
+<details><summary>3. Why must normal maps and roughness maps be stored as LINEAR, not sRGB, textures?</summary><div class="body">Because they store DATA, not perceived color. A normal map encodes XYZ vector components in RGB; a roughness map encodes a physical roughness value. sRGB is a perceptual encoding for COLOR — if you mark a normal map sRGB, the hardware applies the sRGB→linear decode on read, which non-linearly distorts your carefully-authored vector/roughness values, corrupting the lighting that depends on them. So color/albedo textures are sRGB (they're perceived color and should be decoded to linear light), but data textures (normal, roughness, metallic, AO, height) must be LINEAR so their values pass through unmodified. Mixing this up is a classic subtle materials bug — lighting that's "a bit off" on every surface.</div></details>
+<details><summary>4. Derive the mipmap memory overhead and explain the cache benefit for distant objects.</summary><div class="body">Each mip level is half the width and half the height of the previous, so 1/4 the texels. The chain adds 1/4 + 1/16 + 1/64 + ... = a geometric series with ratio 1/4, summing to (1/4)/(1-1/4) = 1/3. So a full mip chain costs +33% memory (executed 0.3333). Cache benefit: a distant object whose texture is minified samples a small mip level — a few KB — rather than the multi-MB base texture, so its texture reads hit a tiny working set that stays resident in cache (4.5's locality). Without mips, distant objects would sample scattered texels across the huge base texture, thrashing the cache. So mipmaps simultaneously fix aliasing AND reduce bandwidth/improve cache locality for distant geometry — locality engineered into the asset.</div></details>
+<details><summary>5. When would you increase anisotropic filtering, and why not just set it to 16× everywhere?</summary><div class="body">Increase anisotropy on surfaces viewed at grazing angles — floors, roads, terrain, walls seen edge-on — where the texture is compressed far more in one screen direction than the other. Isotropic filtering (bilinear/trilinear) blurs these because it assumes roughly equal compression in both directions; anisotropic filtering samples multiple times along the direction of greatest compression, keeping them crisp. You don't set 16× everywhere because anisotropic filtering is a per-sample cost multiplier (up to N× the texture taps and bandwidth), so maxing it on surfaces that don't need it (facing the camera, where 1× suffices) wastes bandwidth for no visible gain. The discipline: high anisotropy where grazing angles make it visible, low where they don't — spend the sampling budget where the eye can tell.</div></details>
+<details><summary>6. Explain the full color-space journey of an albedo texture from disk to display, naming where each conversion happens.</summary><div class="body">On disk the albedo is sRGB-encoded (perceptual). At sample time, because the texture is bound as an sRGB format, the hardware decodes it to LINEAR light automatically on read — no shader code needed. Your fragment shader then does all lighting and blending in linear space, where adding and scaling light is physically meaningful (so a 50/50 blend is a true mid-brightness). The linear result is written to the framebuffer; because the render target is marked as an sRGB format, the hardware encodes the linear value back to sRGB on write. The display then shows the sRGB values. So: sRGB on disk → hardware decode to linear on read → linear math → hardware encode to sRGB on write → display. The conversions are the two hardware steps at the read and the write; your math lives in linear in between, and doing it anywhere else (or twice) is the muddy-image bug.</div></details>
+<details><summary>7. The interview closer: "A game looks muddy and washed out. How do you diagnose it?" Deliver the spoken skeleton.</summary><div class="body">"My first suspect is the color-space pipeline — specifically, whether lighting and blending are happening in linear space or on gamma-encoded sRGB values. sRGB is a perceptual encoding, so a value of 0.5 in sRGB is only about 0.22 in linear light, which means any lighting or blending done on encoded values comes out too dark and produces muddy midtones, dark transparency fringes, and banded gradients — exactly the 'muddy' symptom. I'd verify by checking whether color textures are bound as sRGB formats (so the hardware decodes to linear on read) and whether the render target is sRGB (so it encodes on write); if the pipeline is lighting on raw texture values, that's the bug. The fix is architectural, not per-asset: mark color/albedo textures sRGB, do all lighting and blending in linear space, mark the output sRGB — and critically, keep data textures like normal, roughness, and AO maps LINEAR, because they're data, not color, and an sRGB decode would corrupt them. I'd specifically look out for two related mistakes: gamma-correcting twice, which washes everything out, and artists brightening textures to compensate, which is a symptom-chasing hack that can't fix a systemic encoding error. The insight I'd want to land is that this is a units error — a texel's byte isn't its brightness until you decode the gamma — so it's invisible until you ask the right question, and you fix it once at the pipeline level, not per-asset.' Reaching for 'are we in linear space?' first is the answer that shows I've shipped real rendering."</div></details>
+
+<div class="pager">
+  <a href="lesson-04.html">← GLSL Shaders Deep Dive</a>
+  <a href="lesson-06.html">Next: Lighting — Phong to PBR →</a>
+</div>
+<div class="footer">GPU Mastery · Track C · Lesson 5 — works offline · progress saved in your browser</div>
+</div>
+<script src="../assets/diagramsC.js"></script>
+<script src="../assets/app.js"></script>
+</body>
+</html>

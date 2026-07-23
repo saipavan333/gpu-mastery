@@ -1,0 +1,162 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>C2 The Rasterization Pipeline — GPU Mastery</title>
+<link rel="stylesheet" href="../assets/style.css">
+</head>
+<body data-lesson="cl2">
+<nav><div class="inner">
+  <a class="logo" href="../index.html">GPU<span>Mastery</span></a>
+  <a class="item" href="../index.html">Home</a>
+  <a class="item on" href="../curriculum.html">Curriculum</a>
+  <a class="item" href="../labs.html">Labs</a>
+  <a class="item" href="../setup.html">Lab setup</a>
+  <a class="item" href="../prompt.html">Generator prompt</a>
+</div></nav>
+<div class="wrap">
+
+<div class="lesson-top">
+  <div><span class="badge">Track C · Lesson 2</span><span class="badge dim">≈ 3.5 h</span></div>
+  <button id="donebtn" class="donebtn">Mark lesson complete</button>
+</div>
+<h1>The Rasterization Pipeline — where your shaders meet the silicon</h1>
+<p class="lead">C1's vertices become pixels here. The rasterization pipeline is a fixed sequence of stages, two of which you program (vertex and fragment) and three of which are fixed-function silicon. The whole thing runs on the same SIMT hardware you learned in Module 4 — fragments even come in 2×2 quads that create "helper lanes," a divergence cost hiding in plain sight. Understand the pipeline as hardware and the mysterious performance cliffs of real engines become named, predictable costs.</p>
+
+<h2>Concept</h2>
+
+<h3>The stages: programmable shaders between fixed-function silicon</h3>
+<div class="diagram" data-diagram="c2-pipeline" data-caption="Input assembly → vertex shader → rasterizer → fragment shader → raster ops. You write VS and FS (SIMT warps); the rasterizer and ROP are fixed-function hardware you configure."></div>
+<p>A draw call flows through five logical stages. <strong>Input Assembly</strong> (fixed) reads vertices and assembles triangles. The <strong>Vertex Shader</strong> (yours) runs C1's transform per vertex. The <strong>Rasterizer</strong> (fixed) converts each triangle into the fragments (candidate pixels) it covers. The <strong>Fragment Shader</strong> (yours) computes a color per fragment. <strong>Raster Ops</strong> (fixed) does the depth test and blends the result into the framebuffer. The two programmable stages — VS and FS — are SIMT kernels: they run in warps (4.4), obey the same occupancy and divergence rules (5.6), and read memory through the same hierarchy (4.5). The fixed stages are dedicated silicon, like the RT cores you'll meet in C9 — you configure them with state, you don't write code for them. This split is the mental model that makes graphics performance legible: a slow frame is either too much programmable work (fat shaders) or too much fixed-function traffic (overdraw, bandwidth).</p>
+
+<h3>Fragments arrive in 2×2 quads — hello, helper lanes</h3>
+<div class="diagram" data-diagram="c2-quad" data-caption="The rasterizer shades pixels in 2×2 quads so it can compute screen-space derivatives by differencing neighbors. Fragments outside the triangle still run as 'helper lanes' whose output is discarded."></div>
+<p>Here is a hardware fact with real performance consequences: fragment shaders always run on 2×2 quads of pixels, never single pixels. Why? Because the GPU computes screen-space derivatives (<code>dFdx</code>, <code>dFdy</code>) by simply differencing a value across the quad — the pixel to my right minus me. Those derivatives are what pick the mipmap level (C5), so the hardware needs the quad to exist. The cost: when a triangle's edge cuts through a quad, the fragments outside the triangle still execute — as <strong>helper lanes</strong> — purely to provide neighbors for the derivative, and their output is thrown away. This is 5.6's divergence wearing a graphics hat: every triangle edge wastes up to 3 of 4 lanes in the boundary quads. Tiny triangles (a few pixels each) are catastrophic — a 1-pixel triangle runs a full 4-lane quad for one useful result, 75% waste. That single fact explains why over-tessellation and dense foliage murder framerate, and why "quad overdraw" is a metric RenderDoc reports (C10).</p>
+
+<h3>Barycentric interpolation: every pixel is a blend of three vertices</h3>
+<div class="diagram" data-diagram="c2-barycentric" data-caption="A fragment's attributes are a weighted blend of the triangle's three vertices; the weights (barycentric coordinates) are the area ratios of the three sub-triangles and sum to 1."></div>
+<p>The rasterizer hands each fragment three weights — barycentric coordinates α, β, γ — that say how much of each vertex it is. Any per-vertex attribute (color, UV, normal) is interpolated as <code>α·vA + β·vB + γ·vC</code>. The weights are the area ratios of the three sub-triangles the fragment forms with the vertices, and they sum to 1. Executed for a concrete point:</p>
+<pre><code>triangle A(0,0) B(4,0) C(0,3), point P(1,1), total area 6:
+  α = area(PBC)/6 = 0.4167   β = area(PCA)/6 = 0.2500   γ = area(PAB)/6 = 0.3333
+  α + β + γ = 1.0000  ✓
+  interpolate vertex values (10, 20, 30): 0.4167·10 + 0.25·20 + 0.3333·30 = 19.167</code></pre>
+<p>But there's a catch from C1: these weights are computed in screen space, and naive screen-space interpolation is <em>affine</em>, which is wrong under perspective. The correct result requires perspective correction — interpolate <code>attribute/w</code> and <code>1/w</code>, then divide (C1 §2). The hardware does this for you by default; the visible bug when it's skipped is the PS1 texture wobble, next.</p>
+
+<h3>Perspective-correct vs affine, and z-buffer precision</h3>
+<div class="diagram" data-diagram="c2-zbuffer" data-caption="Standard depth (z/w) clusters precision near the camera, so far objects z-fight; reverse-Z pairs floating-point's dense-near-zero with the near plane to spread precision evenly."></div>
+<p>Two precision stories close the pipeline. First, <strong>perspective correction</strong>: affine interpolation (ignoring w) makes textures swim on large, angled triangles — the retro-console look. Perspective-correct interpolation (via 1/w) fixes it and is the default in every modern API. Second, the <strong>z-buffer</strong>: because depth gets packed through the perspective divide, standard depth (z/w) spends most of its bits on the nearest few percent of the view, leaving far objects with too few distinct values — they "z-fight" (flicker as the GPU can't decide which is in front). And using fp32 depth makes it <em>worse</em>, because float precision is also densest near zero, doubling up where you don't need it (M1 L8 meets graphics). The fix everyone uses is <strong>reverse-Z</strong>: map the near plane to 1 and the far plane to 0, so float's dense-near-zero region lines up with the far distances that needed help. It's a one-line change that dramatically improves depth precision — and a perfect example of graphics being applied numerical analysis.</p>
+
+<h2>Worked example</h2>
+<div class="card">
+<p><strong>Task:</strong> Predict the fragment-shader efficiency of a mesh as its triangles shrink, using the quad rule. A model is drawn twice: once as large triangles (~1000 px each) and once over-tessellated into ~4 px triangles. Prediction first: how does the fraction of wasted (helper-lane) fragment work change, and what does that do to the framerate?</p>
+<pre><code>quad rule: fragments shade in 2×2 blocks; fragments outside the triangle in an
+  edge quad run as helper lanes and are DISCARDED.
+large triangles (~1000 px): edges touch few quads relative to the interior
+  → wasted lanes ≈ (edge pixels)/(area) is tiny → ~near 100% useful. Efficient.
+tiny triangles (~4 px): almost every quad is a boundary quad
+  → a 1-px triangle occupies a 4-lane quad for 1 useful result = 75% wasted
+  → over-tessellation can HALVE or worse the effective fragment throughput
+Result: same visible model, but the tessellated version pays 2–4× the fragment
+  cost for pixels you can't even see the extra detail in — a framerate killer.</code></pre>
+<p><strong>What to internalize:</strong> this is why "more triangles = better" is a beginner's trap and why engines fight to keep triangles at least a handful of pixels (and why Nanite-style systems exist — to keep triangle density near one-per-pixel, not less). The quad is a fixed hardware quantum: sub-pixel and few-pixel triangles waste the majority of their fragment lanes on helper work whose output is thrown away, exactly 5.6's divergence penalty. The metric that exposes this is "quad overdraw" or "helper lane %" in RenderDoc/Nsight (C10), and the fix is LOD (level of detail) — draw distant, small objects with fewer triangles. The pipeline being SIMT hardware isn't trivia; it's the reason a specific, common art decision (over-tessellation) has a specific, measurable performance cost you can predict from first principles.</p>
+</div>
+
+<h2>Key points</h2>
+<ul class="keypoints">
+<li>The pipeline is five stages: input assembly, vertex shader (yours), rasterizer, fragment shader (yours), raster ops — the two shader stages are SIMT warps (4.4/5.6), the other three are fixed-function silicon you configure.</li>
+<li>Fragments shade in 2×2 quads so the hardware can compute screen-space derivatives by differencing neighbors — those derivatives pick the mip level (C5).</li>
+<li>Triangle-edge quads run helper lanes (fragments outside the triangle) whose output is discarded — 5.6's divergence, so tiny triangles waste up to 75% of fragment work (the over-tessellation cliff).</li>
+<li>A fragment's attributes are a barycentric blend α·vA+β·vB+γ·vC of the three vertices; the weights are area ratios summing to 1 (executed: 0.417/0.25/0.333, interp 19.167).</li>
+<li>Screen-space interpolation must be perspective-corrected via 1/w (C1) or textures swim (the affine/PS1 artifact) — hardware does this by default.</li>
+<li>Standard depth (z/w) clusters precision near the camera and fp32 worsens it (M1 L8), causing far-object z-fighting; reverse-Z (near→1, far→0) spreads precision evenly and is standard practice.</li>
+</ul>
+
+<h2>Quiz</h2>
+<div class="quiz">
+  <div class="q">1. An artist increases a distant forest's tessellation 8× for "better detail." Framerate craters even though the forest looks identical at that distance. A programmer blames "vertex shader load." Using the pipeline-as-hardware model, what's the more likely dominant cost?</div>
+  <button class="opt">Vertex shader load — 8× vertices means 8× vertex work, that's the whole story</button>
+  <button class="opt" data-c="1">The dominant cost is almost certainly fragment-side, from the 2×2 quad rule: at 8× tessellation the triangles are now a few pixels each, so nearly every shaded quad is a boundary quad running helper lanes whose output is discarded — up to 75% wasted fragment work (5.6 divergence). The vertices also cost more, but the quad-overdraw explosion on tiny triangles is the framerate killer, and it produces zero visible benefit at that distance. Fix: LOD — fewer triangles for distant objects. Verify with RenderDoc's quad-overdraw view (C10)</button>
+  <button class="opt">The GPU ran out of memory for the extra vertices</button>
+  <button class="opt">Nothing is wrong; more detail always costs proportionally more</button>
+  <div class="expl">Option 1 is half-right but misses the bigger cost — vertex work scales ~8× linearly, but the fragment helper-lane waste scales super-linearly as triangles cross below the quad size, which is why the cliff is so steep. Option 4 misses that the cost here buys NO visible detail (the forest is far away). The correct answer applies the quad rule: tiny triangles turn the fragment stage into mostly-discarded helper-lane work, the exact mechanism behind the over-tessellation cliff, and names the tool (quad overdraw) and fix (LOD). Seeing the fragment stage as SIMT hardware with a fixed 2×2 quantum is what makes this predictable rather than mysterious.</div>
+</div>
+<div class="quiz">
+  <div class="q">2. A large ground plane textures fine up close but the texture "swims" and warps toward the horizon; separately, distant fence posts flicker against the sky. Are these the same bug?</div>
+  <button class="opt">Yes — both are the texture sampler misconfigured</button>
+  <button class="opt" data-c="1">No — two different precision problems. The swimming texture is missing perspective-correct interpolation: UVs interpolated affinely (without the 1/w correction, C1) warp on large angled triangles. The flickering fence posts are z-fighting: standard depth precision clusters near the camera (worsened by fp32, M1 L8), so distant surfaces at similar depths get the same quantized z and fight. Fixes are different: perspective-correct varyings for the first (usually default), reverse-Z depth for the second. Same region of the screen, unrelated causes</button>
+  <button class="opt">Yes — both are fixed by increasing the far plane distance</button>
+  <button class="opt">No — the swim is a GPU driver bug and the flicker is a monitor issue</button>
+  <div class="expl">It's tempting to lump "distance artifacts" together, but they're distinct pipeline-precision issues. Option 3's far-plane change actually makes z-fighting WORSE (a larger depth range spreads the same bits thinner). Option 4 externalizes both to hardware. The correct answer separates them: affine-interpolation swim (a 1/w problem in interpolation) versus z-buffer precision clustering (a depth-encoding problem fixed by reverse-Z). Both trace to C1's perspective divide — one in how attributes interpolate, one in how depth quantizes — which is why understanding the divide pays off across the whole pipeline.</div>
+</div>
+
+<h2>Exercises</h2>
+<details><summary>Exercise 1 — In NumPy, compute barycentric coordinates for several points in a triangle (inside, on an edge, at a vertex, outside) via the area-ratio method. Confirm the weights sum to 1 inside, that a vertex gives (1,0,0), and that an outside point yields a negative weight. Then interpolate a vertex attribute and check it against a direct linear blend.</summary><div class="body">
+<p>Expected: interior points give three positive weights summing to 1 (executed: P(1,1) in A(0,0)B(4,0)C(0,3) → 0.417/0.25/0.333); a vertex gives that vertex weight 1 and the others 0; an edge point gives one weight 0; an OUTSIDE point gives at least one NEGATIVE weight — which is exactly how the rasterizer decides a fragment is outside the triangle (all three weights must be ≥ 0 to be covered). Interpolating (10,20,30) at P gives 19.167, matching the direct blend. Deliverable: the weight table for your test points and a one-line note that "coverage test = all barycentrics ≥ 0" — that's how the fixed-function rasterizer works, and now it's not magic.</p>
+</div></details>
+<details><summary>Exercise 2 — Simulate the quad helper-lane waste: for triangles of size 1000, 64, 16, and 4 pixels, estimate the fraction of shaded fragments that are helper lanes (outside the triangle but in a boundary quad). Plot waste vs triangle size and mark where it becomes catastrophic. Relate the curve to LOD strategy.</summary><div class="body">
+<p>Expected: waste is negligible for large triangles (boundary quads are a tiny fraction of the interior) and rises sharply as triangle size approaches the 2×2 quad — a 4-px triangle can waste ~50–75% of its fragment lanes. The curve is the quantitative case for LOD: past a certain screen size, shrinking triangles buys no visible detail but pays escalating helper-lane tax (the worked example, measured). Deliverable: the waste-vs-size numbers and the triangle size below which you'd switch to a lower-detail LOD. This turns "use LOD" from advice into a threshold you can defend — the over-tessellation cliff has a location, and you can compute it.</p>
+</div></details>
+
+<hr>
+<h1>Go deeper — the pipeline as a performance model</h1>
+
+<h2>1. Where a frame's time actually goes</h2>
+<pre><code>stage         bound by                         the classic pathology (C10)
+────────────  ──────────────────────────────  ───────────────────────────────
+vertex shader vertex count, shader complexity  over-tessellation (also fragment!)
+rasterizer    triangle count, tiny triangles   quad-overdraw on sub-pixel tris
+fragment      pixels × overdraw × shader cost   overdraw (shading a pixel N times)
+raster ops    framebuffer bandwidth (4.6)      fat G-buffers, MSAA bandwidth
+insight: "the GPU is slow" is never the diagnosis — one of these stages is the
+bottleneck (5.9's max-lane law: the slowest stage sets the frame time). You find
+which with a capture (C10), then attack that stage specifically.</code></pre>
+
+<h2>2. Overdraw: the fragment stage's silent tax</h2>
+<pre><code>overdraw = shading the same pixel more than once (a near wall drawn after a far one)
+  transparent objects: MUST draw back-to-front, so overdraw is unavoidable → budget it
+  opaque objects: draw front-to-back so the depth test rejects hidden fragments early
+  depth pre-pass: render depth only first, then shade — every pixel shaded ONCE
+the win is real: a scene with 3× overdraw does 3× the fragment work for the same
+image. Early-Z (the hardware rejecting occluded fragments before the FS runs) is
+your friend — but alpha-test and discard() defeat it, a common accidental cost.</code></pre>
+
+<h2>3. Reverse-Z: applied floating point (M1 L8, graphics edition)</h2>
+<pre><code>problem: depth ≈ z/w clusters values near the near plane; fp32 ALSO clusters
+  values near 0 → precision doubly wasted where you don't need it, starved far away.
+reverse-Z: map near→1.0, far→0.0 (flip the depth range, use GREATER depth test).
+  now fp32's dense-near-0 region lines up with the FAR distances → precision spreads
+  ~evenly across the view. z-fighting on distant geometry largely disappears.
+cost: one clip-space tweak + flip the depth compare + clear depth to 0. Standard in
+every serious renderer. It's M1 L8's "know where your floats are dense" as a
+rendering technique — the same numerical literacy, new domain.</code></pre>
+
+<h2>Gotchas</h2>
+<div class="gotcha"><strong>Assuming tiny triangles are cheap because they're small.</strong> The 2×2 quad makes sub-pixel triangles waste up to 75% of fragment lanes on discarded helper work (5.6). Small triangles are expensive per useful pixel — use LOD.</div>
+<div class="gotcha"><strong>Interpolating a value you computed in the vertex shader and expecting perspective correction.</strong> Varyings are perspective-corrected by default, but if you pre-divide or use a "noperspective" qualifier, you get affine swim. Let the hardware carry 1/w.</div>
+<div class="gotcha"><strong>Increasing the far plane to fix z-fighting.</strong> It makes z-fighting WORSE (same bits over a bigger range). The real fix is reverse-Z (or a closer far plane / farther near plane). Depth precision is about the near/far RATIO, not the absolute far distance.</div>
+<div class="gotcha"><strong>discard() or alpha-test defeating early-Z.</strong> When the FS can kill a fragment, the hardware often can't reject it before shading, so early-Z turns off and overdraw costs return. Use alpha-test sparingly and sort/pre-pass around it.</div>
+<div class="gotcha"><strong>Ignoring overdraw on transparency.</strong> Transparent surfaces can't use early-Z and must draw back-to-front, so stacked transparency (particles, foliage) multiplies fragment cost fast. Budget transparent overdraw explicitly (C10, C11).</div>
+<div class="gotcha"><strong>Confusing MSAA cost with resolution cost.</strong> MSAA runs the fragment shader per-pixel (not per-sample) but stores/resolves per-sample, so its cost is bandwidth (4.6) and memory, not shading — misdiagnosing it leads to the wrong optimization.</div>
+
+<h2>Scenario — the frame that tessellation ate</h2>
+<p>A team adds a hardware-tessellation pass to their terrain for "crisper distant mountains" and ships it to QA, where the framerate on the recommended GPU drops from a comfortable 60 to a juddering 38 — with no visible improvement anyone can point to in a screenshot. The graphics programmer's first instinct is the intuitive one: 60× more triangles means the vertex/tessellation stage is the bottleneck, so she spends a day optimizing the tessellation shader, which barely moves the number. Then she captures a frame in RenderDoc (C10) and looks at the quad-overdraw view: the distant terrain is a sea of red — triangles so small that the fragment stage is running mostly helper lanes, up to 75% of its work discarded (the quad rule, exactly the worked example). The tessellation didn't just add vertex work; it shattered the terrain into sub-pixel triangles that turned the fragment stage into a helper-lane furnace. The fix isn't a faster shader — it's a distance-based tessellation factor that keeps triangles at least ~8 pixels, plus an LOD system so far terrain uses coarse meshes. Framerate returns to 60, and the "crisper mountains" turn out to be invisible past a few hundred meters anyway. Two morals. First, the pipeline-as-hardware model predicts this: the moment triangles cross below the 2×2 quad size, the fragment stage's efficiency collapses, and no amount of vertex-shader tuning helps because the bottleneck moved (5.9's max-lane law — you optimized the wrong stage). Second, the eye is the customer, and detail the eye can't resolve is pure cost — the discipline of graphics is spending the 16.6 ms budget only where a human will see it, which is a judgment the profiler informs but the artist and engineer must make together.</p>
+
+<h2>Practice</h2>
+<details><summary>1. Why do fragment shaders run on 2×2 quads even for a single-pixel triangle, and what is the direct performance consequence?</summary><div class="body">Because the hardware computes screen-space derivatives (dFdx/dFdy) by differencing a value across the 2×2 quad — it needs all four pixels to exist to difference neighbors, and those derivatives drive mip selection (C5) and other per-pixel rates. Consequence: a triangle covering fewer than 4 pixels still launches a full 4-lane quad, so the fragments outside the triangle run as helper lanes and their output is discarded — up to 75% wasted fragment work for a 1-pixel triangle. This is 5.6's divergence at the pipeline level and the reason sub-pixel triangles are pathologically expensive per useful pixel.</div></details>
+<details><summary>2. Compute the barycentric weights for the centroid of triangle A(0,0), B(6,0), C(0,6), and interpolate vertex values (0, 30, 60).</summary><div class="body">The centroid is at (2,2) and by symmetry has equal weights: α = β = γ = 1/3 (each sub-triangle has 1/3 the area). Sum = 1 ✓. Interpolated value = (1/3)(0) + (1/3)(30) + (1/3)(60) = 30 — the average of the vertex values, as expected at the centroid. The area-ratio method: total area = 18; each sub-triangle (centroid to two vertices) has area 6; 6/18 = 1/3. This is the C2 executed method (0.417/0.25/0.333 for the off-center point) applied to the symmetric case.</div></details>
+<details><summary>3. Explain why interpolating texture coordinates affinely (without 1/w) causes the "swimming" artifact, and where the correction happens.</summary><div class="body">A texture coordinate is linear in world/clip space but NOT linear in screen space after the perspective divide — the divide warps the mapping. Interpolating UVs linearly in screen space (affine) therefore gives wrong values that shift as the triangle's screen projection changes with camera motion, producing the swimming/warping look on large angled triangles (the PS1 era, whose hardware lacked the correction). The fix (C1's 1/w): interpolate UV/w and 1/w linearly across the triangle, then divide per fragment to recover the perspective-correct UV. Modern hardware does this automatically for varyings; you only see the artifact if you bypass it (pre-dividing, noperspective, or a naive software rasterizer).</div></details>
+<details><summary>4. A scene has 3× average overdraw. What does that mean, what's the cost, and name two ways to reduce it for opaque geometry.</summary><div class="body">3× overdraw means each pixel is, on average, shaded 3 times — earlier draws are later covered by nearer surfaces, so 2/3 of the fragment work is ultimately hidden. Cost: ~3× the fragment-shader and framebuffer-bandwidth work for the same final image. Reductions for opaque geometry: (1) draw front-to-back so the depth test rejects occluded fragments before shading (early-Z); (2) a depth pre-pass — render depth only first, then shade, so every visible pixel is shaded exactly once. Both rely on early-Z, which is defeated by discard()/alpha-test, so keep those off the hot opaque path. Overdraw is the fragment stage's silent tax and a top target in a frame capture (C10).</div></details>
+<details><summary>5. Why does using fp32 for the depth buffer with standard (non-reversed) depth waste precision, and how does reverse-Z fix it?</summary><div class="body">Standard depth (≈ z/w) already clusters its representable values near the near plane because of the perspective divide. Floating-point ALSO packs its precision near zero. With standard depth, small depth values (near plane) get both effects, so precision piles up close to the camera where it's not needed and starves the far distances, causing distant z-fighting. Reverse-Z maps near→1.0 and far→0.0, so the far distances (which needed precision) now sit near 0 where fp32 is densest — the two distributions line up and precision spreads roughly evenly. It's a one-line clip change plus flipping the depth comparison, and it's M1 L8's "know where your floats are dense" applied to depth. Note: raising the far plane does the opposite of help.</div></details>
+<details><summary>6. Which pipeline stage is fixed-function vs programmable, and why does that distinction matter for optimization?</summary><div class="body">Programmable: vertex shader and fragment shader (also geometry/tessellation/compute where used) — you write the code, and they run as SIMT warps, so occupancy, divergence (5.6), and memory-access patterns (5.7) are your levers. Fixed-function: input assembly, rasterizer, and raster ops (depth/blend) — dedicated silicon you configure with state, not code. It matters because the optimization is different per class: for programmable stages you profile and rewrite shaders (fewer instructions, better memory access); for fixed-function stages you reduce the WORK you hand them (fewer/larger triangles for the rasterizer, less overdraw and smaller framebuffers for ROP bandwidth). Misclassifying the bottleneck — optimizing a shader when the rasterizer is drowning in tiny triangles (the scenario) — wastes days.</div></details>
+<details><summary>7. The interview closer: "Walk me through the graphics pipeline and tell me where a real frame usually bottlenecks." Deliver the spoken skeleton.</summary><div class="body">"A draw call flows through five stages: input assembly reads and assembles triangles; the vertex shader — my code — transforms each vertex through the MVP matrix; the rasterizer, fixed-function, converts triangles into fragments and hands each one barycentric weights; the fragment shader — my code — computes a color per fragment; and raster ops does the depth test and blends into the framebuffer. The two shader stages are SIMT warps, so all my Module 4 intuition applies; the rest is silicon I configure. Where it bottlenecks depends on the scene, and I find out with a capture, not a guess — it's 5.9's max-lane law, the slowest stage sets the frame time. The usual suspects: fragment overdraw, where I'm shading pixels that get covered later, fixed by front-to-back sorting or a depth pre-pass; tiny triangles, because fragments shade in 2×2 quads and sub-pixel triangles waste up to three-quarters of their lanes on discarded helper work, fixed with LOD; and framebuffer bandwidth on fat G-buffers or MSAA. A classic trap is over-tessellation — people add triangles for detail and tank the framerate on the fragment side, not the vertex side, because the triangles dropped below the quad size. So my process is: capture the frame, find the bottleneck stage, and attack that stage specifically — reduce work for fixed-function stages, rewrite code for programmable ones. And I'd mention I use reverse-Z for depth, because standard depth plus fp32 double-wastes precision near the camera and z-fights in the distance.' Naming the quad rule and reverse-Z unprompted shows I understand the pipeline as hardware, not a black box."</div></details>
+
+<div class="pager">
+  <a href="lesson-01.html">← Graphics Math</a>
+  <a href="lesson-03.html">Next: First Triangle — OpenGL to Vulkan →</a>
+</div>
+<div class="footer">GPU Mastery · Track C · Lesson 2 — works offline · progress saved in your browser</div>
+</div>
+<script src="../assets/diagramsC.js"></script>
+<script src="../assets/app.js"></script>
+</body>
+</html>

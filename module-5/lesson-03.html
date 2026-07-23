@@ -1,0 +1,177 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>5.3 Memory Management — GPU Mastery</title>
+<link rel="stylesheet" href="../assets/style.css">
+</head>
+<body data-lesson="m5l3">
+<nav><div class="inner">
+  <a class="logo" href="../index.html">GPU<span>Mastery</span></a>
+  <a class="item" href="../index.html">Home</a>
+  <a class="item on" href="../curriculum.html">Curriculum</a>
+  <a class="item" href="../labs.html">Labs</a>
+  <a class="item" href="../setup.html">Lab setup</a>
+  <a class="item" href="../prompt.html">Generator prompt</a>
+</div></nav>
+<div class="wrap">
+
+<div class="lesson-top">
+  <div><span class="badge">Module 5 · Lesson 3</span><span class="badge dim">≈ 3 h</span></div>
+  <button id="donebtn" class="donebtn">Mark lesson complete</button>
+</div>
+<h1>Memory Management — two worlds, one bridge, your discipline</h1>
+<p class="lead">3.5 made you the garbage collector; today you manage TWO heaps separated by 4.6's bridge. The rules are ones you already keep — one owner, exact frees, bytes-not-elements — plus one new law: <em>know which world every pointer belongs to.</em></p>
+
+<h2>Concept</h2>
+
+<h3>Two address spaces, one pointer type</h3>
+<div class="diagram" data-diagram="m5l3-spaces" data-caption="The compiler cannot tell them apart. Your h_/d_ prefixes are the type system."></div>
+<pre><code>float *h_x = (float*)malloc(bytes);          // HOST heap (3.5, unchanged)
+float *d_x;
+CUDA_CHECK(cudaMalloc(&amp;d_x, bytes));         // DEVICE heap — 3.3's &amp; pattern, at last
+h_x[0] = 1.0f;            // ✓
+d_x[0] = 1.0f;            // ✗ host-side deref of a device address: segfault (3.8)
+kernel&lt;&lt;&lt;g,b&gt;&gt;&gt;(h_x,…);   // ✗ compiles clean, garbage/crash on device — the
+                          //   worst kind of wrong: type-correct, world-wrong</code></pre>
+
+<h3>The lifecycle: the 3.5 dance, six steps</h3>
+<div class="diagram" data-diagram="m5l3-lifecycle" data-caption="Allocate → up → launch → work → down → free. Cleanup path: 3.5 §2's goto, verbatim."></div>
+<pre><code>CUDA_CHECK(cudaMalloc(&amp;d_x, n * sizeof *d_x));                 // 3.5's sizeof idiom survives
+CUDA_CHECK(cudaMemcpy(d_x, h_x, n*sizeof *d_x, cudaMemcpyHostToDevice));
+saxpy&lt;&lt;&lt;grid, block&gt;&gt;&gt;(n, a, d_x, d_y);
+CUDA_CHECK(cudaMemcpy(h_y, d_y, n*sizeof *d_y, cudaMemcpyDeviceToHost));  // implicit sync!
+CUDA_CHECK(cudaFree(d_x));                                     // one owner, exactly once</code></pre>
+
+<h3>Asynchrony: the CPU runs ahead</h3>
+<div class="diagram" data-diagram="m5l3-async" data-caption="Launches queue and return in ~5 µs. Know the implicit syncs or time/read garbage."></div>
+<p>Three consequences, each a bug you'll now never write: <strong>(1)</strong> CPU timers around a bare launch measure the enqueue (~5 µs), not the kernel (5.9's events fix); <strong>(2)</strong> reading results before a sync reads stale bytes (the plain D2H memcpy's implicit sync is why the naive flow works at all); <strong>(3)</strong> errors surface at the <em>next</em> checked call, lines after the crime (5.4's subject). The implicit-sync roster: plain cudaMemcpy, cudaDeviceSynchronize, cudaFree, event/stream syncs — everything else queues.</p>
+
+<h3>Managed memory: the honest tool</h3>
+<pre><code>cudaMallocManaged(&amp;x, bytes);      // one pointer, both worlds — pages migrate on touch
+// 5.2 used it to defer THIS lesson. The 4.5 §4 ledger stands:
+//   prototyping: gold  ·  phase-separated access: fine (+ cudaMemPrefetchAsync)
+//   hot-loop ping-pong: page-fault storms at bridge latency (4.6 §3 priced them)
+// Course policy: managed for exploration, explicit for anything measured.</code></pre>
+
+<h2>Worked example</h2>
+<div class="card">
+<p><strong>Task:</strong> The reusable harness — gpu_buffer.cuh, the RAII wrapper 3.7 Ex.1 rehearsed (DeviceBufferSim, promoted to the real thing), plus the round-trip test that certifies the plumbing.</p>
+<pre><code>// gpu_buffer.cuh — 3.7's RAII + 3.3's contracts + 5.4's checks, one header
+template &lt;typename T&gt;
+struct DeviceBuffer {
+    T *d = nullptr; size_t n = 0;
+    explicit DeviceBuffer(size_t n_) : n(n_) {
+        CUDA_CHECK(cudaMalloc(&amp;d, n * sizeof(T)));
+    }
+    ~DeviceBuffer() { cudaFree(d); }                       // dtor: can't forget (3.7)
+    DeviceBuffer(const DeviceBuffer&amp;) = delete;             // no copies: no double-free
+    DeviceBuffer&amp; operator=(const DeviceBuffer&amp;) = delete;
+    void up(const T *h)   { CUDA_CHECK(cudaMemcpy(d, h, n*sizeof(T), cudaMemcpyHostToDevice)); }
+    void down(T *h) const { CUDA_CHECK(cudaMemcpy(h, d, n*sizeof(T), cudaMemcpyDeviceToHost)); }
+};
+
+// round_trip test: up(pattern) → identity kernel → down → EXACT compare.
+// Certifies: both copies, the kernel path, alignment, sizes — the plumbing
+// fixture every later kernel builds on (M2 L6 layer 5: contract tests).</code></pre>
+<p><strong>Why each line is old news:</strong> the dtor is 3.7's RAII diagram (every exit path frees); deleted copies are Ex.1's no-double-free law; up/down centralize direction (the #1 memcpy typo: swapped dst/src — one place to get it right); sizeof(T)·n is 3.5's bytes-not-elements idiom. <strong>Decision made:</strong> the destructor calls cudaFree UNCHECKED — dtors shouldn't exit() mid-unwind (3.7 §5's exceptions note); instead the harness calls a final <code>CUDA_CHECK(cudaDeviceSynchronize())</code> so sticky errors surface before teardown. Small print like this is what "production-shaped" means, and you had every piece by 3.7.</p>
+</div>
+
+<h2>Key points</h2>
+<ul class="keypoints">
+<li>Host and device pointers share a type but not a world — h_/d_ naming is your type system; crossing worlds is cudaMemcpy's job alone.</li>
+<li>The lifecycle is 3.5's dance with a bridge in it: malloc/memcpy-up/launch/memcpy-down/free, bytes = n·sizeof*p, cleanup path with free(NULL)-safe teardown.</li>
+<li>Launches are async: implicit syncs (plain memcpy, deviceSync, free) are load-bearing; everything else queues — timers and error checks must respect this.</li>
+<li>cudaMemcpy direction enums are checked at runtime, but swapped dst/src compiles AND runs — centralize copies (up/down methods) so the typo has one home.</li>
+<li>Managed memory: prototype freely, prefetch when phases are known, never ping-pong in hot loops — 4.5/4.6's economics decide, not convenience.</li>
+<li>RAII device buffers (3.7's pattern) end the leak/double-free class on day one — the capstone's harness is this worked example, unchanged.</li>
+</ul>
+
+<h2>Quiz</h2>
+<div class="quiz">
+  <div class="q">1. <code>cudaMemcpy(h_y, d_y, n*sizeof(float), cudaMemcpyDeviceToHost)</code> after a kernel launch returns correct data WITHOUT any explicit synchronize. Why — and which two changes would break that safety?</div>
+  <button class="opt">Luck — always synchronize first</button>
+  <button class="opt" data-c="1">Plain cudaMemcpy is stream-ordered AND blocking: it waits for prior work in the (default) stream, then copies — an implicit sync. Broken by: (a) cudaMemcpyAsync (returns immediately — you read h_y before data lands) or (b) launching the kernel in a NON-default stream while copying in default (no ordering between them — 5.9's rules)</button>
+  <button class="opt">Kernels always finish before any API call</button>
+  <button class="opt">The driver detects the dependency through the pointer</button>
+  <div class="expl">Stream order is the guarantee (the async diagram's timeline): same-stream operations serialize. Async variants and cross-stream launches remove exactly that guarantee — which is why 5.9 pairs them with events. The pointer-dependency option is seductive and false: CUDA tracks STREAMS, not data flow — you are the dependency tracker (M2 L3's explicit-state philosophy, at driver level).</div>
+</div>
+<div class="quiz">
+  <div class="q">2. A 2 GB managed-memory training prototype runs fine; adding a per-step <code>printf("%f", loss_tensor[0])</code> on the HOST makes each step 400 ms slower. Mechanism, and the two fixes in cost order?</div>
+  <button class="opt">printf is slow — buffer the output</button>
+  <button class="opt" data-c="1">The host touch migrates the page GPU→host; the next kernel touch migrates it back: a per-step round-trip page storm at bridge+fault latency (4.5 P6, live). Fixes: (1) copy just the 4 bytes with an explicit tiny cudaMemcpy (µs); (2) accumulate loss on-device, read every N steps (4.6 Ex.1a's pattern)</button>
+  <button class="opt">Managed memory is broken for tensors</button>
+  <button class="opt">The loss needs to be pinned</button>
+  <div class="expl">One innocent host read = two page migrations per step (the ledger 4.5 §4 wrote). The tiny-memcpy fix respects the topology (8 bytes cross, not pages); the batch-N fix respects the toll count (4.6 §3). Managed memory didn't lie — it silently obeyed a topology you stopped watching. This exact bug, in PyTorch clothing (.item() per step), is 4.6 P5's grep list — now you've seen its CUDA skeleton.</div>
+</div>
+
+<h2>Exercises</h2>
+<details><summary>Exercise 1 — The direction-typo lab: deliberately swap dst/src in an H2D copy (copying uninitialized device bytes over your host data), run the round-trip test, and document the SYMPTOM (which side's data survived where). Then write the two harness rules that make this typo structurally impossible, and note which M3 lesson predicted the symptom's flavor.</summary><div class="body">
+<pre><code>cudaMemcpy(h_x, d_x, bytes, cudaMemcpyHostToDevice);   // swapped args, "H2D" enum
+// Runtime: cudaErrorInvalidValue? NO — often runs "fine": the enum describes
+// intent; on UVA systems the runtime infers directions from addresses and
+// happily copies d→h: your host pattern is OVERWRITTEN by device garbage
+// (uninitialized d_x — 3.2's ghosts). Round-trip test: fails with h_x now
+// full of junk floats (denormal-looking values: M1 L8's bit-pattern literacy
+// spotting "someone's raw bytes" — 3.4 Ex.2's party trick, again).</code></pre>
+<p>Rules: (1) copies ONLY through DeviceBuffer::up/down — the argument order is written once, tested once (the worked example's real motive); (2) round-trip test runs in every project's fixture suite BEFORE any kernel test — plumbing certifies first (M2 L6 layer ordering). Predictor: 3.2's uninitialized-memory lesson said garbage would look "plausible-then-weird"; managed vs explicit doesn't change that law. The typo takes 90 seconds to stage and immunizes you for a career — cheap.</p>
+</div></details>
+<details><summary>Exercise 2 — Bandwidth reality check (4.6's numbers, YOUR machine): time H2D and D2H for 1 MB, 16 MB, 256 MB with pageable vs cudaMallocHost-pinned buffers (CPU timers are legitimate HERE — plain memcpy blocks; say why in a comment). Produce the 6-row table, compute effective GB/s, and annotate each row with its 4.6 mechanism (toll-dominated / width-dominated / staging tax).</summary><div class="body">
+<pre><code>representative T4-Colab results (PCIe gen3 there — ~12 GB/s width!):
+size    pageable H2D   pinned H2D     mechanism
+1 MB    ~0.4 ms  2.5   ~0.15 ms 6.7   toll-dominated: fixed costs eat small copies (4.6 §3)
+16 MB   ~2.8 ms  5.7   ~1.45 ms 11.0  transition
+256 MB  ~44 ms   5.8   ~22 ms   11.6  width-dominated: pinned ≈ 2× (staging tax gone — 4.6 §4)</code></pre>
+<p>Three certifications from one table: your bridge's real width (Colab's gen3 ≈ 12 GB/s — NOT the 64 of 4.6's gen5 examples: machine models are measured, 4.7's law); the pinned 2× (the staging bounce, priced on your hardware); the toll floor (1 MB copies never reach width — batch small transfers, 4.6's rule now personally witnessed). CPU timing is valid because plain cudaMemcpy blocks until complete (quiz 1) — the comment matters because the SAME code with Async would measure nothing (3.1 P6's law crossing the bridge). This table is your 4.6-audit calibration, kept in the repo.</p>
+</div></details>
+
+<hr>
+<h1>Go deeper — the rest of the memory API, honestly ranked</h1>
+
+<h2>1. The allocation family (when each earns its place)</h2>
+<pre><code>cudaMalloc            the default: device heap, 256-B aligned (4.5's guarantee)
+cudaMallocHost        pinned host: transfer buffers, async-capable (Ex.2's 2×)
+cudaMallocManaged     one pointer: prototypes + phase-separated apps (+prefetch)
+cudaMallocAsync       stream-ordered pool allocation: malloc/free INSIDE hot loops
+                      without the sync+cost of cudaMalloc (3.5 §1's arena, official) —
+                      the modern default for frameworks; meet it properly in Track A
+cudaMemset(d, 0, bytes)   device-side zeroing (calloc's cousin — same byte caveats 3.5 §5)</code></pre>
+
+<h2>2. cudaMemcpy2D and strided reality</h2>
+<pre><code>cudaMemcpy2D(dst, dpitch, src, spitch, width_bytes, height, kind);
+// copies a WxH rectangle out of larger rows — pitch = allocated row stride.
+// Exists because sub-image copies from an (H, W) buffer aren't contiguous
+// (M2 L5's views taught you why). cudaMallocPitch pads rows to alignment —
+// the LDA of 4.2 P3, as an allocator. For this course: flat + full-row copies
+// keep life simple; know 2D exists so library signatures read instantly.</code></pre>
+
+<h2>3. Gotchas</h2>
+<div class="gotcha"><strong>World-crossing pointers.</strong> Kernel gets h_x, host derefs d_x — both type-check (5.3's opening). The h_/d_ convention + up/down methods are the whole defense; UVA making some crossings "work" on some systems makes discipline MORE necessary, not less.</div>
+<div class="gotcha"><strong>Elements where bytes belong.</strong> cudaMemcpy(d, h, n, …) copies n BYTES: a quarter of your floats, three-quarters ghosts. n * sizeof *p, tattooed since 3.5.</div>
+<div class="gotcha"><strong>cudaMalloc in hot loops.</strong> Each call syncs and taxes (~100+ µs — 3.5 §1's GPU note). Allocate once, reuse (DeviceBuffer's lifetime = the loop's scope), or cudaMallocAsync pools when dynamism is real.</div>
+<div class="gotcha"><strong>Freeing the wrong world.</strong> free(d_x) or cudaFree(h_x): heap corruption or invalid-value error. Ownership tables (3.5 §4) now carry a WORLD column; RAII wrappers make it unrepresentable.</div>
+<div class="gotcha"><strong>Timing async as if sync.</strong> CPU timer + cudaMemcpyAsync = measuring the enqueue (Ex.2's comment inverted). Events (5.9) for anything async; plain-blocking calls are the only CPU-timable ones.</div>
+<div class="gotcha"><strong>Managed-memory benchmarks with cold pages.</strong> First-touch migration inside the timed region — M1 L7's warmup rule catches yet another species (5.1 P3 listed it): prefetch or warm before timing.</div>
+
+<h2>Scenario — the harness that made week two boring (in the best way)</h2>
+<p>Two study-group friends start Module 5 the same week. Friend A writes each experiment "quick and direct": raw cudaMalloc calls, copies inline, frees at the end (usually). Friend B spends day one porting the worked example's harness. Week two's ledger tells the story. A's Tuesday: a swapped-direction copy (Ex.1's typo) cost four hours because the garbage looked like a KERNEL bug — they debugged the kernel. A's Thursday: a missing free in an error path leaked until Colab OOM'd mid-sweep (3.5's scenario, GPU edition). A's Friday: benchmark numbers 40× "too fast" — CPU-timed async copies (gotcha #5); the retraction email was embarrassing. B's week: the round-trip fixture failed ONCE — immediately, loudly, at the plumbing layer where the bug actually was (a bytes-vs-elements slip, caught by the size-mismatch pattern in the test) — and every kernel experiment after ran on certified rails. Same talent, same hardware, ~11 hours of divergence in one week, compounding. The moral is 2.7's, and 3.6's, and now 5.3's, because it's the course's: <em>infrastructure is not procrastination; it's where the debugging hours go to die.</em></p>
+
+<h2>Practice</h2>
+<details><summary>1. Classify each call's blocking behavior and world: cudaMalloc; kernel launch; plain cudaMemcpy D2H; cudaMemcpyAsync H2D (pinned); cudaFree; cudaDeviceSynchronize. Which subset defines your timing-safe set for CPU clocks?</summary><div class="body">cudaMalloc: blocking-ish (syncs device on classic path) — host world allocT device. Launch: async, queues. Plain memcpy: BLOCKING + stream-ordered (the implicit sync). Async memcpy: returns immediately (pinned required for true async). cudaFree: synchronizing (another implicit sync — and why hot-loop frees hurt twice). deviceSync: the explicit full barrier. CPU-timable: only fully-blocking spans (plain memcpy round trips, or anything bracketed by deviceSync) — everything else needs events (5.9). Six calls, three behaviors, one table you'll consult weekly.</div></details>
+<details><summary>2. Extend DeviceBuffer with a from_host static factory and a to_vector() using 3.7's std::vector — write the signatures, note the ownership story of each, and why to_vector RETURNS by value without a performance sin (3.7's exact teaching).</summary><div class="body"><code>static DeviceBuffer from_host(const std::vector&lt;T&gt;&amp; h) { DeviceBuffer b(h.size()); b.up(h.data()); return b; }</code> — return-by-move (3.7 P5's one-word answer: moves), no copy of the device allocation (move transfers the pointer, source nulled). <code>std::vector&lt;T&gt; to_vector() const { std::vector&lt;T&gt; v(n); down(v.data()); return v; }</code> — NRVO/move makes the return free; the D2H copy is the only real cost and it's explicit. Ownership: buffer owns device memory; vectors own host memory; .data() bridges as always (3.7 §vector). The harness is now ergonomic enough that the RIGHT way is also the SHORT way — the design goal of all infrastructure.</div></details>
+<details><summary>3. Predict the output: allocate d_x (no memset), launch square<<<...>>>(d_x, d_x, n) reading and writing the SAME uninitialized buffer, copy down, print y[0..3]. Then explain why the values differ between Colab sessions but often REPEAT within one session — and which two course lessons cover the mechanism.</summary><div class="body">Plausible garbage floats (or zeros!): uninitialized device memory holds whatever the previous tenant left (3.2's ghosts — the GPU heap recycles like 3.5 §1's freelists). Within-session repeats: the allocator hands back the same recycled block (3.5's use-after-free "stable until reused" physics — as an allocator behavior). Across sessions: different tenant history. Zeros are common on fresh allocations (driver scrubbing) — WHICH IS WHY tests that pass on fresh buffers and fail on reused ones exist: never rely on implicit zeros; cudaMemset or initialize (the M2 L8 fixture rule: known input patterns, always).</div></details>
+<details><summary>4. Your app uploads a 3 GB model once, then per request: 4 MB in, kernel, 1 MB out, 200 req/s. A new hire proposes converting everything to managed memory "to simplify". Write the three-line verdict using 4.6's audit + this lesson's ledger.</summary><div class="body">Audit: weights resident (never re-cross — managed adds risk of accidental host touches evicting hot pages); per-request 5 MB × 200 = 1 GB/s explicit, toll-fine at 400 crossings/s. Managed's value here: zero (phases are ALREADY explicit and clean); managed's risk: one stray host-side debug read triggers quiz 2's storm on 3 GB of weights. Verdict: keep explicit copies + pinned request buffers; managed stays in the prototype notebook. "Simplify" that adds silent failure modes isn't simpler — it's deferred complexity with interest (4.5 §4's closing line, applied).</div></details>
+<details><summary>5. The round-trip test passes but a saxpy test reads all-zeros for x. The launch used d_y for BOTH x and y arguments (copy-paste). Why did nothing crash, what did the kernel compute, and which checklist line (5.2 P7) should have caught it — plus the harness upgrade that catches argument-aliasing generically.</summary><div class="body">Both pointers valid-world, valid-size: no fault (aliasing is legal!). Kernel computed y = a·y + y = (a+1)·y — self-saxpy: well-defined here (each thread reads/writes only its own i — no race), just WRONG. Checklist line 9 (fixture verification) catches it: expected 4.0, got 6.0 everywhere — a constant-offset signature that screams "wrong operand" (fixture-failure signatures are diagnostic, 5.2 Ex.2's philosophy). Harness upgrade: kernels take const-correct pointers (3.3's contract makes x const float* — passing d_y still compiles as it's convertible... so the REAL catch is the fixture) + a debug assert that in/out spans don't overlap when the contract says they shouldn't (an address-range check — 3.4's span discipline, deployed).</div></details>
+<details><summary>6. Design the pinned-pool for 5.9's pipeline (4.6's ring, materialized): API (acquire/release), sizing (chunks × depth from Little's-law shopping — 4.2 P4/4.6), lifetime (who owns, when freed), and the failure policy when the pool is exhausted. Cite the arena you already built (3.5 P7).</summary><div class="body"><code>struct PinnedPool { std::vector&lt;void*&gt; free_list; size_t chunk; ... void* acquire(); void release(void*); }</code> — cudaMallocHost chunks at construction (N = pipeline depth 3 + margin 1, chunk = the transfer quantum: 4.6's worked example sized 4 × frame), destructor cudaFreeHost's all (RAII, 3.7). Exhaustion policy: BLOCK the producer (backpressure — the pipeline's natural governor) rather than allocate (pinning casually at runtime violates 4.6's gotcha) or drop (data loss needs opting into, loudly). It IS 3.5 P7's arena with cudaMallocHost as the backing store and release returning to the free list instead of reset-all — one design, third deployment (host arena, device pools via MallocAsync, now pinned staging). You're not learning new structures anymore; you're re-instantiating one.</div></details>
+<details><summary>7. Write the plumbing-fixture suite manifest for the course repo (runs before ANY kernel test, forever): round-trip exactness per dtype (which dtypes get exact vs budgeted?), size-boundary cases (0, 1, odd, 2³¹-adjacent), direction-typo tripwire, world-crossing negative tests (how do you TEST for a segfault politely?), and the async-read tripwire. Each with its lesson citation. (This suite ships in 5.11's repo as tests/test_plumbing.cu.)</summary><div class="body">Round-trip: float/int32/uint8 EXACT (copies are byte-moves — any diff is plumbing, not math; M1 L8's legitimate-equality case) on patterns {ramp i, bit-pattern 0xDEADBEEF-style, all-zeros} (3.4 Ex.2's recognizable-garbage doctrine). Sizes: n=0 (legal no-op — APIs must not crash: M2 L6's empty-input contracts), n=1, odd ns (alignment tails), and a mocked-large test of index WIDTH math (can't allocate 2³¹ floats on a T4 — test the FORMULA with size_t asserts instead: 5.2's gotcha). Direction tripwire: Ex.1 staged as an EXPECTED-failure test (the suite proves the harness catches it). World-crossing: launch with a host pointer under compute-sanitizer as an expected-detection test (politeness = run in a child process / sanitizer harness so the suite survives its own negative case — 3.8's discipline of testing the alarms). Async tripwire: an Async D2H followed immediately by a host read must FAIL the pattern check (proving the suite would catch quiz 1b) then pass after event sync. The manifest's meta-rule, same as ever: the fixture suite tests the INSTRUMENTS before the instruments test the kernels — M2 L6's constitution, final ratification.</div></details>
+
+<div class="pager">
+  <a href="lesson-02.html">← Your first real kernel</a>
+  <a href="lesson-04.html">Next: Errors & compute-sanitizer →</a>
+</div>
+<div class="footer">GPU Mastery · Module 5 · Lesson 3 — works offline · progress saved in your browser</div>
+</div>
+<script src="../assets/diagrams5.js"></script>
+<script src="../assets/app.js"></script>
+</body>
+</html>

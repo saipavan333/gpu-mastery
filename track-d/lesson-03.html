@@ -1,0 +1,179 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>D3 SYCL &amp; oneAPI — GPU Mastery</title>
+<link rel="stylesheet" href="../assets/style.css">
+</head>
+<body data-lesson="dl3">
+<nav><div class="inner">
+  <a class="logo" href="../index.html">GPU<span>Mastery</span></a>
+  <a class="item" href="../index.html">Home</a>
+  <a class="item on" href="../curriculum.html">Curriculum</a>
+  <a class="item" href="../labs.html">Labs</a>
+  <a class="item" href="../setup.html">Lab setup</a>
+  <a class="item" href="../prompt.html">Generator prompt</a>
+</div></nav>
+<div class="wrap">
+
+<div class="lesson-top">
+  <div><span class="badge">Track D · Lesson 3</span><span class="badge dim">≈ 3.5 h</span></div>
+  <button id="donebtn" class="donebtn">Mark lesson complete</button>
+</div>
+<h1>SYCL &amp; oneAPI — one C++ file, and a runtime that schedules for you</h1>
+<p class="lead">HIP kept you writing C++-per-vendor. SYCL climbs a rung: one standard C++ source, compiled to any backend — NVIDIA, AMD, Intel, or the CPU in this sandbox. The trade is that you stop declaring the plumbing (5.3's copies, 5.9's streams) and start declaring your <em>intent</em> — which data each kernel reads and writes — and the runtime infers the copies and the schedule for you. Today you'll see that inference is not magic: it's the same dependency DAG you built by hand in 5.9, discovered from your accessors.</p>
+
+<h2>Concept</h2>
+
+<h3>Single-source: host and device in one file</h3>
+<div class="diagram" data-diagram="d3-single-source" data-caption="A whole SYCL program: a queue, a buffer wrapping host data, and a command group whose accessor declares intent on that buffer. Two memory models, one file."></div>
+<p>SYCL 2020 (the current standard, revision 6) is single-source: the host code and the device kernel live in the same <code>.cpp</code>, compiled by one compiler that splits them the way nvcc split <code>.cu</code> files (5.1) — except the device half targets SPIR-V, HIP, CUDA, or a CPU backend depending on a flag. The three nouns you must know:</p>
+<pre><code>sycl::queue q;                                 // a device + its work stream (5.9's stream)
+sycl::buffer&lt;float&gt; A{data, N};                 // wraps host memory; the RUNTIME now owns it
+q.submit([&amp;](sycl::handler&amp; h){                // one "command group"
+    sycl::accessor a{A, h, sycl::read_write};  // DECLARE intent: I read and write A
+    h.parallel_for(N, [=](sycl::id&lt;1&gt; i){       // nd-range = grid/block (5.2)
+        a[i] = a[i] * 2.0f;                    // the kernel body
+    });
+});                                            // buffer copies back on scope exit (RAII)</code></pre>
+<p>The <code>accessor</code> is the whole idea. In CUDA you managed a raw device pointer and issued <code>cudaMemcpy</code> yourself (5.3); here you wrap host data in a <code>buffer</code>, and every kernel that touches it does so through an <code>accessor</code> tagged <code>read</code>, <code>write</code>, or <code>read_write</code>. That tag is 5.3's ownership model promoted from discipline to <em>type</em>: the runtime knows who reads and who writes, so it decides when to copy data to the device, when to bring it back, and — the payoff — what may run in parallel. There's a second, more CUDA-like model, USM (unified shared memory: <code>malloc_shared</code>), where you get raw pointers and own the synchronization yourself; we'll weigh the two in Go-deeper. Start with buffers/accessors, because they buy you the next section.</p>
+
+<h3>The runtime infers the graph you used to declare</h3>
+<div class="diagram" data-diagram="d3-dag" data-caption="Three kernels, zero synchronization written by you. From the read/write accessors the runtime infers the RAW dependencies and serializes exactly what must serialize."></div>
+<p>This is where single-source earns its keep, and it's a direct callback to 5.9. There, you got overlap by explicitly creating streams and events and declaring dependencies by hand. SYCL flips it: you write kernels with accessors and <em>no</em> synchronization, and the runtime reads your read/write tags to <em>infer</em> the dependency graph. To prove this isn't hand-waving, here's the runtime's actual logic — hazard detection over accessor sets — executed on four kernels:</p>
+<pre><code>four kernels, accessor read/write sets, ZERO user sync:
+  K1: writes A            K2: reads A, writes B
+  K3: reads C, writes D   K4: reads B and D, writes E
+runtime infers hazards (executed):
+  K1 depends on —         (nothing writes what it reads)
+  K2 depends on [K1]      (RAW: K1 wrote A, K2 reads A)
+  K3 depends on —         (independent — touches C,D only)
+  K4 depends on [K2, K3]  (RAW: needs B from K2 and D from K3)
+schedule the runtime discovers (topological waves):
+  wave 1 (CONCURRENT): [K1, K3]   ← overlap, though you wrote no streams
+  wave 2:              [K2]
+  wave 3:              [K4]</code></pre>
+<p>K1 and K3 run at the same time because nothing connects them, and the runtime figured that out from the fact that their accessor sets don't collide — the identical reasoning you did manually with events in 5.9's max-lane law, now automated. This is the single-source bargain stated precisely: you give up writing the schedule and in exchange the compiler/runtime writes a <em>correct</em> one from your declared data intent. When it works, it deletes a whole class of missing-dependency bugs (5.9's hazards) — you literally cannot forget an edge you never had to draw.</p>
+
+<h3>nd_range is grid/block, and reductions come in the box</h3>
+<div class="diagram" data-diagram="d3-ndrange" data-caption="Every parallel-hierarchy concept from the core has a SYCL spelling: nd_range for launch geometry, local_accessor for shared memory, group_barrier for __syncthreads, sub_group for the warp."></div>
+<p>Inside the kernel, nothing is new — only renamed (D1's table). Launch geometry is <code>nd_range&lt;1&gt;{global, local}</code>, your <code>&lt;&lt;&lt;grid, block&gt;&gt;&gt;</code> (5.2). Coordinates come from <code>nd_item</code>: <code>get_global_id()</code> is the 5.2 identity, <code>get_local_id()</code> is <code>threadIdx</code>. Shared memory (5.5) is a <code>local_accessor</code>; the barrier is <code>group_barrier()</code> = <code>__syncthreads()</code>; the warp is a <code>sub_group</code>. And the operation you hand-built across three core lessons — the reduction (5.8) — SYCL ships as a first-class primitive: <code>sycl::reduction</code> passed to <code>parallel_for</code> gives you a correct, tuned tree reduction with no shuffle-offset literals to get wrong (which, after D2, you'll appreciate viscerally). The library-first doctrine (5.11) again: the vendor's reduction is race-free and wavefront-aware, so you don't re-derive the tree per architecture.</p>
+
+<h2>Worked example</h2>
+<div class="card">
+<p><strong>Task:</strong> Predict a SYCL program's execution schedule from its accessors alone — the skill that lets you reason about single-source performance without a profiler. Four kernels submitted in order, each with the accessor sets above. Prediction first: which kernels overlap, and what's the critical-path length (number of sequential waves)?</p>
+<pre><code>Prediction (reason from data hazards, like 5.9 by hand):
+  K1 (write A) and K3 (read C, write D) share no buffers → they overlap.
+  K2 needs A (from K1); K4 needs B (from K2) and D (from K3).
+  So critical path is K1 → K2 → K4 = 3 waves; K3 hides inside wave 1.
+Result (executed scheduler): wave1=[K1,K3], wave2=[K2], wave3=[K4]. ✓
+  3 waves, K3 fully overlapped. Prediction confirmed.</code></pre>
+<p><strong>What to internalize:</strong> you just did performance analysis on a program with no explicit synchronization, purely by tracing which buffers connect which kernels — because in SYCL the accessors <em>are</em> the dependency graph. This is the mental model shift the single-source rung demands: to reason about overlap you stop looking for stream/event calls (there are none) and start looking at the read/write sets. The upside is that K3's overlap came for free — you didn't schedule it, and you can't forget to. The downside, which the next lessons and gotchas hammer, is that if you accidentally over-declare intent (an unnecessary <code>read_write</code> where <code>read</code> would do, or a stray dependency), you serialize kernels that could have overlapped, and there's no explicit code to point at — the performance bug is in what you <em>declared</em>, not what you called.</p>
+</div>
+
+<h2>Key points</h2>
+<ul class="keypoints">
+<li>SYCL 2020 is single-source: one standard C++ file compiles to CUDA, HIP, Intel, or a CPU backend — the same nvcc-style host/device split (5.1), one rung above HIP on D1's ladder.</li>
+<li>The accessor is 5.3's ownership model promoted to a type: tagging a buffer read/write/read_write lets the runtime own the data and decide copies — you declare intent, not plumbing.</li>
+<li>From accessor read/write sets the runtime infers the dependency DAG and overlaps independent kernels automatically (executed: K1 and K3 run concurrently with zero user sync) — 5.9's graph, discovered instead of declared.</li>
+<li>Inside the kernel everything is renamed, not new: nd_range = grid/block, local_accessor = __shared__ (5.5), group_barrier = __syncthreads, sub_group = the warp.</li>
+<li>sycl::reduction ships a correct, wavefront-aware tree reduction (5.8 productized) — no shuffle-offset literals to get wrong, the library-first doctrine (5.11) sparing you D2's bug.</li>
+<li>USM (malloc_shared) is the alternative model with raw pointers and manual sync, closer to CUDA — buffers/accessors buy inferred scheduling; USM buys pointer familiarity and explicit control.</li>
+</ul>
+
+<h2>Quiz</h2>
+<div class="quiz">
+  <div class="q">1. A developer ports a CUDA pipeline to SYCL using buffers/accessors, but wraps every <code>submit</code> in <code>q.wait()</code> "to be safe, like cudaDeviceSynchronize after each kernel." The result is correct but no faster than serial. What did they do, and what's the fix?</div>
+  <button class="opt">Nothing wrong — SYCL is just inherently serial; that's the cost of portability</button>
+  <button class="opt" data-c="1">They defeated the runtime's whole value proposition: by calling q.wait() after every kernel they forced a global barrier between submissions, so the scheduler can never overlap independent work (the K1/K3 concurrency) it would have found from the accessors. The fix is to NOT wait — submit all the command groups and let the inferred DAG serialize only the true dependencies, waiting once at the end (or on the buffer's host accessor). The accessors already encode the safety; the manual waits are redundant and destroy the parallelism</button>
+  <button class="opt">Add more q.wait() calls to force correctness</button>
+  <button class="opt">Switch to USM; buffers can't overlap kernels</button>
+  <div class="expl">This is the single-source model's signature footgun: importing CUDA's explicit-sync habit (5.3/5.9) into a system that infers synchronization makes every kernel a barrier. Option 4 misdiagnoses — USM can overlap too; the problem is the waits, not the memory model. The correct answer names the mechanism (global barrier per submit kills inferred overlap) and the fix (trust the accessors, wait once). The deep point: in SYCL, correctness comes from declaring data intent, so adding manual synchronization on top doesn't add safety — it only subtracts performance.</div>
+</div>
+<div class="quiz">
+  <div class="q">2. Your team needs a reduction over 100M floats, portable across NVIDIA and AMD. One engineer wants to hand-write a shuffle-tree reduction "for control"; another wants <code>sycl::reduction</code>. Given D2, which is the defensible default and why?</div>
+  <button class="opt">Hand-write it — library reductions are always slower than custom kernels</button>
+  <button class="opt" data-c="1">Use sycl::reduction as the default. A hand-written shuffle tree bakes in exactly the warp-width literal that silently breaks on AMD's 64-lane wavefront (D2's bug), so "for control" really means "for the privilege of re-introducing the 32-vs-64 landmine on every backend." The library reduction is written by people who handle the per-architecture SIMD width and race-freedom for you (5.11) — it's correct-by-construction across vendors. Reach for the hand-written version only if a profiler proves the library is a bottleneck AND you're willing to own the cross-vendor tuning</button>
+  <button class="opt">Hand-write it and hard-code 32; AMD will figure it out</button>
+  <button class="opt">Neither — reductions can't be made portable</button>
+  <button class="opt">Use sycl::reduction on NVIDIA and hand-write on AMD</button>
+  <div class="expl">Option 3 is the D2 bug stated as a (bad) plan. Option 5 defeats the entire point of single-source — two codebases is what portability was supposed to eliminate. The correct answer connects two lessons: SYCL's library reduction is the library-first doctrine (5.11) doing exactly what it's for — encapsulating the wavefront-64 tuning (D2) so your one source is correct everywhere. "For control" is a real reason sometimes, but the burden of proof is on the hand-written path, because control here means owning the landmine.</div>
+</div>
+
+<h2>Exercises</h2>
+<details><summary>Exercise 1 — Run the scheduler logic yourself (no SYCL needed). Write the ~15-line hazard-detection simulation: given kernels as (reads, writes) sets, infer the dependency edges (RAW/WAW/WAR) and print the concurrent waves. Then add a fifth kernel that reads E and writes A, and predict how the schedule changes before running.</summary><div class="body">
+<pre><code>def hazards(i,j,K):            # edge j←i if a hazard exists
+    _,ri,wi=K[i]; _,rj,wj=K[j]
+    return bool(wi&amp;rj or wi&amp;wj or ri&amp;wj)   # RAW, WAW, WAR
+# deps[j] = {i&lt;j : hazards}; waves = repeatedly take kernels whose deps are done
+</code></pre>
+<p>Adding K5 = (reads {E}, writes {A}): it depends on K4 (RAW on E) AND on K1 (WAW on A — both write A) and K2 (WAR — K2 read A, K5 writes A). So K5 lands after K4, extending the critical path to 4 waves. The lesson of the prediction: a single kernel that reuses buffer A serialized the whole tail, because WAW/WAR hazards are real dependencies even without data "flowing." That's precisely why the runtime tracks writes, not just reads — and why aliasing buffers unnecessarily (a stray reuse of A) can quietly serialize a pipeline. Deliverable: the sim plus a note on which hazard type (RAW/WAW/WAR) caused each edge.</p>
+</div></details>
+<details><summary>Exercise 2 — On your own machine, install a SYCL CPU backend — Intel oneAPI DPC++ (icpx) or the community AdaptiveCpp — and compile a SYCL vector-double and a sycl::reduction, running on the CPU backend. Confirm the reduction matches a serial std::accumulate within an fp budget. (The sandbox for this course has no SYCL toolchain; this one targets your machine, and the CPU backend means you need no GPU at all.)</summary><div class="body">
+<p>Expected: <code>icpx -fsycl vec.cpp</code> (or <code>acpp vec.cpp</code>) builds a single binary; selecting the <code>cpu</code> or <code>host</code> device runs the same kernel source on CPU cores. The reduction over, say, 1e7 floats should match <code>std::accumulate</code> in fp64 to within a budget (not bitwise — M1 L8; the tree reduces in a different order than the serial sum). The point of the CPU backend: it proves single-source is real — the identical <code>.cpp</code> that would run on an Intel GPU runs on your laptop's CPU by changing a device selector, no code edits. That "same source, pick the device" moment is the SYCL thesis you can feel. Deliverable: the build command, the device it selected, and the reduction's error vs the serial oracle.</p>
+</div></details>
+
+<hr>
+<h1>Go deeper — the single-source machine underneath</h1>
+
+<h2>1. Buffers/accessors vs USM: the model decision</h2>
+<pre><code>                    buffer + accessor                 USM (malloc_shared/device)
+──────────────────  ────────────────────────────────  ────────────────────────────────
+data ownership      runtime owns it                   you own it (raw pointers)
+synchronization     INFERRED from accessors           MANUAL (depends_on, events)
+dependency DAG      built for you (this lesson)        you declare it (like 5.9)
+feels like          a build system for data            CUDA with a rename
+best when           complex kernel graphs, safety      porting pointer-heavy CUDA,
+                    matters, you want overlap free      fine-grained control needed
+the trap            over-declaring intent serializes   forgetting a dep = 5.9's race,
+                    (quiz 1)                            back in full force</code></pre>
+<p>The honest summary: buffers/accessors move you <em>up</em> the abstraction ladder (the runtime schedules), USM keeps you where HIP left you (you schedule, with pointers). Teams porting a large pointer-based CUDA codebase often start with USM to minimize the diff, then migrate hot subsystems to buffers/accessors where inferred overlap pays. Mixing is legal but is where the subtle bugs live — a USM pointer aliasing a buffer is invisible to the accessor DAG.</p>
+
+<h2>2. Queues, ordering, and host tasks</h2>
+<pre><code>in-order queue     : submissions run in program order (simple, less overlap)
+out-of-order queue : the DEFAULT — runtime reorders/overlaps per the DAG (this lesson)
+host_task          : run host code INSIDE the graph, so a CPU step can be a
+                     scheduled node with real dependencies (e.g. an MPI call — B5's world)
+event.wait()       : synchronize on one submission, not the whole queue (finer than q.wait)</code></pre>
+<p>The out-of-order queue is why the inference matters — an in-order queue would run your kernels in submission order regardless of hazards, forfeiting the K1/K3 overlap. Choosing an in-order queue "for predictability" is a common way to accidentally opt out of the model's main benefit; do it only when you genuinely need program-order semantics.</p>
+
+<h2>3. SYCL compiles through SPIR-V — the connection to D4 and D7</h2>
+<pre><code>your .cpp → SYCL compiler → SPIR-V (an IR) → vendor backend (PTX / AMDGCN / Intel)
+  · SPIR-V is why SYCL targets so many devices — it's the portable IR (OpenCL 3.1
+    makes SPIR-V ingestion mandatory in core — D4)
+  · oneAPI DPC++ 2026 is the reference impl (note: 2026.0 is an ABI-breaking release —
+    recompile, don't mix runtimes); AdaptiveCpp is the community impl
+  · a native_cpu target (experimental) runs SYCL with no GPU backend at all —
+    the sandbox-and-laptop story
+this is the same "one IR, many ISAs" idea Triton uses (D7); SYCL just wears C++.</code></pre>
+
+<h2>Gotchas</h2>
+<div class="gotcha"><strong>Importing cudaDeviceSynchronize habits.</strong> A <code>q.wait()</code> after every submit turns the inferred DAG into a serial chain (quiz 1). Trust the accessors; wait once, at the end or on a host accessor.</div>
+<div class="gotcha"><strong>Over-declaring accessor intent.</strong> Tagging a read-only buffer <code>read_write</code> invents a false write, spawning WAW/WAR edges that serialize kernels that could overlap. Declare the minimum intent — it's a correctness-neutral, performance-critical choice.</div>
+<div class="gotcha"><strong>Mixing USM and buffers carelessly.</strong> A USM pointer that aliases buffer-managed data is invisible to the accessor DAG, so the runtime can't order it — you're back to 5.9's manual hazards without knowing it. Keep a subsystem in one model.</div>
+<div class="gotcha"><strong>In-order queue by default assumption.</strong> The default is out-of-order; if you pick in-order "to be safe," you disable the overlap that justifies single-source. Know which you asked for.</div>
+<div class="gotcha"><strong>Expecting bitwise-identical reductions.</strong> <code>sycl::reduction</code> reduces in a tree order that differs from a serial sum and across backends (M1 L8) — fixtures use budgets, not equality, or a correct port "fails."</div>
+<div class="gotcha"><strong>Buffer destruction as a hidden barrier.</strong> A buffer copies its data back to the host when it's destroyed (RAII) — letting one go out of scope mid-pipeline forces a blocking copy you didn't write. Scope buffers to the whole graph, not one kernel.</div>
+
+<h2>Scenario — the pipeline that "SYCL made slow"</h2>
+<p>A simulation group rewrites a five-stage CUDA pipeline in SYCL to target both their old NVIDIA cluster and a new Intel GPU machine. The port is faithful and the results are correct, but it runs ~30% slower than the CUDA original on the <em>same</em> NVIDIA hardware, and the team's conclusion forms fast: "SYCL's abstraction has real overhead; portability cost us performance." A skeptical senior asks to see the code before they accept that. Two things jump out. First, every <code>submit</code> is followed by <code>q.wait()</code> — a reflex carried from the CUDA version's <code>cudaDeviceSynchronize</code> — which serializes stages that the original CUDA code had explicitly overlapped with streams (5.9). Second, two buffers that are read-only in three of the stages are declared <code>read_write</code> everywhere "for simplicity," inventing dependencies that block overlap even after the waits are removed. Fixing both — delete the per-submit waits, tighten the accessor tags to <code>read</code> where reads suffice — the SYCL version matches the CUDA original within a few percent and, crucially, runs unmodified on the Intel machine. The moral is the single-source model's core discipline: performance in SYCL is governed by what you <em>declare</em>, not what you <em>call</em>. There was no abstraction tax; there was a pile of manual synchronization fighting a runtime built to synchronize for you, plus over-broad intent hiding the parallelism. "The framework is slow" is, nine times in ten, "I'm using the framework against its grain" — and the fix is to declare less and trust more, the opposite of the CUDA reflex.</p>
+
+<h2>Practice</h2>
+<details><summary>1. Name the SYCL spelling for each core concept: <code>&lt;&lt;&lt;grid,block&gt;&gt;&gt;</code>, <code>__shared__</code>, <code>__syncthreads()</code>, the warp, <code>threadIdx.x</code>, a hand-written reduction.</summary><div class="body">nd_range&lt;1&gt;{global, local} for the launch; local_accessor for __shared__; group_barrier() for __syncthreads(); sub_group for the warp; nd_item.get_local_id(0) for threadIdx.x; sycl::reduction for the reduction (don't hand-write it — quiz 2). Every row is D1's translation table; the last one is also 5.8 productized so you skip D2's landmine.</div></details>
+<details><summary>2. Two kernels: K1 writes buffer X; K2 reads buffer Y and writes buffer Z (X, Y, Z all distinct). You wrote no synchronization. Will they overlap, and how does the runtime know?</summary><div class="body">Yes, they overlap — their accessor sets are disjoint (K1 touches X, K2 touches Y and Z), so there's no RAW/WAW/WAR hazard between them and the out-of-order queue schedules them concurrently. The runtime knows purely from the read/write tags on the accessors; it never needed you to say "these are independent." This is the K1/K3 case from the worked example — inferred concurrency from declared intent, 5.9 without the manual event bookkeeping.</div></details>
+<details><summary>3. Explain why calling <code>q.wait()</code> after each of five submissions makes a SYCL program run like serial code, in terms of the DAG.</summary><div class="body">Each <code>q.wait()</code> is a global barrier: it blocks the host until <em>all</em> prior work in the queue completes before the next submission is even enqueued. So the runtime never has two independent kernels in flight to schedule — the DAG it could have exploited is flattened into a strict sequence, one kernel per barrier. The inferred overlap (independent kernels sharing no buffers) requires multiple submissions to be pending at once; per-submit waits guarantee there's only ever one. Delete the waits and the DAG's concurrency reappears (the scenario's fix).</div></details>
+<details><summary>4. When would you choose USM over buffers/accessors, accepting the manual synchronization?</summary><div class="body">When porting a large, pointer-heavy CUDA codebase where rewriting into buffers/accessors would be a huge diff and you want to minimize risk — USM's raw pointers map almost 1:1 onto CUDA device pointers, so the port is closer to HIP's rename experience. Also when you genuinely need fine-grained, explicit control over data placement and dependencies (e.g., interoperating with an MPI or library call that expects a raw pointer). The cost you accept: you're back to 5.9's world of declaring dependencies by hand, so forgetting one is a real race again. It's the control-vs-safety trade of the two models.</div></details>
+<details><summary>5. A buffer wrapping a host array is declared inside a loop that submits one kernel per iteration, and destroyed at the end of each iteration. Why is this slow, and what's the fix?</summary><div class="body">Destroying the buffer each iteration triggers its RAII copy-back to the host (blocking), and re-creating it next iteration triggers a copy-to-device — so every iteration pays a full round-trip over the bus (4.6) that the algorithm never needed. It also inserts a hard barrier, killing any cross-iteration overlap. The fix: create the buffer ONCE outside the loop so the data stays resident on the device across iterations, and only bring it back when you actually need the host to see it (a host accessor at the end). This is 5.3's "allocate once, reuse" law wearing SYCL clothes — buffer lifetime is a performance decision.</div></details>
+<details><summary>6. Your SYCL program is correct on the CPU backend but you're told it "isn't really testing the GPU path." Is CPU-backend testing worthless? Where's its value and its limit?</summary><div class="body">It's far from worthless: the CPU backend runs the identical kernel source and the identical scheduling logic, so it validates your accessor intent, your dependency structure, and your algorithm's correctness — the parts most likely to have logic bugs — anywhere, with no GPU. Its limit is that it can't catch GPU-specific issues: occupancy, coalescing (5.7), shared-memory bank conflicts, or wavefront-width effects (D2) simply don't exist on a CPU. So CPU-backend testing is a fast, universal correctness gate (great for CI), but it is not a performance test and not a substitute for running on the actual target — the same "a test certifies the machine it ran on" principle from D2, applied to backends instead of vendors.</div></details>
+<details><summary>7. The interview closer: "When would you choose SYCL over HIP for a new project, and what do you give up?" Deliver the spoken skeleton.</summary><div class="body">"I choose SYCL when the project needs to run on more than two vendors or has a long lifetime across changing hardware, because single-source means one C++ codebase the compiler retargets — including a CPU backend that makes it testable anywhere. The big win beyond 'one source' is the scheduling: with buffers and accessors I declare which data each kernel reads and writes, and the runtime infers the dependency graph and overlaps independent work for me — it's 5.9's stream DAG, discovered instead of declared, so I can't forget a dependency edge. What I give up versus HIP is control and directness: HIP is CUDA-with-renames, so for a big existing CUDA codebase targeting mainly AMD, HIP is the lower-risk, closer-to-the-metal port. And SYCL's abstraction has a footgun — if I import CUDA's per-kernel-sync habit or over-declare accessor intent, I serialize work the runtime would have overlapped, and the performance bug is in what I declared, not what I called. So my rule: HIP for a CUDA-heavy, mostly-AMD port where I want control; SYCL when portability breadth and inferred scheduling across many backends outweigh the loss of explicit control — and either way I lean on the library reduction, never a hand-rolled shuffle tree, so I don't re-import the wavefront-64 bug.' That trade — control for breadth-plus-inference — is the whole decision."</div></details>
+
+<div class="pager">
+  <a href="lesson-02.html">← ROCm &amp; HIP</a>
+  <a href="lesson-04.html">Next: OpenCL Today →</a>
+</div>
+<div class="footer">GPU Mastery · Track D · Lesson 3 — works offline · progress saved in your browser</div>
+</div>
+<script src="../assets/diagramsD.js"></script>
+<script src="../assets/app.js"></script>
+</body>
+</html>

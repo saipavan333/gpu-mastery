@@ -1,0 +1,239 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>3.4 Arrays, Strings & Pointer Arithmetic — GPU Mastery</title>
+<link rel="stylesheet" href="../assets/style.css">
+</head>
+<body data-lesson="m3l4">
+<nav><div class="inner">
+  <a class="logo" href="../index.html">GPU<span>Mastery</span></a>
+  <a class="item" href="../index.html">Home</a>
+  <a class="item on" href="../curriculum.html">Curriculum</a>
+  <a class="item" href="../labs.html">Labs</a>
+  <a class="item" href="../setup.html">Lab setup</a>
+  <a class="item" href="../prompt.html">Generator prompt</a>
+</div></nav>
+<div class="wrap">
+
+<div class="lesson-top">
+  <div><span class="badge">Module 3 · Lesson 4</span><span class="badge dim">≈ 3 h</span></div>
+  <button id="donebtn" class="donebtn">Mark lesson complete</button>
+</div>
+<h1>Arrays, Strings & Pointer Arithmetic — contiguous memory, unguarded</h1>
+<p class="lead">A C array is M2 L5's ndarray with the safety equipment removed: contiguous bytes, a pointer, and <em>you</em> as the bounds checker. Master the arithmetic here — every CUDA kernel you ever write is this lesson executed by 10,000 threads at once.</p>
+
+<h2>Concept</h2>
+
+<h3>Arrays: contiguous, fixed, fast</h3>
+<pre><code>float a[6] = {10, 11, 12, 13, 14, 15};   /* 24 contiguous bytes on the stack      */
+float zero[256] = {0};                    /* first explicit, REST zeroed — idiom   */
+size_t n = sizeof a / sizeof a[0];        /* 6 — the count, while it still exists  */
+a[1] = 99.0f;                             /* 0-based, of course                    */
+a[6] = 1.0f;                              /* UB. No exception, no guard, no mercy: */
+                                          /* you just wrote PAST the array          */</code></pre>
+<p>Python raised IndexError; NumPy raised IndexError; C writes over whatever lives next door — a neighboring variable, the frame's return address, anything (3.8 shows the forensics). The guard that runtimes provided is now a line <em>you</em> write: <code>if (i &lt; n)</code>. Sound familiar? It's the CUDA kernel guard from M1 L2 and M2 L2 — the reason this course drilled it two modules before you could feel the danger.</p>
+
+<h3>Pointer arithmetic: indexing IS address math</h3>
+<div class="diagram" data-diagram="m3l4-arith" data-caption="p+i advances i ELEMENTS (i×sizeof(T) bytes). a[i] is defined as *(a+i)."></div>
+<pre><code>float *p = a;               /* arrays convert to a pointer to their first element */
+*(p + 2)                    /* the value 8 bytes past p — a[2]                    */
+p[2]                        /* IDENTICAL — [] is literally *(  +  ) sugar          */
+p += 3;                     /* walk the pointer three elements                     */
+ptrdiff_t d = p - a;        /* 3 — differences count elements, not bytes           */
+float *end = a + 6;         /* one-past-the-end: legal to hold and compare,        */
+for (p = a; p &lt; end; p++)   /* the classic iteration idiom...                      */
+    sum += *p;              /* ...though indexed loops read better; use either     */</code></pre>
+<p>M1 L1 §6 promised element i lives at base + i·sizeof(T); C makes that the <em>definition</em> of indexing. One elegant absurdity to cement it: since a[i] ≡ *(a+i) ≡ *(i+a) ≡ i[a], the expression <code>3[a]</code> compiles and equals a[3]. Never write it; always remember why it works.</p>
+
+<h3>Decay: functions receive an address, not an array</h3>
+<div class="diagram" data-diagram="m3l4-decay" data-caption="The size does not travel. Every array parameter is really a (pointer, count) pair."></div>
+<pre><code>double mean(const double *xs, size_t n) {     /* the honest signature             */
+    double s = 0.0;
+    for (size_t i = 0; i &lt; n; i++) s += xs[i];
+    return n ? s / n : 0.0;                    /* empty-input decision, documented */
+}
+/* void f(double xs[100]) — the 100 is DECORATION; it still receives double*.      */
+/* sizeof xs inside f = 8. This is why ARRAY_LEN (3.2 P7) lies on parameters.      */</code></pre>
+
+<h3>2D data: one buffer + the linearization you've owned since M1</h3>
+<pre><code>float m[3][4];               /* true 2D: contiguous 12 floats, row-major (M1 L6)  */
+m[1][2] = 5.0f;              /* compiler computes 1*4 + 2 for you                 */
+
+float *M = malloc(H * W * sizeof *M);     /* the PRO pattern: flat + manual index */
+M[r * W + c] = 5.0f;                       /* M1 L2's formula — your choice, visible */
+#define IDX(r, c, W) ((size_t)(r) * (W) + (c))   /* or one named place (M2 L2's    */
+M[IDX(r, c, W)] = 5.0f;                          /* one-source-of-truth rule)      */</code></pre>
+<p>Why pros flatten: a <code>float[H][W]</code> parameter needs W baked into the type (inflexible); an array-of-row-pointers costs an indirection per access and scatters rows across the heap (cache death — 3.5's scenario measures it); flat + IDX is contiguous, fast, and <em>identical to what NumPy, PyTorch, and every CUDA kernel do</em>. You've been writing this index since M1 L2 — now it's load-bearing.</p>
+
+<h3>Strings: byte arrays with a promise</h3>
+<div class="diagram" data-diagram="m3l4-string" data-caption="Three chars need four bytes. Everything about C strings follows from the terminator."></div>
+<pre><code>char name[16] = "GPU";           /* {'G','P','U','\0', ...} — the \0 IS the length */
+strlen(name)                     /* 3 — WALKS the bytes counting until \0: O(n)!   */
+strcmp(a, b) == 0                /* content equality (== compares ADDRESSES)       */
+snprintf(buf, sizeof buf, "run_%04d.json", i);   /* THE safe formatter: bounded,   */
+                                                  /* always terminated — M2 L7's    */
+                                                  /* filenames, now in C            */
+strcpy / strcat / gets           /* unbounded writers: treat as radioactive        */</code></pre>
+
+<h2>Worked example</h2>
+<div class="card">
+<p><strong>Task:</strong> saxpy — y = a·x + y, the "hello world" of numeric kernels (it's in BLAS, it's Module 5's first real kernel, and it's three lessons of this course in eight lines).</p>
+<pre><code>#include &lt;stdio.h&gt;
+#include &lt;stddef.h&gt;
+
+void saxpy(size_t n, float a, const float *x, float *y) {
+    for (size_t i = 0; i &lt; n; i++)        /* the guard IS the loop bound here     */
+        y[i] = a * x[i] + y[i];           /* one FMA per element (M1 L3/L8)       */
+}
+
+int main(void) {
+    float x[4] = {1, 2, 3, 4}, y[4] = {10, 20, 30, 40};
+    saxpy(4, 2.0f, x, y);
+    for (size_t i = 0; i &lt; 4; i++) printf("%.0f ", y[i]);   /* 12 24 36 48        */
+    printf("\n");
+    return 0;
+}</code></pre>
+<p><strong>Now put it next to its future.</strong> The CUDA version in Module 5:</p>
+<pre><code>__global__ void saxpy(size_t n, float a, const float *x, float *y) {
+    size_t i = blockIdx.x * blockDim.x + threadIdx.x;    /* M1 L2's linearization */
+    if (i &lt; n)                                            /* the guard, explicit  */
+        y[i] = a * x[i] + y[i];                           /* IDENTICAL body       */
+}</code></pre>
+<p>The loop <em>became</em> the thread grid; the bound <em>became</em> the guard; the body didn't change a character. This is the deepest sentence in Module 3: <strong>CUDA is this lesson with the for-loop distributed across hardware.</strong> Every hour spent on pointer/array fluency here is an hour of kernel debugging you won't do later. <strong>Decisions made:</strong> <code>const float *x</code> declares read-only intent (3.3's contract); size_t for n (3.2's law); and the fp32 literal wears its f.</p>
+</div>
+
+<h2>Key points</h2>
+<ul class="keypoints">
+<li>Arrays are contiguous elements; a[i] is *(a+i) by definition, and pointer arithmetic counts elements (scaled by sizeof) — M1 L1 §6 as language law.</li>
+<li>Out-of-bounds is UB, not an exception: the bounds check is YOUR line of code — the same if (i &lt; n) that guards every CUDA kernel.</li>
+<li>Arrays decay to pointers at function boundaries: sizeof lies inside, the count must travel as a parameter — every array API is a (pointer, count) pair.</li>
+<li>For 2D data, prefer one flat buffer + IDX(r,c,W) = r·W+c — contiguous, flexible, and exactly NumPy's/CUDA's layout; keep the formula in ONE macro.</li>
+<li>C strings are byte arrays ending in \0: strlen walks (O(n)), == compares addresses, strcmp compares contents, snprintf is the only formatter you use.</li>
+<li>One-past-the-end is legal to point at and compare against, never to dereference — the half-open [begin, end) of M1 L2, in pointer form.</li>
+</ul>
+
+<h2>Quiz</h2>
+<div class="quiz">
+  <div class="q">1. <code>double d[10]; f(d);</code> where <code>void f(double *x)</code>. Inside f, what does <code>sizeof(x) / sizeof(x[0])</code> evaluate to on a 64-bit machine, and what did the author probably want?</div>
+  <button class="opt">10 — the array length</button>
+  <button class="opt" data-c="1">1 — sizeof(pointer)/sizeof(double) = 8/8; the length was lost to decay and must be passed as a parameter</button>
+  <button class="opt">80 — total bytes</button>
+  <button class="opt">Compile error — sizeof needs an array</button>
+  <div class="expl">x is a pointer (8 bytes) no matter what was passed; 8/8 = 1. The ARRAY_LEN idiom only works in the scope where the true array is visible. The loop for(i=0;i&lt;sizeof(x)/sizeof(x[0]);i++) silently processing ONE element is a real, recurring production bug — quiet data loss, no crash. Counts travel as parameters, forever.</div>
+</div>
+<div class="quiz">
+  <div class="q">2. <code>char buf[8]; snprintf(buf, sizeof buf, "%s", "benchmark");</code> — what's in buf, and what did snprintf just save you from?</div>
+  <button class="opt">"benchmark" — it barely fits</button>
+  <button class="opt" data-c="1">"benchma" + \0 — truncated at 7 chars + terminator; strcpy would have written 10 bytes into an 8-byte box (overflow into the neighbors)</button>
+  <button class="opt">Empty string — snprintf refuses oversized input</button>
+  <button class="opt">UB — the format is too long</button>
+  <div class="expl">"benchmark" is 9 chars + \0 = 10 bytes. snprintf writes at most size−1 chars and ALWAYS terminates: "benchma\0". Its return value (9 = what it WANTED to write) lets you detect truncation: if (ret >= (int)sizeof buf) → truncated (M2 L7's filename discipline had this same check). strcpy would have overflowed — the single most exploited bug class in computing history, retired from your code today.</div>
+</div>
+
+<h2>Exercises</h2>
+<details><summary>Exercise 1 — Implement <code>dot(const float *a, const float *b, size_t n)</code> (M1 L5's atom!) and <code>mat_vec(const float *M, const float *x, float *y, size_t R, size_t C)</code> using the flat IDX layout — y = M·x as R dot products. Verify against M1 L6's worked numbers: M=[[1,2,3],[4,5,6]] (2×3), x=(1,1,1) → y=(6,15). Then state which loop is "the kernel" when this hits the GPU.</summary><div class="body">
+<pre><code>float dot(const float *a, const float *b, size_t n) {
+    float s = 0.0f;
+    for (size_t i = 0; i &lt; n; i++) s += a[i] * b[i];
+    return s;
+}
+void mat_vec(const float *M, const float *x, float *y, size_t R, size_t C) {
+    for (size_t r = 0; r &lt; R; r++)
+        y[r] = dot(M + r * C, x, C);        /* pointer arithmetic AS row slicing! */
+}
+/* main: float M[6]={1,2,3,4,5,6}, x[3]={1,1,1}, y[2];
+   mat_vec(M,x,y,2,3) → y = {6, 15} ✓ (M1 L6 checked by machine again)            */</code></pre>
+<p>The gem is <code>M + r*C</code> — pointer arithmetic gives you "row r as a float*" with zero copying: a VIEW, in NumPy's vocabulary (M2 L5), spelled as address math. On GPU: the OUTER loop (over rows) becomes the thread grid — one thread per output element, each computing one dot product; the inner dot stays a loop (or later, a warp cooperation — 5.8). Recognizing "which loop parallelizes" is the core kernel-design instinct, and it starts here.</p>
+</div></details>
+<details><summary>Exercise 2 — The neighbor-corruption lab (do this once, remember it forever): declare <code>int canary = 7; float arr[4]; int canary2 = 7;</code> then deliberately write arr[4] = 1e9f and arr[-1] = 1e9f, printing the canaries after each. Explain what you observe (it varies!), why NEITHER outcome is "the bug being fine", and what ASan reports instead (run it if you have it — 3.8 formalizes).</summary><div class="body">
+<p>Typical observation (gcc -O0): one of the canaries becomes 1315859240 — the int reinterpretation of 1e9f's IEEE bits (0x4E6E6B28 — M1 L8's layout leaking through an OOB write!). Which canary, or whether anything visible happens at all, depends on how the compiler laid out the frame — at -O2 the canaries may live in registers and show NOTHING while the write corrupts something else (a saved register slot, alignment padding…). That's the lesson: OOB is UB — the SYMPTOM is a lottery (3.8's segfault diagram: the scary quiet branch), so "my test passed" is evidence of nothing. ASan converts the lottery into a deterministic report: <em>stack-buffer-overflow, WRITE of size 4, 0 bytes to the right of 'arr'</em> — name, direction, distance (3.8's annotated report). File the observed canary value away too: garbage integers near 10⁹ or 10⁻³⁸-ish floats in logs often MEAN "someone's bytes read under the wrong type" — a professional's pattern-recognition trick straight from M1 L8.</p>
+</div></details>
+
+<hr>
+<h1>Go deeper — the complete guide</h1>
+<p>memcpy and friends (cudaMemcpy's family), the string toolbox with safety annotations, AoS vs SoA in C (the trilogy completes), multidimensional layouts formally, and VLAs (why not).</p>
+
+<h2>1. The mem* family: bulk bytes, no types</h2>
+<pre><code>memcpy(dst, src, n * sizeof *src);   /* copy bytes; ranges must NOT overlap        */
+memmove(dst, src, nbytes);           /* overlap-safe copy (shifting inside a buffer)*/
+memset(p, 0, n * sizeof *p);         /* zero BYTES — all-zero floats are 0.0f ✓    */
+memcmp(a, b, nbytes) == 0            /* byte equality — beware padding (3.6) and   */
+                                     /* floats: -0.0 vs 0.0 differ bytewise, NaN≠NaN bitwise-EQUAL (M1 L8 inverted!) */
+cudaMemcpy(d_x, x, nbytes, cudaMemcpyHostToDevice);   /* the exact same contract   */
+                                     /* + a direction — Module 5's daily verb       */</code></pre>
+<p>Two habits with lifetime value: size arguments are BYTES, so write <code>n * sizeof *p</code> (element count times element size, derived from the pointer itself — survives type changes); and memset-to-zero is legal for floats/ints/pointers on every platform you'll meet, but memset to any OTHER value only works per-byte (memset(p, 1, ...) makes ints 0x01010101 = 16843009, not 1 — a classic).</p>
+
+<h2>2. The string toolbox, safety-annotated</h2>
+<table>
+<tr><th>Function</th><th>Verdict</th><th>Note</th></tr>
+<tr><td><code>snprintf</code></td><td>✅ default</td><td>bounded, terminated, returns needed length (truncation check)</td></tr>
+<tr><td><code>strlen / strcmp / strchr / strstr</code></td><td>✅ read-only</td><td>fine on valid strings; all O(n) walks</td></tr>
+<tr><td><code>strncpy</code></td><td>⚠ misdesigned</td><td>may NOT terminate on truncation + zero-pads wastefully; prefer snprintf</td></tr>
+<tr><td><code>strcpy / strcat / sprintf</code></td><td>🚫 unbounded</td><td>correct only when sizes are already proven — so prove with snprintf instead</td></tr>
+<tr><td><code>gets</code></td><td>☠ removed from C11</td><td>historically responsible for the Morris worm era</td></tr>
+<tr><td><code>strtol / strtod</code></td><td>✅ parsing</td><td>the real int("42") — with endptr error detection; atoi has no error channel</td></tr>
+</table>
+<pre><code>char *end;
+long v = strtol(argv[1], &amp;end, 10);          /* M2 L1's validate-at-boundary,     */
+if (*end != '\0') { /* not a clean number */ }  /* C edition — and there's the     */
+                                                 /* char** out-param again (3.3!)  */</code></pre>
+
+<h2>3. AoS vs SoA in C — the trilogy completes</h2>
+<pre><code>/* Array of Structs: cozy per-record          Struct of Arrays: fast per-field    */
+struct P  { float x, y, z; };                 struct Ps {
+struct P  pts[N];                                 float *x, *y, *z;  size_t n;
+for (...) pts[i].x *= s;    /* touches        };
+   12 bytes to use 4 — 3× traffic */          for (...) ps.x[i] *= s;  /* pure,
+                                                  contiguous, SIMD-ready */</code></pre>
+<p>M1 L5 §4 named it, M2 L4 P4 built it in dicts, M2 L5 measured the stride cost — and here is the C spelling that Module 5 will transplant onto the GPU verbatim (coalescing = 32 threads reading ps.x[i..i+31] contiguously). The engineering rule stays: AoS for record-at-a-time logic (a few cameras, a config), SoA for bulk math over fields (a million particles). C makes you commit in the type; there's no .T view to bail you out — which is WHY the decision gets made consciously here.</p>
+
+<h2>4. Multidimensional layouts, formally</h2>
+<pre><code>float t[D0][D1][D2];                  /* true multi-D: &amp;t[i][j][k] =               */
+                                      /* base + ((i*D1 + j)*D2 + k) * 4 — M2 L2's  */
+                                      /* NCHW formula, compiler-generated           */
+void f(size_t W, float m[][W]);       /* VLA parameter type: passes W at runtime — */
+                                      /* legal C, but see the VLA verdict below     */
+float *flat = ...; flat[IDX3(i,j,k,D1,D2)]   /* the course's choice: explicit      */</code></pre>
+<p><strong>The VLA verdict</strong> (variable-length arrays, <code>float buf[n]</code> on the stack): they exist (C99, optional in C11+), they look convenient, and professionals avoid them — stack space is ~8 MB total (3.5), n is runtime-sized, and a large-n call becomes a stack overflow with no error path. CUDA device code doesn't support them either. Local scratch of KNOWN small size: fine as plain arrays. Runtime-sized: heap (3.5) or a caller-provided buffer. This is also why the flat+IDX idiom wins: it works with heap buffers, static buffers, and (in Module 5) device buffers, unchanged.</p>
+
+<h2>5. Iteration idioms and the one-past-end law</h2>
+<pre><code>for (size_t i = 0; i &lt; n; i++)  use(a[i]);        /* index form: DEFAULT — clearest */
+for (float *p = a; p &lt; a + n; p++) use(*p);       /* pointer form: idiomatic C      */
+float *last = a + n - 1;                           /* careful: n==0 → a-1 is UB!    */
+/* LAW: a+0 .. a+n are valid POSITIONS (n+1 of them); a[n] is not a valid ACCESS.  */
+/* Every STL/thrust range in your future is [begin, end) — this law wearing robes. */</code></pre>
+
+<h2>6. Gotchas</h2>
+<div class="gotcha"><strong>sizeof-on-parameter (quiz 1).</strong> ARRAY_LEN inside a function measures the pointer. The count is a parameter or it doesn't exist. -Wsizeof-pointer-div warns — read it.</div>
+<div class="gotcha"><strong>The n+1 string budget.</strong> "8 chars" needs char[9]. Every off-by-one here either truncates silently (snprintf) or overflows (strcpy). Budget = strlen + 1, snprintf's return value audits it for you.</div>
+<div class="gotcha"><strong><code>if (s == "yes")</code>.</strong> Compares s's address with a literal's address: false forever (or true by linker coincidence — worse). strcmp(s, "yes") == 0. The M2 L4 is-vs-== lesson, string edition.</div>
+<div class="gotcha"><strong>strlen in the loop condition.</strong> <code>for (i = 0; i &lt; strlen(s); i++)</code> re-walks the string every iteration: O(n²) (Gauss — M1 L2). Hoist it: <code>size_t len = strlen(s);</code> — the M2 L3 invariant-hoisting rule with a measurable bite.</div>
+<div class="gotcha"><strong>Off-the-end pointers in disguise.</strong> <code>a + n</code> is legal; <code>a[n]</code> is not; <code>a - 1</code> is UB even unread (Ex.2's arr[-1]); and for n==0, even computing a+n-1 underflows the law. Empty-input paths need their own thought (M2 L6's stats([]) decision, at the pointer level).</div>
+<div class="gotcha"><strong>2D formula drift.</strong> Half the code says r*W+c, one refactored corner says r*H+c — the M2 L2 scenario's disease, now without NumPy's shape errors to catch it. ONE IDX macro, used everywhere, asserted in tests against a known fixture.</div>
+
+<h2>Scenario — the benchmark table that ate its own header</h2>
+<p>Your study group's C benchmark harness (3.9's ancestor) prints a beautiful results table — and after someone adds a kernel with a long name, the CSV header row starts reading "tiled_shared_memory_v2,3.1ms" <em>inside другой column</em>, and one timing in twenty is a number like 1315859240. Two bugs, both from this lesson, both invisible in Python. First: names are stored in <code>char name[16]</code> and filled with <code>strcpy</code> — "tiled_shared_memory_v2" is 22+1 bytes; the overflow marches into the adjacent struct field (the ms double!), which explains the garbage integers — they're IEEE bytes read as text and vice versa (Ex.2's signature, spotted in the wild). Fix: <code>snprintf(r-&gt;name, sizeof r-&gt;name, "%s", src)</code> plus a truncation check that logs a warning (quiz 2's return-value audit). Second, subtler: the CSV writer builds each row with repeated <code>strcat</code> into a 4 KB line buffer — no overflow yet, but strcat re-walks the growing string every append: the writer is O(rows × line²), and profiling shows 40% of "benchmark time" is string appending (Gauss's revenge — the strlen-in-loop gotcha wearing a different hat). Fix: track the write position with a pointer and snprintf into <code>buf + pos</code>, advancing pos by the return value — the standard C "string builder" idiom (and M2 L1's join-not-+= lesson, compiled). The harness output is now boring and correct, the group adds a "no strcpy/strcat/sprintf" grep to CI (M2 L6's constitution grows a C amendment), and the corrupted-CSV war story becomes the way everyone remembers WHY.</p>
+
+<h2>Practice</h2>
+<details><summary>1. Predict, then verify: <code>int a[5] = {1,2,3,4,5}; int *p = a + 1; printf("%d %d %d %td\n", *p, p[2], *(a + 4), (a+4) - p);</code></summary><div class="body">2 4 5 3. *p = a[1]; p[2] = *(p+2) = a[3]; *(a+4) = a[5th element] = 5; pointer difference (a+4)−(a+1) = 3 ELEMENTS (%td is ptrdiff_t's specifier — the 3.2 %zu discipline's sibling). If all four landed, the arithmetic is yours.</div></details>
+<details><summary>2. Write <code>reverse_inplace(float *a, size_t n)</code> with two pointers (front/back) and no index variables, handling n=0 and n=1 correctly by construction. Why is the two-pointer form the one that generalizes to "partition" (quicksort's core)?</summary><div class="body"><code>void reverse_inplace(float *a, size_t n) { if (n &lt; 2) return; float *lo = a, *hi = a + n - 1; while (lo &lt; hi) { float t = *lo; *lo++ = *hi; *hi-- = t; } }</code> — note the guard makes a+n−1 safe (gotcha #5), and *lo++ = *hi is the *p++ idiom used correctly (3.3's gotcha, now an asset). The two-pointer scan-toward-middle shape IS partition/two-sum/dedup — a whole interview genre; in C it's also the cache-friendliest form (two sequential streams — M1 L3's ladder smiles).</div></details>
+<details><summary>3. Fix this function three ways (bound, hoist, contract) and rank them: <code>void upper(char *s) { for (int i = 0; i &lt;= strlen(s); i++) s[i] = toupper(s[i]); }</code></summary><div class="body">Bugs first: &lt;= walks one past... actually s[strlen(s)] is the \0 — toupper('\0') is '\0', harmless HERE but fragile; strlen per iteration = O(n²); int i vs size_t (3.2 sign-compare). Fixes ranked: (1) contract+idiom: <code>for (char *p = s; *p; p++) *p = (char)toupper((unsigned char)*p);</code> — no strlen at all, terminator IS the bound (the C-native form; note the unsigned char cast — toupper on negative char is UB, 3.2's char-signedness landmine closing the loop!). (2) hoist: size_t len = strlen(s) once, i &lt; len. (3) just fixing &lt;= to &lt; leaves the O(n²). The best fix DELETED the length concept entirely — sometimes the idiom is the optimization.</div></details>
+<details><summary>4. The IDX macro under test: write asserts that would catch the r*H+c drift bug on a 2×3 fixture filled with value 10*r+c, checking all six cells AND the flat buffer order {0,1,2,10,11,12}. Which M2 L6 playbook layer is this?</summary><div class="body"><code>float m[6]; for (r...) for (c...) m[IDX(r,c,3)] = 10.0f*r + c;</code> then assert m[0]==0 && m[1]==1 && m[2]==2 && m[3]==10 && m[4]==11 && m[5]==12; and spot-check IDX(1,2,3)==5. The flat-order assertion is the sharp one: a transposed IDX still passes per-cell round-trips (write-then-read through the same wrong formula!) but scrambles the BUFFER order — you must pin the layout itself. Playbook layer 2 (fixed hand-computed fixture) + layer 5 (contract). This exact test, promoted to CUDA in 5.2, catches transposed-kernel-launch bugs weekly in real life.</div></details>
+<details><summary>5. Parse argv properly: main(int argc, char **argv) — explain the type (array of WHAT, terminated how), then write the argument loop that converts argv[1..] to doubles with strtol/strtod error checking, rejecting "3.5x" and "" loudly. Where did you see char** before?</summary><div class="body">argv: array of char* (pointers to NUL-terminated strings), argc of them, and argv[argc] == NULL by law (a second terminator convention!). Loop: <code>for (int i = 1; i &lt; argc; i++) { char *end; double v = strtod(argv[i], &amp;end); if (end == argv[i] || *end != '\0') { fprintf(stderr, "bad number: '%s'\n", argv[i]); return 1; } use(v); }</code> — end==start catches "", *end!='\0' catches "3.5x" (M2 L1's validate-at-boundary, spelled in pointers). char** sighting: cudaMalloc's void** cousin and 3.3's alloc_buffer — argv is a pointer to pointers because each argument is itself a pointer. The shell's been calling your C signature all along.</div></details>
+<details><summary>6. Layout duel, predicted then measured: struct P {float x,y,z;} pts[1M] vs three float arrays; scale only x by 2.0f in each. Predict the traffic ratio from sizes alone (M1 L3 style), then measure with clock_gettime. Why might the measured ratio be SMALLER than predicted, and what M4 concept is peeking through?</summary><div class="body">Prediction: AoS touches 12 bytes to use 4 → 3× traffic → up to 3× slower for a bandwidth-bound pass. Measured: typically 1.5–2.5× — smaller because (a) the hardware prefetcher streams the whole AoS buffer efficiently anyway (sequential access is its best case), and (b) at 12B stride, each 64B cache line still contains 5⅓ elements' worth of x-bytes... every line IS used partially, so the waste is exactly the 3× only in cache-line-limited regimes. The peeking concept: cache lines + prefetch (M4 L2) — the difference between naive byte-counting and line-granular reality. On GPU (5.7) the same experiment yields nearly the full ratio: warps make the line-granularity math exact. Measure, don't vibe — and keep the prediction WITH the measurement in your notes; the gap is where the learning lives.</div></details>
+<details><summary>7. Design: a bounds-checked "slice" for C — struct span { float *p; size_t n; }; specify constructors (from array, from subrange with clamping), element access policy (checked get/set vs raw), how it changes the saxpy/mat_vec signatures, and its exact relationship to (a) M2 L5's views and (b) the pointer+count pairs this lesson taught. What does C++ call this (3.7 preview)?</summary><div class="body"><code>struct span { float *p; size_t n; };
+span span_of(float *a, size_t n);
+span subspan(span s, size_t off, size_t len);   /* clamps: off&gt;n → empty; off+len&gt;n → shorten (M2 L4's slice-clamping semantics, chosen ON PURPOSE and documented) */
+static inline float sp_get(span s, size_t i){ assert(i &lt; s.n); return s.p[i]; }</code> — assert in debug builds, raw s.p[i] in hot loops after validation at the boundary (M2 L6: checks live at edges). Signatures collapse: saxpy(float a, span x, span y) — the pointer+count pair GETS A NAME, which is the entire idea; mat_vec rows become subspan(M_span, r*C, C) — Ex.1's pointer arithmetic, now bounds-aware. Relationship: it IS M2 L5's view (buffer+offset+length, stride fixed at 1) and it IS this lesson's (pointer,count) contract reified. C++ calls it std::span (C++20) — and CUDA code increasingly passes exactly this shape. You just designed a standard-library type from first principles; 3.7 hands you the official one.</div></details>
+
+<div class="pager">
+  <a href="lesson-03.html">← Pointers</a>
+  <a href="lesson-05.html">Next: The stack, the heap & malloc →</a>
+</div>
+<div class="footer">GPU Mastery · Module 3 · Lesson 4 — works offline · progress saved in your browser</div>
+</div>
+<script src="../assets/diagrams3.js"></script>
+<script src="../assets/app.js"></script>
+</body>
+</html>

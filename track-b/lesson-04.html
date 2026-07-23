@@ -1,0 +1,206 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>B4 Monte Carlo & cuRAND — GPU Mastery</title>
+<link rel="stylesheet" href="../assets/style.css">
+</head>
+<body data-lesson="bl4">
+<nav><div class="inner">
+  <a class="logo" href="../index.html">GPU<span>Mastery</span></a>
+  <a class="item" href="../index.html">Home</a>
+  <a class="item on" href="../curriculum.html">Curriculum</a>
+  <a class="item" href="../labs.html">Labs</a>
+  <a class="item" href="../setup.html">Lab setup</a>
+  <a class="item" href="../prompt.html">Generator prompt</a>
+</div></nav>
+<div class="wrap">
+
+<div class="lesson-top">
+  <div><span class="badge">Track B · Lesson 4</span><span class="badge dim">≈ 3 h</span></div>
+  <button id="donebtn" class="donebtn">Mark lesson complete</button>
+</div>
+<h1>Monte Carlo — the method that trades certainty for dimensions, at 1/√N</h1>
+<p class="lead">When integrals live in 100 dimensions (finance, particle transport, statistical physics), grids die exponentially and random sampling doesn't care. The price is the slowest convergence law in this course — error ∝ 1/√N, measured below at slope −0.494 — which makes Monte Carlo simultaneously the most GPU-hungry workload in science and the field where ALGEBRA (variance reduction, measured at 62×) beats hardware hardest. Plus the parallel-randomness problem cuRAND solved properly, and folklore didn't.</p>
+
+<h2>Concept</h2>
+
+<h3>The law: 1/√N, measured — including a trap about measuring it</h3>
+<div class="diagram" data-diagram="b4-sqrtn" data-caption="RMS error over 30 trials falls with slope −0.494 on log-log — the central limit theorem, executed. A single run's slope read −0.80: rates are statistics too."></div>
+<pre><code>estimate π: throw darts at the unit square, count the quarter-circle hits
+  error ~ σ/√N   (CLT: the estimator is a mean of N iid samples)
+MEASURED, RMS over 30 trials:  N=1e3 → 4.9e-2 · 1e4 → 1.4e-2 · 1e5 → 5.2e-3
+  · 1e6 → 1.5e-3     log-log slope = −0.494  ✓ theory −0.5
+THE TRAP (executed on purpose): a SINGLE run's error-vs-N slope read −0.80 —
+  one trajectory's errors are themselves random; fitting them "measures" a
+  rate that isn't there. Convergence rates get trials and error bars like
+  any other measurement (M1 L7, pointed at the method itself).
+the trade: ×100 samples → ÷10 error — brutal, but DIMENSION-FREE: a grid
+  with 100 points/axis in d=10 needs 10²⁰ evaluations; MC needs whatever
+  your error budget says, in ANY d. That exchange built quant finance.</code></pre>
+
+<h3>Parallel randomness: independence by construction</h3>
+<div class="diagram" data-diagram="b4-streams" data-caption="Same seed everywhere = N copies of one sample (corr 1.0, measured). SeedSequence.spawn / counter-based Philox make independence a THEOREM, not a hope."></div>
+<pre><code>the catastrophe (measured): rng(123) on every rank → correlation 1.0 —
+  a million "samples" carrying ONE sample's information; error bars lie 1000×
+the folklore fix (seed+rank): usually-okay with modern generators, PROVABLY
+  okay with none — and historic LCG/MT crews got burned enough that
+  "usually" is banned in this track (B8's reproducibility ethics)
+the correct constructions:
+  numpy: SeedSequence(seed).spawn(n_ranks) — measured cross-corr −0.02 ✓
+  cuRAND device API: counter-based Philox — sample = f(key, counter):
+    stream (seed, subsequence, offset) gives every GPU THREAD its own
+    provably-disjoint sequence, reproducible regardless of thread count —
+    5.8's determinism problem, solved at the SOURCE for randomness
+    (curand_init(seed, tid, 0, &state) — one line, mathematically clean)</code></pre>
+
+<h3>Variance reduction: algebra as a sample multiplier</h3>
+<div class="diagram" data-diagram="b4-variance" data-caption="Antithetic pairing measured at 62× variance reduction on E[e^U] — same 1/√N slope, 62× fewer samples for the same bar. Know WHY it worked or it silently won't."></div>
+<pre><code>antithetic: average f(U) with f(1−U) — errors anti-correlate when f is
+  MONOTONE.  MEASURED: var 0.242 → 0.0039 = 62× fewer samples free.
+  (non-monotone f? the pairing can do nothing — or harm: the WHY is load-
+  bearing, quiz 2's whole case)
+control variates: know E[g] exactly for a g correlated with f? estimate
+  E[f−c·g] + c·E[g] — variance shrinks by the correlation²
+stratified / quasi-MC (Sobol): spread samples evenly → up to ~1/N on smooth
+  integrands (a whole order of convergence!) at the cost of trickier error
+  estimation — the standard finance stack is Sobol + Brownian bridges
+the doctrine: variance reduction is measured in ×fewer-samples, making it
+  directly comparable to buying GPUs — 62× from four lines of algebra is
+  a fleet you didn't purchase (4.6's economics, probabilistic edition).</code></pre>
+
+<h3>Why GPUs eat Monte Carlo alive</h3>
+<pre><code>N paths, zero coupling until the final average: embarrassingly parallel —
+  5.2's independent-threads model with no halos, no barriers (until the
+  reduction: 5.8, verbatim), no divergence IF paths take similar branches
+per-thread shape: private state (Philox counters in registers), a path loop,
+  one value out → grid-stride + 5.8's ladder for the mean/variance
+the ONE wrinkle: payoffs with branchy logic (barrier options, absorption
+  events) reintroduce 5.6's divergence — sort/bucket paths by fate when it
+  bites (5.6 Ex.1's remedy, probabilistic edition).</code></pre>
+
+<h2>Worked example</h2>
+<div class="card">
+<p><strong>Task:</strong> Price the classic pipeline — estimate E[e^U] (a baby option payoff) to ±1e-4 at 95% confidence, three ways, with the sample-count arithmetic done BEFORE any run (the B-track ritual). All variances measured above.</p>
+<pre><code>required N ≈ (1.96·σ / ε)²   for ±ε at 95%
+plain MC:        σ² = 0.242  → N = (1.96·0.492/1e-4)² ≈ 9.3e7 samples
+antithetic:      σ² = 0.0039 → N ≈ 1.5e6   (62× fewer — the measured ratio,
+                                            cashing out exactly as predicted)
++ control variate (g=U, E[U]=½, corr(e^U,U)≈0.99): variance ÷ ~50 again →
+                 N ≈ 3e4 — from 93 MILLION to 30 THOUSAND samples by algebra
+GPU ledger (T4-class): plain-MC 9.3e7 paths × ~20 ns/path ≈ 1.9 s;
+  the algebraic stack does it in ~1 ms — OR holds the 1.9 s budget and
+  delivers ±2e-6 instead. Either way: the variance table IS the capacity plan.
+error-bar fixture (non-negotiable): report estimate ± 1.96·s/√N from the
+  SAME run's sample variance, and CI-test that the true value lands inside
+  the bar ~95% of the time across seeds — an estimator whose error bars
+  don't calibrate is wrong even when its point estimate is close (B8's
+  statistical-reproducibility rung, born here).</code></pre>
+<p><strong>What to internalize:</strong> the entire engineering conversation — how many samples, how much GPU, whether to bother with variance reduction — happened in four lines of arithmetic on MEASURED variances. Monte Carlo without the N-formula is gambling with error bars; with it, it's the most predictable workload in this track: embarrassingly parallel, bandwidth-light, and priced to the sample before you launch anything.</p>
+</div>
+
+<h2>Key points</h2>
+<ul class="keypoints">
+<li>MC error ∝ σ/√N (measured slope −0.494 over 30-trial RMS) — dimension-free, which is the entire reason it owns high-dimensional integration despite the brutal rate.</li>
+<li>Measuring a convergence rate is itself statistics: a single run's slope read −0.80; rates get trials, RMS, and error bars (M1 L7 applied recursively).</li>
+<li>Parallel streams are independent by CONSTRUCTION or not at all: same-seed corr = 1.0 (measured); SeedSequence.spawn / counter-based Philox (cuRAND's device API) make disjointness a theorem and reproducibility thread-count-independent.</li>
+<li>Variance reduction is a sample multiplier you can price: antithetic measured at 62× on monotone f; control variates scale with corr²; Sobol approaches 1/N on smooth integrands — algebra competes with fleets.</li>
+<li>Required N = (1.96σ/ε)² — the four-line capacity plan that converts a measured variance into GPUs, seconds, and error bars before any run.</li>
+<li>Error bars are part of the estimator: report ±1.96s/√N from the run itself, and fixture their CALIBRATION across seeds — a close point estimate with lying bars is still wrong.</li>
+</ul>
+
+<h2>Quiz</h2>
+<div class="quiz">
+  <div class="q">1. A risk team scales their GPU Monte Carlo from 8 to 512 workers for a regulatory deadline. Throughput scales beautifully; the final VaR number's error bar, computed as always from sample variance, SHRINKS on schedule — but backtesting later shows the estimate was far outside its own confidence interval, badly. The RNG line: <code>curand_init(42 + worker_id % 16, 0, 0, &state)</code>. Reconstruct the failure, explain why the error bar LIED, and give the two-line fix plus the fixture that catches this class forever.</div>
+  <button class="opt">512 workers hit a cuRAND period limit</button>
+  <button class="opt" data-c="1">The seed arithmetic wraps at 16: workers 0–15 get distinct seeds, but worker 16 repeats worker 0's ENTIRE sequence, 17 repeats 1's… — 512 workers = 16 independent streams × 32 exact copies. Effective N is 1/32 of nominal, but the sample-variance calculation can't see it: duplicated samples don't inflate the spread (they're legitimate draws — just SHARED), so s/√N_nominal reports a bar √32 ≈ 5.7× too tight: the estimate is honest-ish, the CONFIDENCE is fiction — the worst failure mode in regulated statistics. Fix: curand_init(seed, GLOBAL_worker_id, 0, &state) — Philox subsequences are disjoint by construction for every distinct id, no modulo, no arithmetic cleverness (b4-streams' theorem doing the work). Fixture: the cross-stream correlation audit (pairwise corr on a sample from every worker — measured 1.0 catches copies instantly) PLUS the calibration test from the worked example: across 100 seeds, the truth must land in the 95% bar ~95 times — 60/100 flags this bug without ever reading the RNG code</button>
+  <button class="opt">fp32 accumulation biased the mean — use Kahan</button>
+  <button class="opt">512 workers need 512× more samples for the same bar</button>
+  <div class="expl">The % 16 is a real-world bug shape (a modulo meant for something else, a copy-paste from a 16-GPU config) — and its cruelty is that MORE hardware made the statistics WORSE while every dashboard improved. The mechanism to internalize: duplicated streams shrink effective N invisibly to variance-based bars, because the bar formula ASSUMES independence — the one assumption the bug broke. Calibration fixtures test the assumption itself, which is why B8 makes them mandatory for anything reported with a ±.</div>
+</div>
+<div class="quiz">
+  <div class="q">2. Fresh from this lesson, a colleague applies antithetic pairing to their photon-transport code (payoff: 1 if the photon escapes a slab, 0 if absorbed — a jagged, non-monotone function of the driving uniforms) and reports "variance reduced 1.7×… sometimes, and 0.95× on other configs." Then they propose Sobol sequences "for the 1/N rate" on the same 60-dimensional discontinuous problem. Set expectations with mechanisms, and redirect to the two techniques that DO fit this problem.</div>
+  <button class="opt">They implemented antithetic wrong — it always helps</button>
+  <button class="opt" data-c="1">Both proposals ignore their WHY. Antithetic's 62× came from MONOTONE f (f(U) and f(1−U) anti-correlate — b4-variance's fine print); an escape/absorb indicator is a step-function tangle of the uniforms: pairing buys corr ≈ 0 (their 1.7×/0.95× wobble is noise around 'nothing'). Sobol's near-1/N needs SMOOTH integrands and effective low dimension; on a 60-d discontinuous indicator it degrades toward plain MC (and its error estimation gets harder — you pay complexity for nothing). What fits transport: (1) importance sampling — sample the paths that MATTER (bias toward escape-likely trajectories, reweight by the likelihood ratio): the transport field's workhorse, variance reductions of 10–1000× on rare-event tallies; (2) stratification on the FIRST decisive dimensions (entry angle/depth) where the payoff's structure lives, plus Russian roulette/splitting for path population control — the neutron-transport classics. Rule: variance reduction is a THEOREM with hypotheses; check the hypotheses or measure noise</button>
+  <button class="opt">Sobol always beats pseudorandom — proceed</button>
+  <button class="opt">Just run 62× more samples instead</button>
+  <div class="expl">The 62× was real AND conditional — this quiz is the price of teaching by measurement: learners over-generalize the number and skip the hypothesis (monotonicity). The redirect matters as much as the rejection: importance sampling is where transport codes live (and its likelihood-ratio machinery is exactly what B8 will audit for weight-degeneracy). "Technique X reduced variance 62×" is always shorthand for "…on integrands satisfying its hypotheses" — reading the fine print is the difference between a method and a slogan.</div>
+</div>
+
+<h2>Exercises</h2>
+<details><summary>Exercise 1 — Reproduce the whole measurement stack (NumPy, anywhere): (a) the −0.5 slope via 30-trial RMS AND the single-run trap (fit one trajectory; report both slopes); (b) the same-seed catastrophe and spawn's fix via pairwise correlations across 8 simulated "ranks"; (c) the worked example's N-formula — verify empirically that N=1.5e6 antithetic samples land ±1e-4 at ~95% calibration over 100 repetitions.</summary><div class="body">
+<pre><code>expected: slopes −0.49±0.02 (RMS) vs anywhere in −0.6..−1.1 (single run —
+report YOUR value; its wrongness is the point); corr matrix: same-seed
+off-diagonals 1.0, spawned |corr| &lt; 0.05; calibration: 93–97 of 100 runs
+inside the bar (binomial noise on 95% — knowing THAT spread is itself
+statistical literacy: don't panic at 91, investigate at 80).</code></pre>
+<p>Deliverable: three plots + the calibration count. Part (c) is the one that changes behavior forever: you watched an error bar EARN its 95% claim — and every future "±" you publish inherits that standard (B8 formalizes it; regulators, referees, and quiz 1's backtest all enforce it).</p>
+</div></details>
+<details><summary>Exercise 2 — Colab (cuRAND via CUDA or torch): a GPU π-estimator with per-thread Philox (curand_init(seed, tid, 0, …)), grid-stride paths, and 5.8's reduction for (sum, sum²) — yielding estimate AND error bar in one kernel. Verify: (a) matches CPU at same total N within bars; (b) reproducibility — same seed, DIFFERENT block sizes → same streams consumed... what changes and what doesn't? (c) throughput vs the 20 ns/path ledger figure; then stage quiz 1's %16 bug across 64 "workers" and catch it with the correlation audit.</summary><div class="body">
+<pre><code>expected: (b)'s subtlety — per-thread sequences are identical regardless of
+launch geometry (Philox counters!), but WHICH thread accumulates which paths
+changes with gridDim → the (sum, sum²) reduction ORDER differs → last-bit
+wobble in the estimate (5.8's law): streams reproducible, reduction order
+not — write BOTH facts in the repro doc (b8-repro's rung 1 vs 2 distinction,
+experienced firsthand). Staged bug: pairwise corr matrix lights up in
+32 perfect 1.0 pairs — screenshot it; it's the fixture's résumé.</code></pre>
+<p>The (sum, sum²) single-pass pattern is 5.8 P5's paired-accumulator (with its one-pass-variance caveat handled at these magnitudes — or use Welford per-thread then B8's Chan merge: cite your choice). This kernel is the B-track's second trophy piece after B3's stepper.</p>
+</div></details>
+
+<hr>
+<h1>Go deeper — the stochastic craft sheet</h1>
+
+<h2>1. From uniforms to everything (the transformation toolbox)</h2>
+<pre><code>inverse CDF: x = F⁻¹(u) — exact, one uniform per sample, needs invertible F
+  (exponential: −ln(u)/λ — transport's free-path draw, one line)
+Box–Muller: two uniforms → two exact Gaussians (cuRAND's normal2 does pairs —
+  half the calls, and the paired shape fits 5.7's vectorized loads)
+acceptance–rejection: propose, test, retry — exact for gnarly densities but
+  BRANCHY: the GPU wrinkle (§4) made systematic; batch-and-compact
+  (Thrust's B9 stream compaction) beats per-thread retry loops
+ziggurat: table-based Gaussian/exponential — fastest on CPU, table lookups
+  = gathers on GPU (5.7): cuRAND mostly prefers Box–Muller/Philox math.
+choose by: exactness need × branch cost × memory pattern — a distributions
+decision is a kernel-shape decision (every table in this track ends there).</code></pre>
+
+<h2>2. Error bars in production (the part beyond ±1.96σ)</h2>
+<pre><code>batch means: correlated samples (MCMC, time-series paths) violate iid —
+  bar formulas need effective sample size (autocorrelation-adjusted) or
+  batched variances: the ±'s hypotheses, again
+weight degeneracy (importance sampling's tax): if a few likelihood ratios
+  dominate, effective N collapses — monitor ESS = (Σw)²/Σw²; ESS/N &lt; 10%
+  means your clever sampler is a lottery (quiz 2's redirect, audited)
+seeds in CI: fixture runs pin seeds for bitwise repro (b8-repro rung 1);
+  VALIDATION runs sweep seeds for calibration (rung 3) — two jobs, two
+  configs, never confused (the B8 ladder operationalized for MC).</code></pre>
+
+<h2>3. Gotchas</h2>
+<div class="gotcha"><strong>Seed arithmetic.</strong> Any formula fancier than "distinct subsequence per worker" (quiz 1's %16, seed+rank×constant, time-based seeds colliding at launch) is a correlation bug waiting for scale. Philox subsequences or SeedSequence.spawn — constructions, not arithmetic.</div>
+<div class="gotcha"><strong>One RNG state in shared/global memory.</strong> Threads sharing a generator state serialize on it (5.8's contention) or race it (corrupted streams — worse than slow). State lives per-thread in registers; that's WHY counter-based designs won the GPU era.</div>
+<div class="gotcha"><strong>Variance reduction without its hypothesis.</strong> Quiz 2. Antithetic wants monotonicity, control variates want correlation, Sobol wants smoothness+low effective dimension, importance sampling wants bounded weights. Check, then measure, then trust.</div>
+<div class="gotcha"><strong>Fitting rates to single runs.</strong> The measured −0.80. Trials, RMS, bars — even for measuring the method itself.</div>
+<div class="gotcha"><strong>fp32 tallies of many small contributions.</strong> 1e8 paths × fp32 accumulator = A6's absorption eating your rare-event tally exactly (rare events are small numbers added to big sums — the worst case). fp64 or Kahan tallies (B8's ladder), always for the ACCUMULATORS.</div>
+<div class="gotcha"><strong>Divergent payoff branches at warp scale.</strong> Barrier/absorption logic splits warps (5.6): profile branch efficiency; sort paths by expected fate or regenerate compacted batches (B9's compaction) when the tax shows. Randomness in VALUES needn't mean randomness in CONTROL FLOW.</div>
+
+<h2>Scenario — the pricing desk that bought algebra instead of a cluster</h2>
+<p>A mid-size trading firm's exotic-options desk runs nightly risk on a 40-GPU farm: 2.1 hours, and the business wants sub-hour plus a new product line that would triple the load. The infrastructure quote for the naive fix — ~120 more GPUs — lands on a quant's desk for review, and the quant, B-track-literate, asks for one week to audit the ESTIMATORS instead. Findings, in the lesson's exact vocabulary: the Asian-option pricers ran plain MC where the payoff is monotone in the driving Brownian increments (antithetic: measured 11× on their actual books — not 62×, THEIR integrand, THEIR measurement); the barrier products' rare-knockout tallies used no importance sampling (a tilted drift + reweighting: 40× on the tails that dominated the error budget); the Greeks used finite-difference re-simulation with INDEPENDENT streams (common random numbers — same seeds across the bumped runs — cut Greek variance 25× for free: correlation as a feature); and one legacy pricer carried quiz 1's cousin, a seed scheme that wrapped at 256 workers — its error bars had been fictional for two years (backtest deviations everyone had blamed on "market regime"). Net after one month of algebra: nightly risk in 41 minutes on the EXISTING farm with calibrated bars, new product line absorbed, purchase order cancelled — approximately one engineer-year of GPUs replaced by four theorems with checked hypotheses. The desk's new review rule, straight from this lesson: <em>every estimator PR states its variance, its reduction techniques WITH their hypotheses, and its calibration evidence — because in Monte Carlo, the cheapest hardware is a smaller σ².</em></p>
+
+<h2>Practice</h2>
+<details><summary>1. Compute required N for: (a) ±0.01 on a probability near 0.5; (b) ±1e-5 on the same; (c) ±5% RELATIVE on a rare event with p ≈ 1e-6 (plain MC); (d) case (c) with importance sampling that boosts the event to p̃ ≈ 0.1 (bounded weights). State the lesson each number teaches.</summary><div class="body">σ² for Bernoulli = p(1−p). (a) (1.96·0.5/0.01)² ≈ 9.6e3 — cheap. (b) ±1e-5: ≈ 9.6e9 — the √-law's brutality: 1000× tighter = 1e6× more samples. (c) relative bar: need σ/(√N·p) = 0.05/1.96 → N ≈ (1.96)²·(1−p)/(0.05²·p) ≈ 1.5e9 samples to SEE ~1500 events — rare events cost 1/p (the transport/finance tail problem in one line). (d) with the event at 0.1 and controlled weights: N ≈ (1.96²·9)/(0.0025·…) ~ 1.4e4-class — importance sampling bought ~1e5× (quiz 2's redirect, priced). Lessons: the square law forgives nothing (b), rare events are 1/p-expensive raw (c), and measure-change algebra is the only civilized answer (d) — with ESS monitoring as its seatbelt (§2).</div></details>
+<details><summary>2. Prove (two lines) why antithetic pairing can never INCREASE the cost for monotone f, and construct the explicit f where it doubles the variance — then state the general condition (sign of Cov[f(U), f(1−U)]) and how you'd CHEAPLY estimate it before committing.</summary><div class="body">Var of the pair-mean = ¼[2σ² + 2Cov(f(U), f(1−U))] per two samples vs σ²/2 plain: antithetic helps iff Cov &lt; 0. Monotone f: U and 1−U are antithetic in rank → f values anti-correlate → Cov ≤ 0 (Chebyshev's other inequality — equality only for constant f): never worse, per-sample-pair. Adversarial f: symmetric about ½, e.g. f = |U−½| → f(U) = f(1−U) exactly → Cov = +σ²: pair variance DOUBLES per sample (you sampled everything twice). Cheap pre-check: 1e4 pilot samples, compute corr(f(U), f(1−U)) directly — one line, and it converts quiz 2's "sometimes 0.95×" mystery into a printed number before any commitment. Hypothesis-checking as a pilot run: the lesson's doctrine made mechanical.</div></details>
+<details><summary>3. Your GPU kernel draws exponentials via −ln(u)/λ. Enumerate the three float dangers in that one line (u=0, u near 1, fp32 log precision), their physical symptoms in a transport code, and the standard hardenings.</summary><div class="body">(1) u = 0: ln(0) = −inf → infinite free path: photon exits the universe; cuRAND uniforms exclude 0 by convention (know your generator's interval — (0,1] vs [0,1): read the doc, don't assume) or use −ln(1−u) with u∈[0,1). (2) u→1⁻: −ln(1−u)-form loses precision as 1−u cancels (M1 L8) → quantized SHORT paths: subtle spatial banding near sources (log1p is the fix: −log1p(−u)). (3) fp32 log's ~1e-7 relative error is FINE for path lengths but its argument's granularity means the smallest representable paths quantize: harmless in most tallies, visible in ultra-thin-shell geometries — fp64 the geometry-critical draws only (A6's per-tensor-role logic, per-VARIABLE here). Symptoms-first thinking: each numerics flaw maps to a physical artifact a domain scientist will describe to you — translating their "weird banding near the source" into "log1p missing" is the collaboration superpower this track builds.</div></details>
+<details><summary>4. Common random numbers (the scenario's Greek trick): explain why using the SAME streams for f(θ) and f(θ+dθ) slashes the variance of the finite-difference derivative, the condition under which it fails, and the cuRAND feature that makes "same streams" trivial to guarantee.</summary><div class="body">Var[f̂(θ+dθ) − f̂(θ)] = Var+Var − 2Cov: independent streams → 2σ², and dividing by tiny dθ amplifies it catastrophically (B1's quiz-2 V, stochastic edition — FD of noisy functions is noise division). Same streams → the paths are nearly identical, Cov ≈ σ² → the difference isolates the θ-effect: variance drops by orders (measured 25× at the desk). Fails when the payoff's PATH STRUCTURE changes discontinuously with θ (a barrier crossing flips for some paths → the coupling breaks exactly on the paths that matter — smoothing/conditional expectations are the field's patch). The cuRAND guarantee: counter-based Philox — streams are (seed, subsequence, offset) FUNCTIONS, so "same streams" = same three integers, independent of scheduling, thread count, or run (b4-streams' theorem earning its third job: independence ACROSS workers, reproducibility ACROSS runs, coupling ACROSS scenarios).</div></details>
+<details><summary>5. Design the divergence remedy for a barrier-option kernel where ~7% of paths knock out early each step (5.6's tax measured at 1.9× on the naive version): compare per-thread early-exit, warp-level compaction every k steps, and regenerate-fresh-paths-in-dead-lanes — with the bookkeeping cost and statistical caveat of each.</summary><div class="body">Early-exit: dead threads idle in the warp (one-sided if — 5.6 P2d: cheap divergence but idle lanes accumulate: at 7%/step, half the warp is dead by step ~10 → ~2× waste on long horizons: matches the measured 1.9×). Compaction every k steps (B9's stream compaction): pack live paths densely → full warps resume; cost: a scan+scatter every k steps (price via 5.8/B9's primitives — worth it when idle% × steps-remaining exceeds compaction's ~2-pass cost; k tunes it). Regenerate-in-dead-lanes: fill dead lanes with FRESH paths → zero idleness, but the tally bookkeeping must weight cohorts correctly (paths no longer share step-counts — per-path accumulators, slightly fatter state) and the caveat: fresh paths must use fresh SUBSEQUENCES (quiz 1's law) or you've correlated your replacement population. Production transport codes do compaction+regeneration ("population control" — Russian roulette/splitting are its statistical cousins from quiz 2). The meta: divergence remedies are 5.6 mechanics + STATISTICAL bookkeeping — both ledgers must balance, which is exactly why MC engineering is its own craft.</div></details>
+<details><summary>6. Write the "estimator review checklist" the scenario's desk adopted — six lines, each with its mechanism citation and the incident class it pre-empts (harvest this lesson + B8 previews).</summary><div class="body">(1) Stated σ² and required-N arithmetic vs the error budget (worked ex) — pre-empts fleet purchases that algebra could cancel. (2) Stream construction = spawn/Philox subsequences, NO seed arithmetic (quiz 1) — pre-empts fictional error bars at scale. (3) Variance-reduction hypotheses CHECKED (pilot Cov/corr printouts — P2's one-liner; quiz 2) — pre-empts noise dressed as technique. (4) Accumulator dtypes: fp64/Kahan tallies, Welford/Chan for variance (gotcha 5, B8) — pre-empts absorbed rare-event mass. (5) Calibration evidence: truth-in-bar rate across seeds ~95% (Ex.1c) — pre-empts the backtest surprise, i.e., quiz 1's ending. (6) ESS monitoring on any weighted estimator, with an alert floor (§2) — pre-empts importance-sampling lotteries. Six lines on one card; the desk's month of wins was this card, applied retroactively. Yours applies proactively.</div></details>
+<details><summary>7. Interview closer: "Design a GPU Monte Carlo engine for derivative pricing" — 90 seconds: the parallel shape (per-thread Philox, grid-stride, 5.8 reduction with wide tallies), the N-formula as capacity planning, the variance-reduction stack with hypotheses, streams/reproducibility policy (three integers), divergence handling, and the calibration fixture that makes the ± legal.</summary><div class="body">Skeleton: "Shape first: paths are embarrassingly parallel — per-thread counter-based Philox (streams are functions of seed/subsequence/offset: independence and reproducibility by theorem, thread-count-invariant), grid-stride path loops, and a 5.8 reduction carrying (Σ, Σ²) in fp64 so the error bar comes out of the same kernel [Ex.2]. Capacity is arithmetic before hardware: N = (1.96σ/ε)² — I measure σ² on a pilot, then the variance-reduction stack pays for itself: antithetic where payoffs are monotone (I check Cov on the pilot — measured 62× on smooth cases, ~nothing on indicators [quiz 2]), control variates against analytic siblings, common random numbers for Greeks (25×-class), importance sampling with ESS monitoring for tails [scenario]. Divergence from knockouts gets compaction/population-control every k steps — 5.6's tax with statistical bookkeeping [P5]. Reproducibility policy: fixture runs pin the three stream integers bitwise; validation sweeps seeds and asserts CALIBRATION — the truth lands inside the 95% bar 95% of the time, because a bar that doesn't calibrate is fiction, and quiz 1's seed-wrap taught the fleet-scale cost of fiction. One-liner: in Monte Carlo the cheapest GPU is a smaller variance — I buy algebra first and silicon second." Every number in that answer came from something you executed this lesson. That's the point.</div></details>
+
+<div class="pager">
+  <a href="lesson-03.html">← Stencils & grid codes</a>
+  <a href="lesson-05.html">Next: MPI + CUDA, NCCL, GPUDirect →</a>
+</div>
+<div class="footer">GPU Mastery · Track B · Lesson 4 — works offline · progress saved in your browser</div>
+</div>
+<script src="../assets/diagramsB.js"></script>
+<script src="../assets/app.js"></script>
+</body>
+</html>

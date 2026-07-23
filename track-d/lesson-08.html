@@ -1,0 +1,180 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>D8 Honest Cross-Vendor Benchmarking — GPU Mastery</title>
+<link rel="stylesheet" href="../assets/style.css">
+</head>
+<body data-lesson="dl8">
+<nav><div class="inner">
+  <a class="logo" href="../index.html">GPU<span>Mastery</span></a>
+  <a class="item" href="../index.html">Home</a>
+  <a class="item on" href="../curriculum.html">Curriculum</a>
+  <a class="item" href="../labs.html">Labs</a>
+  <a class="item" href="../setup.html">Lab setup</a>
+  <a class="item" href="../prompt.html">Generator prompt</a>
+</div></nav>
+<div class="wrap">
+
+<div class="lesson-top">
+  <div><span class="badge">Track D · Lesson 8</span><span class="badge dim">≈ 3 h</span></div>
+  <button id="donebtn" class="donebtn">Mark lesson complete</button>
+</div>
+<h1>Honest Cross-Vendor Benchmarking — the number that survives a rewrite</h1>
+<p class="lead">Now that you can run one algorithm on four vendors, you'll be asked the loaded question: "which GPU is faster?" It's a trap, because wall-time-faster is almost never the decision — a premium card can win the demo and lose the datacenter on cost and watts. This lesson is the measurement discipline that makes cross-vendor comparisons honest: normalize by dollars and joules (4.6, completed), compare each machine to its OWN roofline (4.7), and ship a benchmark a stranger can't dismiss (5.11). Plus the five sins to spot in any vendor's slide.</p>
+
+<h2>Concept</h2>
+
+<h3>Wall time is the wrong denominator</h3>
+<div class="diagram" data-diagram="d8-normalize" data-caption="The premium GPU wins throughput but the value GPU wins images-per-dollar and images-per-joule — the wall-time winner is not the money winner. Normalize before you conclude."></div>
+<p>Here is the executed arithmetic that ends the "which is faster" conversation. Two GPUs on the same inference workload:</p>
+<pre><code>                     GPU A (premium)   GPU B (value)    winner
+throughput           1000 img/s        640 img/s        A by 1.56x
+cloud cost           $3.20/hr          $1.10/hr
+power                700 W             400 W
+--- normalized (the numbers that decide) ---
+images per dollar    1.125e6 /$        2.095e6 /$       B by 1.86x   (executed)
+images per joule     1.429 /J          1.600 /J         B by 1.12x   (executed)</code></pre>
+<p>GPU A is unambiguously faster in wall time — 1.56x the throughput — and if "faster" were the question, A wins. But A costs ~3x per hour and draws ~1.75x the power, so once you divide throughput by the things you actually pay for, GPU B delivers 1.86x more images per dollar and 1.12x more per joule. A wins the demo; B wins the datacenter. This is 4.6's bridge economics completing its arc: there, the "toll" was PCIe bandwidth; here it's dollars and watts, and the lesson is identical — the raw speed number is meaningless until you divide it by the resource that's actually scarce. At datacenter scale, the scarce resources are the electricity bill and the capital cost, so images-per-dollar and images-per-joule are the numbers on the slide that matters.</p>
+
+<h3>The only fair speed number: % of your own roofline</h3>
+<div class="diagram" data-diagram="d8-roofline" data-caption="GPU A reaches 72% of its 40 TF ceiling; GPU B reaches 88% of its 24 TF ceiling. B is the better-utilized kernel even though A's absolute throughput is higher. Compare fractions, not wall times."></div>
+<p>When you do want to compare the <em>engineering</em> (not the economics) across vendors, wall time still lies, because the two machines have different ceilings. The fair number is each kernel's fraction of its <em>own</em> machine's roofline (4.7). Executed:</p>
+<pre><code>              peak      achieved     % of OWN roofline
+GPU A         40 TF     28.8 TF      72%
+GPU B         24 TF     21.1 TF      88%
+A moves more absolute FLOPs (28.8 &gt; 21.1) — but B's kernel is BETTER TUNED
+(88% vs 72% of what its hardware can do). If you're judging the CODE, B's port
+is the better engineering; if you're judging the HARDWARE, A has the higher ceiling.
+"% of own ceiling" separates 'is my kernel good' from 'is this chip fast' —
+two different questions wall time smears together.</code></pre>
+<p>This is why "% of own roofline" is the only fair cross-vendor performance number: it measures how well the kernel uses the hardware it's on, independent of how fast that hardware is. A kernel at 88% of a modest GPU is better-written than one at 72% of a fast GPU, even though the fast GPU finishes first. Conflating the two — "A finished first, so our A kernel is better" — is the error that hides a badly-tuned kernel behind fast silicon (or blames good code running on a slow-but-correct port, the D2 trap). Roofline-fraction first tells you whether the kernel or the chip is responsible for the wall time; then, and only then, do the cost/watt economics decide the purchase.</p>
+
+<h3>The five sins, and the fairness protocol</h3>
+<div class="diagram" data-diagram="d8-sins" data-caption="The five sins of a cross-vendor benchmark: no warmup, wall-time-only, mismatched problem sizes, no roofline, and author's-home-turf tuning. Spot them in any vendor slide."></div>
+<p>Most cross-vendor benchmarks you'll read — especially vendor marketing — commit at least one of five sins, and naming them is your defense: <strong>(1) no warmup</strong> — cold clocks or JIT compilation counted in the timing (M1 L7's ritual skipped); <strong>(2) wall time only</strong> — no cost or watt normalization, hiding the real winner (this lesson's opener); <strong>(3) mismatched problem sizes</strong> — GPU A at N=4096 versus GPU B at N=1024, not the same race; <strong>(4) no roofline</strong> — a "2x faster" claim with no ceiling, a number without meaning (4.7); <strong>(5) author's home turf</strong> — code tuned for vendor A and blind-ported to B, so it measures the porting effort, not the hardware (D2's wavefront bug as a benchmark methodology error). The fairness protocol is the inverse of the five sins: warm the clocks and take a median of K runs (M1 L7), use identical problem sizes, report % of each machine's own roofline (4.7), normalize by cost and watts (4.6), and use code each vendor would endorse (or the vendor's own library) — then write it up so a skeptic can reproduce it (5.11's stranger test).</p>
+
+<h2>Worked example</h2>
+<div class="card">
+<p><strong>Task:</strong> A team must choose between GPU A and GPU B for a new inference fleet. The vendor of A sent a benchmark showing "A is 1.56x faster — buy A." Prediction first: is throughput the right decision variable for a fleet, and which GPU minimizes cost per unit of work?</p>
+<pre><code>Prediction: for a FLEET, the decision variable is cost (and power) per unit work,
+  not throughput — so normalize before deciding.
+Executed normalization (same workload, both GPUs):
+  throughput : A 1000 img/s vs B 640 img/s        -> A faster by 1.56x  (vendor's number)
+  img per $  : A 1.125e6 vs B 2.095e6             -> B cheaper by 1.86x
+  img per J  : A 1.429 vs B 1.600                 -> B greener by 1.12x
+Decision: at fleet scale you buy throughput-per-dollar and per-watt, so B wins —
+  you'd need ~1.86x fewer dollars of B to do the same work, and pay less power.
+When would A win? If you're LATENCY-bound (need each result fast, not many cheaply)
+  or rack-space/cooling-limited (fewer, hotter cards) — then A's raw speed matters.
+The vendor's '1.56x faster' was true and irrelevant to the fleet question.</code></pre>
+<p><strong>What to internalize:</strong> the vendor's benchmark wasn't fraudulent — GPU A really is 1.56x faster in throughput — it was just answering a different question than the one the buyer has. For a fleet sizing decision, the scarce resources are capital and power, so the decision variable is images-per-dollar and images-per-joule, and by those GPU B wins decisively. The skill isn't distrusting numbers; it's asking "faster at what, normalized by what I actually pay for?" and recognizing that throughput-per-second is the right metric only when time itself is the scarce resource (latency-critical serving, real-time systems). Notice the honest caveat: A <em>does</em> win if you're latency-bound or space/cooling-limited — so the answer is genuinely workload-dependent, and the discipline is to name the scarce resource first, then pick the metric that divides by it. Anyone who says "GPU X is faster" without naming the denominator is selling something.</p>
+</div>
+
+<h2>Key points</h2>
+<ul class="keypoints">
+<li>Wall time is the wrong denominator for a fleet: the premium GPU can win throughput (executed: A by 1.56x) yet lose images-per-dollar (B by 1.86x) and images-per-joule (B by 1.12x) — normalize by the scarce resource (4.6).</li>
+<li>The only fair cross-vendor performance number is % of each machine's OWN roofline (4.7): B at 88% of 24 TF is better-tuned code than A at 72% of 40 TF, even though A moves more absolute FLOPs.</li>
+<li>% of own ceiling separates two questions wall time smears together: "is my kernel good" (utilization) versus "is this chip fast" (peak).</li>
+<li>The five benchmark sins: no warmup, wall-time-only, mismatched sizes, no roofline, and author's-home-turf (blind-ported) code — at least one appears in most vendor slides.</li>
+<li>The fairness protocol inverts the sins: warm clocks + median-of-K (M1 L7), identical sizes, % of own roofline (4.7), cost/watt normalization (4.6), code each vendor would endorse (or their library).</li>
+<li>Ship the benchmark to the stranger test (5.11): methodology, machine files (5.1), and normalization explicit, so a skeptic can reproduce it and can't dismiss it.</li>
+</ul>
+
+<h2>Quiz</h2>
+<div class="quiz">
+  <div class="q">1. A vendor's slide shows their GPU is "2.3x faster" than a competitor on a training benchmark. You get to ask three questions before believing it. Which three most efficiently expose whether the number is honest?</div>
+  <button class="opt">What's the clock speed, the memory size, and the price?</button>
+  <button class="opt" data-c="1">(1) Same problem size and warmed clocks on both? (exposes mismatched-sizes and no-warmup sins). (2) What's the % of each GPU's own roofline? (exposes whether it's the chip or a badly-tuned competitor port — the home-turf sin — and gives a fair engineering number). (3) What's the images-or-tokens per dollar and per watt? (exposes the wall-time-only sin and reveals the decision-relevant number). Those three cover four of the five sins and convert "2.3x faster" into a claim you can actually evaluate or dismiss</button>
+  <button class="opt">Is it fp16 or fp32? Is it one GPU or eight? What batch size?</button>
+  <button class="opt">Can I have the source code, the driver version, and the OS?</button>
+  <div class="expl">Option 4's details matter for reproduction but don't directly test the claim's honesty. Option 3's questions are relevant but narrower (precision/scale/batch are sub-cases of "same problem size"). Option 1 asks about specs, not methodology. The correct answer targets the sins directly: mismatched sizes and cold clocks (sin 1, 3), home-turf tuning via roofline fraction (sin 5, 4), and the missing cost/watt denominator (sin 2). Three questions, four sins, and you've converted a marketing number into either a defensible claim or an exposed one — which is the whole skill of reading a benchmark.</div>
+</div>
+<div class="quiz">
+  <div class="q">2. Your team ports a kernel to a competitor's GPU, measures it 40% slower in wall time, and the lead drafts an email: "Vendor B's hardware is 40% slower for our workload." Before sending, what single measurement could overturn this conclusion, and why?</div>
+  <button class="opt">Nothing — wall time is the ground truth; the email is correct</button>
+  <button class="opt" data-c="1">The % of each GPU's own roofline. If your kernel hits 85% of GPU A's ceiling but only 45% of GPU B's, the 40% wall-time gap is mostly YOUR under-tuned port on B (the home-turf sin, D2), not B's hardware — a re-tune could close much of it. Wall time conflates 'the chip is slower' with 'our code is worse on this chip'; the roofline fraction separates them. Sending 'B is 40% slower' without that measurement risks a false hardware conclusion drawn from your own porting effort</button>
+  <button class="opt">The GPU's clock speed — if B clocks lower, that explains it</button>
+  <button class="opt">The price — if B is cheaper, 40% slower is fine</button>
+  <div class="expl">Option 4 conflates the economics question (valid but separate) with the hardware-speed claim being made. Option 3's clock speed doesn't explain utilization gaps (a kernel can be slow on a fast-clocked chip if it's uncoalesced). Option 1 is the exact error the lesson forbids — wall time smears chip-speed and code-quality together. The correct answer is the roofline fraction (4.7): it's the one measurement that says whether the 40% is the hardware or your port. This is D2's "a slow first port measures your porting, not their hardware" as a benchmarking discipline — never publish a hardware verdict earned by an un-tuned kernel.</div>
+</div>
+
+<h2>Exercises</h2>
+<details><summary>Exercise 1 — Normalize a benchmark. Given GPU X (820 img/s, $2.40/hr, 550 W) and GPU Y (500 img/s, $0.95/hr, 300 W), compute images-per-dollar and images-per-joule for each and state which you'd buy for (a) a large batch-inference fleet and (b) a latency-critical real-time service. Show the arithmetic.</summary><div class="body">
+<pre><code>img/$ = img/s * 3600 / ($/hr):  X = 820*3600/2.40 = 1.23e6 ; Y = 500*3600/0.95 = 1.89e6  -> Y by 1.54x
+img/J = img/s / watts        :  X = 820/550 = 1.49       ; Y = 500/300 = 1.67           -> Y by 1.12x
+</code></pre>
+<p>(a) Fleet: buy Y — it delivers ~1.54x more images per dollar and ~1.12x more per joule; capital and power are the scarce resources, and Y wins both. (b) Latency-critical: lean X — if each request must return fast and you're not throughput-bound, X's 820 vs 500 img/s (1.64x) raw speed is the scarce resource, and the cost premium may be worth it for the SLO. The exercise's point: the SAME two GPUs invert their ranking depending on which resource is scarce (throughput-time vs dollars), so "which is better" is unanswerable without the workload. Deliverable: the four normalized numbers and a one-line justification per scenario.</p>
+</div></details>
+<details><summary>Exercise 2 — The autopsy. Here's a vendor benchmark: "Our GPU trains ResNet 1.9x faster than Competitor. (Our GPU: batch 512, latest driver, best-of-10 runs. Competitor: batch 128, stock settings, single run.)" Find every one of the five sins present and state how each inflates the number.</summary><div class="body">
+<p>Sins present: (3) mismatched sizes — batch 512 vs 128 is not the same race, and larger batches use the GPU better, inflating the winner. (1) no warmup / unequal runs — "best-of-10" for their GPU versus "single run" for the competitor counts the competitor's cold-clock/JIT run against it (M1 L7's ritual applied to only one side). (5) author's home turf — "stock settings" for the competitor means an un-tuned port, so the number partly measures the competitor's lack of tuning, not the hardware (D2). (4) no roofline — no % of own ceiling, so we can't tell chip from code. (2) wall-time only — no cost or watts, so even if the 1.9x were real, it might be the worse buy. That's all five. Deliverable: the labeled list. The rewrite that would make it honest: same batch size, same warmup and run count, each vendor's best-tuned code (or library), roofline fractions reported, and cost/watt normalized — at which point the "1.9x" would likely shrink or invert.</p>
+</div></details>
+
+<hr>
+<h1>Go deeper — the discipline of a fair number</h1>
+
+<h2>1. The normalization formulas</h2>
+<pre><code>metric              formula                         when it's the decision variable
+──────────────────  ──────────────────────────────  ─────────────────────────────────
+throughput          work / second                   latency/real-time, time is scarce
+images per dollar   throughput * 3600 / ($/hr)      fleet sizing, capital is scarce
+images per joule    throughput / watts              power/cooling-limited, energy scarce
+% of own roofline   achieved FLOPs / peak FLOPs     judging the CODE, cross-vendor fair
+total cost of work  (work / throughput) * $/hr       a fixed job, minimize the bill
+rule: name the SCARCE resource first, then pick the metric that divides by it.
+"faster" with no denominator is a non-answer (the vendor's favorite non-answer).</code></pre>
+
+<h2>2. The fair-comparison protocol (invert the five sins)</h2>
+<pre><code>sin                     the fix
+──────────────────────  ────────────────────────────────────────────────
+no warmup               warm the clocks; median of K runs (M1 L7)
+wall time only          normalize by $ and W (4.6)
+mismatched sizes        identical problem size and precision on both
+no roofline             report % of each machine's OWN ceiling (4.7)
+author's home turf      each vendor's best-tuned code, or their library (5.11)
++ reproducibility       machine files (5.1): driver, toolkit, flags, clocks
+the north star: a skeptic from the LOSING vendor should be unable to find a
+methodological hole. If they can, you have a marketing slide, not a benchmark.</code></pre>
+
+<h2>3. The benchmark README standard (5.11's stranger test, multi-vendor)</h2>
+<pre><code>a cross-vendor benchmark a stranger can trust ships with:
+  · the exact workload + problem size (identical across vendors)
+  · per-machine files: GPU, driver, toolkit, clocks, power cap (5.1)
+  · warmup + run-count methodology (M1 L7)
+  · % of own roofline per machine (4.7) — the fairness number
+  · cost and watt normalization with the $/hr and W sources cited (4.6)
+  · the CODE per vendor (and whether it's tuned or library) — the home-turf disclosure
+  · a "what we did NOT test" section (honesty about scope)
+this is 5.11's ship standard applied to a comparison — the deliverable is not a
+number, it's a METHODOLOGY a stranger can rerun and a competitor can't dismiss.</code></pre>
+
+<h2>Gotchas</h2>
+<div class="gotcha"><strong>Reporting wall time with no denominator.</strong> "2x faster" is a non-answer until you say faster per what — per dollar, per watt, per rack. Name the scarce resource, then divide (the opener). Most vendor claims stop at the numerator on purpose.</div>
+<div class="gotcha"><strong>Concluding "their hardware is slow" from your un-tuned port.</strong> A blind port measures your porting effort, not their chip (D2, quiz 2). Report % of own roofline before any hardware verdict — a 45%-utilized kernel indicts your code, not the silicon.</div>
+<div class="gotcha"><strong>Mismatched problem sizes.</strong> Different N, batch, or precision on the two machines isn't a comparison. Larger sizes use a GPU better, so size mismatch silently favors one side (Exercise 2's sin 3).</div>
+<div class="gotcha"><strong>Cold clocks and single runs.</strong> The first run pays JIT/clock spin-up (M1 L7); timing it, or comparing a best-of-10 to a single run, is measuring warmup. Warm both sides equally, median of K.</div>
+<div class="gotcha"><strong>Comparing absolute FLOPs across different ceilings.</strong> "A did more GFLOP/s" conflates a faster chip with better code. % of own roofline is the fair engineering number; absolute throughput answers a different question (the cost/watt one).</div>
+<div class="gotcha"><strong>No machine file.</strong> A benchmark without driver/toolkit/clock/power-cap details isn't reproducible, so it isn't a benchmark — it's an anecdote (5.1, 5.11). The stranger must be able to rerun it.</div>
+
+<h2>Scenario — the procurement that turned on a denominator</h2>
+<p>A company is scaling inference and running a bake-off between two GPU vendors. The incumbent vendor sends a polished benchmark: their card is 1.56x faster on the exact production model, with charts. The engineering lead is ready to sign, because 1.56x faster is 1.56x faster. A skeptical senior asks for three things before the purchase — the same three from this lesson's quiz. First, roofline fractions: both kernels are well-tuned (mid-80s% of their own ceilings), so the wall-time gap is real hardware, not a bad port — good, the incumbent's chip genuinely is faster. Second and third, the denominators: the incumbent's card costs ~3x per hour and draws ~1.75x the power, so once normalized, the "slower" competitor delivers 1.86x more inferences per dollar and 1.12x more per joule (this lesson's executed numbers). For a fleet that will run 24/7 for years, that inverts the decision entirely — the company would spend nearly double on compute to buy the faster card's throughput it doesn't need, because the workload is throughput-bound-at-scale, not latency-bound. They buy the "slower" GPU and cut their projected compute bill by a third. The incumbent's benchmark was honest and irrelevant: it answered "which is faster?" when the question was "which is cheaper per inference at scale?" The moral is the lesson's spine: a benchmark is only as good as its denominator, and the highest-leverage question in any performance comparison is "normalized by what I actually pay for?" The senior didn't out-measure the vendor — the vendor's throughput number was correct — she out-<em>framed</em> them, by insisting the metric match the scarce resource. That reframing, not any single measurement, is the skill.</p>
+
+<h2>Practice</h2>
+<details><summary>1. GPU P: 1200 img/s, $4.00/hr, 700 W. GPU Q: 900 img/s, $2.00/hr, 500 W. Compute images-per-dollar and images-per-joule; which wins each, and which wins throughput?</summary><div class="body">Throughput: P (1200 vs 900) by 1.33x. img/$ = img/s*3600/($/hr): P = 1200*3600/4.00 = 1.08e6; Q = 900*3600/2.00 = 1.62e6 -> Q by 1.5x. img/J = img/s/W: P = 1200/700 = 1.71; Q = 900/500 = 1.80 -> Q by 1.05x. So P wins raw throughput; Q wins both cost and energy. For a fleet you'd buy Q; for a latency-bound service where per-request speed is scarce, P. Same pattern as the worked example: the wall-time winner and the money winner are different GPUs.</div></details>
+<details><summary>2. Why is "% of its own roofline" a fairer cross-vendor number than "GFLOP/s achieved"?</summary><div class="body">Because absolute GFLOP/s conflates two independent things: how fast the chip is (its ceiling) and how well the code uses it (its utilization). A kernel at 60% of a 40 TF GPU achieves 24 TF; a kernel at 90% of a 24 TF GPU achieves 21.6 TF — the first shows a higher absolute number while being the WORSE-engineered kernel. "% of own roofline" isolates the code-quality question from the chip-speed question, so it fairly compares how well each port uses its hardware regardless of how fast that hardware is (4.7). Absolute FLOPs answer "is this chip fast"; roofline fraction answers "is my kernel good" — and cross-vendor code comparison needs the second.</div></details>
+<details><summary>3. Name the five sins of a cross-vendor benchmark and give the one-line fix for each.</summary><div class="body">(1) No warmup -> warm clocks, median of K runs (M1 L7). (2) Wall time only -> normalize by dollars and watts (4.6). (3) Mismatched problem sizes -> identical size and precision on both. (4) No roofline -> report % of each machine's own ceiling (4.7). (5) Author's home turf (blind-ported competitor code) -> each vendor's best-tuned code or their library (D2, 5.11). The fixes together ARE the fairness protocol: same race, warm and repeated, judged by utilization and normalized by cost, with code both vendors would endorse.</div></details>
+<details><summary>4. When IS raw throughput the right metric, making the premium (higher $, higher watt) GPU the correct buy?</summary><div class="body">When time itself is the scarce resource: latency-critical or real-time services where each request must return within a tight SLO and you're not throughput-bound (interactive inference, trading, robotics control), or when you're rack-space- or cooling-limited and must get maximum work from the fewest, densest cards. In those cases raw per-request speed is what you're actually short of, so throughput-per-second is the right numerator and the premium card's higher cost/watt is a price worth paying. The rule holds: the metric must divide by the scarce resource — usually that's dollars or joules (favoring the value card), but when it's time or space, the premium card wins.</div></details>
+<details><summary>5. A benchmark reports only wall time and no machine file. List everything wrong and what minimum additions make it trustworthy.</summary><div class="body">Wrong: (a) no denominator — wall time alone can't answer a fleet decision (missing cost/watt, 4.6); (b) not reproducible — no driver/toolkit/clock/power-cap means a stranger can't rerun it (5.1, 5.11); (c) no fairness number — no % of own roofline, so we can't tell chip from code (4.7); (d) unknown warmup/run methodology (M1 L7). Minimum additions to make it trustworthy: the machine file per GPU, warmup + median-of-K methodology, % of own roofline, cost and watt normalization with sources, and the code (tuned or library) per vendor. At that point it graduates from anecdote to benchmark — a methodology a skeptic can rerun (the stranger test).</div></details>
+<details><summary>6. Explain how the D2 wavefront bug could silently corrupt a cross-vendor benchmark's conclusion.</summary><div class="body">If the benchmark blind-ports the NVIDIA-tuned kernel to AMD (the home-turf sin) and that kernel has a hard-coded warp-size-32 reduction, on AMD it either returns wrong answers or runs a degraded path — so the "AMD is slower/worse" conclusion is actually measuring the un-audited port, not the hardware (D2). Worse, if the wrong-answer version happens to run FAST (doing half the work), the benchmark could even show AMD as spuriously fast on a broken result. Either way the conclusion is corrupt because the code wasn't validated (fixtures, M2 L6) or tuned for the target. The fix is the fairness protocol: each vendor's best-tuned, numerically-validated code, and % of own roofline to reveal a degraded port — never a hardware verdict from a blind port.</div></details>
+<details><summary>7. The interview closer: "How would you fairly compare two GPUs from different vendors for our workload?" Deliver the spoken skeleton.</summary><div class="body">"First I'd refuse the question as asked, politely — 'which is faster' has no answer until we name the scarce resource, because the wall-time winner and the cost winner are routinely different GPUs. So I start by asking what's scarce for this workload: if it's throughput at fleet scale, the metric is inferences per dollar and per watt; if it's latency, it's per-request time; if it's power or rack space, it's per-joule or per-card. Then I run a FAIR comparison: identical problem size and precision on both, warmed clocks with a median of K runs so I'm not timing JIT or cold clocks, and — critically — each vendor's best-tuned code or their own library, never a blind port, because a blind port measures my porting effort and can carry bugs like a hard-coded warp size on a 64-lane wavefront. I report two numbers: percent of each machine's own roofline, which fairly says whether it's the chip or my code responsible for any gap, and the cost/watt-normalized throughput, which is what actually decides a purchase. And I ship it to the stranger test — machine files, methodology, normalization all explicit — so a skeptic from the losing vendor can rerun it and can't find a hole. The one-sentence version: name the scarce resource, divide by it, compare fractions of each machine's own ceiling, and use code both vendors would endorse. Anyone who answers 'which GPU is faster' with a single wall-time number is selling something.' Refusing the naked 'faster' and insisting on the denominator is the hire signal."</div></details>
+
+<div class="pager">
+  <a href="lesson-07.html">← Triton &amp; MLIR</a>
+  <a href="lesson-09.html">Next: Capstone — Four Backends →</a>
+</div>
+<div class="footer">GPU Mastery · Track D · Lesson 8 — works offline · progress saved in your browser</div>
+</div>
+<script src="../assets/diagramsD.js"></script>
+<script src="../assets/app.js"></script>
+</body>
+</html>

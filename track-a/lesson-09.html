@@ -1,0 +1,207 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>A9 torch.compile & TorchInductor — GPU Mastery</title>
+<link rel="stylesheet" href="../assets/style.css">
+</head>
+<body data-lesson="al9">
+<nav><div class="inner">
+  <a class="logo" href="../index.html">GPU<span>Mastery</span></a>
+  <a class="item" href="../index.html">Home</a>
+  <a class="item on" href="../curriculum.html">Curriculum</a>
+  <a class="item" href="../labs.html">Labs</a>
+  <a class="item" href="../setup.html">Lab setup</a>
+  <a class="item" href="../prompt.html">Generator prompt</a>
+</div></nav>
+<div class="wrap">
+
+<div class="lesson-top">
+  <div><span class="badge">Track A · Lesson 9</span><span class="badge dim">≈ 3 h</span></div>
+  <button id="donebtn" class="donebtn">Mark lesson complete</button>
+</div>
+<h1>torch.compile — your kernel skills, automated; your job, moved up a level</h1>
+<p class="lead">torch.compile captures your Python model into graphs, fuses the glue, and emits Triton — literally A4's language, written by a machine applying A5's ledger. This lesson teaches you to operate that machine: what breaks its capture, when its wins are real, why it recompiles, and how to read the kernels it writes — because "the compiler did something slow" is only debuggable by someone who knows what it should have done.</p>
+
+<h2>Concept</h2>
+
+<h3>The stack: capture → differentiate → generate</h3>
+<div class="diagram" data-diagram="a9-stack" data-caption="Dynamo captures Python bytecode into FX graphs; AOTAutograd traces forward+backward jointly; Inductor fuses and schedules; Triton/C++ come out the bottom. 3.1's pipeline, for graphs."></div>
+<pre><code>model_c = torch.compile(model)          # first call: seconds of compilation
+Dynamo      hooks CPython frame evaluation, symbolically traces your Python
+            into an FX graph, and installs GUARDS (asserts on shapes/dtypes/
+            constants) that decide when the cached graph is still valid
+AOTAutograd traces the JOINT forward+backward (A2's tape, ahead of time —
+            so the BACKWARD gets fused too: eager autograd never could)
+Inductor    plans fusion groups (A5 §1's boundary rules, encoded), picks
+            tile sizes, emits Triton for GPU / C++ for CPU — A4's kernels,
+            generated: TORCH_LOGS=output_code shows you the literal source
+modes: default | reduce-overhead (wraps steps in CUDA GRAPHS — 5.9 §2's
+  one-launch replay, killing 5.2's per-launch floor for confetti models)
+  | max-autotune (A4's autotuner, given a bigger budget)</code></pre>
+
+<h3>Graph breaks: where capture surrenders</h3>
+<div class="diagram" data-diagram="a9-breaks" data-caption="A break splits your model into separately-compiled islands with eager Python between — every break is a fusion wall and a guard-check toll."></div>
+<pre><code>break causes (the usual suspects, all old friends):
+  .item() / .cpu() / print(tensor)   → needs a device VALUE in Python:
+      5.3's sync trap AND a capture wall — one line, two sins (A2 gotcha 2)
+  data-dependent control flow        → `if loss &lt; 0.1:` on a tensor — the
+      graph can't branch on values it hasn't computed (use torch.where, or
+      torch.cond for real cases)
+  unsupported calls                  → numpy ops mid-forward, arbitrary C
+      extensions WITHOUT a fake kernel (A3 §2's registration debt, collected)
+audit tool: torch._dynamo.explain(fn)(x) — lists every break WITH its reason
+  and line number. The 5.10 discipline applies: count breaks BEFORE tuning
+  anything; one break in a hot inner loop nullifies the whole exercise.</code></pre>
+
+<h3>Guards and recompilation: the cache you didn't know you had</h3>
+<pre><code>each compiled graph is cached under its GUARDS: input shapes, dtypes,
+requires_grad, closure constants, even dict key order. A guard miss →
+RECOMPILE (seconds, on the critical path — A4 quiz 2's autotune stall,
+one level up). Shape churn is the classic trigger:
+  dynamic=True / torch._dynamo.mark_dynamic(x, 0)   → compile with SYMBOLIC
+  batch dim: one graph serves many sizes (guards become inequalities)
+  torch._dynamo.config.cache_size_limit (default ~8/frame): exceed it and
+  dynamo quietly FALLS BACK TO EAGER — your speedup evaporates silently
+  (gotcha 4's monitoring hook lives here)
+production stance: compile is a stateful JIT SERVICE inside your process —
+  warm it deliberately, monitor recompiles like you monitor 5.4's errors.</code></pre>
+
+<h3>When it wins (the table you already derived)</h3>
+<div class="diagram" data-diagram="a9-when" data-caption="Fusion-rich glue: big wins. One giant cuBLAS matmul: nothing to fuse. Shape churn: recompiles eat the win. Long steady runs: compile once, profit for days — A2 P6's derivation, now official."></div>
+<pre><code>wins:  many small ops (norms/activations/optimizers — A5 §1's ledger, auto-
+       collapsed), launch-bound confetti (reduce-overhead's CUDA graphs
+       erase 5.2's floor), long steady-shape runs (amortization)
+draws: matmul-dominated models (cuBLAS was already at the roofline — 5.11
+       quiz 1; compile fuses the EPILOGUES and stops there)
+loses: shape-churning notebooks, break-riddled code, cold-start-sensitive
+       serving without warmup (quiz 2's whole story)</code></pre>
+
+<h2>Worked example</h2>
+<div class="card">
+<p><strong>Task:</strong> Compile a transformer MLP block (linear → bias → GELU → linear → bias → residual → layernorm) and audit what the compiler did — the A5 ledger, executed by machine. (Colab-runnable; representative timings from a T4 run.)</p>
+<pre><code>eager:    ~11 kernel launches/step (profiler count: 2 GEMMs + 9 glue kernels)
+compiled: 4 kernels — 2 cuBLAS GEMMs (untouched — the compiler KNOWS 5.11
+          quiz 1) + 2 generated Triton kernels (bias+GELU fused into one;
+          residual+layernorm's two-pass into another)
+timing (do_bench, warmed):  glue portion 0.71 ms → 0.24 ms  (the A5 §1
+          ledger's ÷3, delivered automatically); GEMMs unchanged; step
+          1.9× on this glue-heavy block, ~1.15× on a GEMM-dominated one
+          (a9-when's two rows, measured in one afternoon)
+the audit trail you should actually read:
+  torch._dynamo.explain(block)(x)   → "0 graph breaks" (clean capture)
+  TORCH_LOGS=output_code            → the generated Triton: tl.load with
+      masks, BLOCK constexprs, pointer arithmetic in elements — A4's
+      vocabulary verbatim; find the fused gelu formula inline in the loop
+      body and the fp32 accumulation on the layernorm stats (A6's policy,
+      encoded by the compiler because its authors read the same postmortems)</code></pre>
+<p><strong>What to internalize:</strong> the compiler applied YOUR playbook — fuse the glue (A5), leave cuBLAS alone (5.11), accumulate stats wide (A6), mask the tails (A4) — and it will apply that playbook tirelessly to every model you ever compile. Your value moved up a level: you now audit its output (read the Triton!), clear its obstacles (kill the breaks), feed it stable shapes, and hand-write only what it structurally cannot do — fusing INTO the GEMM itself, which is exactly A11's capstone.</p>
+</div>
+
+<h2>Key points</h2>
+<ul class="keypoints">
+<li>The stack is capture (Dynamo + guards) → joint fwd/bwd tracing (AOTAutograd) → fusion and Triton codegen (Inductor): your A4/A5 skills, mechanized — and auditable via explain() and TORCH_LOGS=output_code.</li>
+<li>Graph breaks (.item(), data-dependent Python, unregistered custom ops) split the model into eager-stitched islands: count them FIRST — one break in the hot loop nullifies the tuning that follows.</li>
+<li>Guards cache compiled graphs by shape/dtype/constants; misses recompile ON the critical path, and exceeding cache_size_limit silently falls back to eager — shape stability (mark_dynamic, bucketing) is a production requirement, not a nicety.</li>
+<li>reduce-overhead mode wraps steps in CUDA graphs (5.9 §2): the cure for launch-bound confetti (5.2's floor), with static-address and no-sync constraints that your 5.3/5.9 discipline already satisfies.</li>
+<li>Wins scale with glue-share (A5's ledger) and run length (amortization): compiled GEMM-dominated models improve ~1.1×, glue-heavy blocks ~2× — predict from the profile before promising numbers (a9-when).</li>
+<li>Compile is a stateful JIT service in prod: warm every (shape, dtype) key at startup, export recompile/fallback counters, and treat a recompile storm like a 5.4 error class — monitored, alarmed, root-caused.</li>
+</ul>
+
+<h2>Quiz</h2>
+<div class="quiz">
+  <div class="q">1. After enabling torch.compile in a serving worker, p50 improves 25% — but every ~40 minutes a request stalls 6–9 seconds, and the stalls correlate with unusual request sizes. Meanwhile a counter you wisely exported shows compiled-graph count growing without bound. Diagnose the mechanism, the eventual silent failure it's marching toward, and the two-layer fix.</div>
+  <button class="opt">GC pauses — tune the Python garbage collector</button>
+  <button class="opt" data-c="1">Guard-miss recompilation on the request path: each novel shape (odd batch size, unusual sequence length) misses every cached graph's guards → Dynamo recompiles (seconds) while the request waits — A4 quiz 2's tuner-stall, one level up the stack. The march: when the per-frame cache_size_limit is exceeded, dynamo stops compiling and SILENTLY runs eager — the 25% win evaporates fleet-wide with no error, only a slow drift in p50 (the counter you exported is the only witness). Fix, two layers: (1) shape discipline at the API boundary — bucket/pad request shapes to a small fixed set (A8's serving stacks do this natively) and mark_dynamic the batch dim so one symbolic graph absorbs it; (2) operational — warm all buckets at startup (readiness probe runs one request per key), alarm on recompile rate and on eager-fallback, exactly like a 5.4 sticky-error watchdog</button>
+  <button class="opt">CUDA graphs are incompatible with serving</button>
+  <button class="opt">The model has a memory leak</button>
+  <div class="expl">The graph-count counter is the hero: recompile pathologies are invisible in averages and fatal in tails, and the SILENT eager-fallback ending is the part almost nobody knows until it bites (no exception is thrown — by design). The bucketing fix is the same shape-stabilization you met in A4 quiz 2 and A8's serving schedulers — three systems, one law: lazily-specializing machinery converts shape entropy into critical-path latency, so you spend entropy down BEFORE the hot path.</div>
+</div>
+<div class="quiz">
+  <div class="q">2. A colleague benchmarks torch.compile on their research notebook: "2.4 s eager vs 31 s compiled — compile is garbage." Their loop: fresh model per cell, 5 iterations, different batch size each iteration, one .item() print per step. List everything wrong with the measurement AND the honest prediction for their model if measured correctly (it's a small GNN: mostly scatter/gather ops with tiny dense layers).</div>
+  <button class="opt">Nothing wrong — compile is bad for GNNs, full stop</button>
+  <button class="opt" data-c="1">Measurement sins, in order: (1) compile cost (seconds) paid inside the timed region with only 5 iterations — amortization sabotaged (M1 L7's warmup law; the 31 s is mostly the compiler running); (2) a different shape per iteration → recompile EVERY step (quiz 1's pathology, maximized); (3) the .item() print is a graph break in the loop body — the captured region is shredded into islands (a9-breaks) so even the compiled steps barely fuse. Honest protocol: fixed/bucketed shapes, 50+ warmup steps, THEN time (A2 quiz 1's discipline). Honest prediction even then: MODEST gains — scatter/gather-dominated models are 5.7-gather-bound (memory-latency physics the compiler cannot re-index away) with little elementwise glue to fuse (a9-when's ledger): maybe 1.1–1.3× plus launch-overhead relief if kernels are tiny. "Compile is garbage" and "compile is magic" are the same error: skipping the ledger</button>
+  <button class="opt">They forgot mode='max-autotune', which would fix it</button>
+  <button class="opt">Compile requires an H100 to show benefit</button>
+  <div class="expl">The three sins map to this lesson's three mechanisms (amortization, guards, breaks) — a tidy diagnostic checklist for every "compile made it slower" report you'll ever receive (you will receive many). The GNN prediction is the deeper skill: the compiler automates A5's ledger but cannot repeal 5.7's physics — fusion helps glue, not gathers. max-autotune (option 3) would spend MORE compile time tuning kernels that were never the problem: a knob turned without a diagnosis (5.10's cardinal sin).</div>
+</div>
+
+<h2>Exercises</h2>
+<details><summary>Exercise 1 — Colab: build the worked example's MLP block; measure eager vs compiled with the full protocol (warmup 50, do_bench medians); run torch._dynamo.explain and record break count (expect 0); then sabotage it three ways — add a .item() log, make batch size vary per step, add a numpy call mid-forward — and for each, record: break/recompile behavior, the perf delta, and which counter/tool exposed it. File the triptych like 5.9 Ex.1's.</summary><div class="body">
+<pre><code>expected: clean block ~1.5–2× on glue (T4); .item() → 1 break, win halves
+(islands can't fuse across it — and the break's line number in explain()
+points AT your logging); shape churn → recompile per step: compiled becomes
+5–20× SLOWER than eager (the quiz-2 catastrophe, self-inflicted safely);
+numpy call → break with the clearest reason string of the three.
+tools that catch each: explain() for breaks; TORCH_LOGS=recompiles (or the
+graph-count counter) for churn; the profiler's kernel count for fusion loss.</code></pre>
+<p>The deliverable is the mapping symptom→tool: you now have the compile equivalent of 5.4's debugging ladder, learned by breaking things on purpose (the course's oldest trick — stage the crime, file the signature).</p>
+</div></details>
+<details><summary>Exercise 2 — The codegen safari: TORCH_LOGS=output_code on the MLP block; find in the generated source (a) the fused bias+GELU Triton kernel — identify BLOCK, the mask, the GELU formula inline; (b) the layernorm kernel's fp32 accumulation (A6's policy in machine-written code); (c) the GEMM calls it did NOT generate (extern cuBLAS calls — 5.11 quiz 1, respected by the machine). Then recompile with mode='max-autotune' and diff: what changed, what didn't, and what did it cost?</summary><div class="body">
+<pre><code>expected finds: (a) a triton_poi_fused_* kernel: tl.arange/mask/tl.load —
+A4's anatomy with generated names; GELU as the tanh-approximation formula
+inline (note WHICH gelu variant — exactness fixtures care, A5 P6);
+(b) tl.float32 casts around the mean/var reduction on bf16 inputs;
+(c) extern_kernels.mm / addmm lines — the compiler DELEGATING to cuBLAS.
+max-autotune: GEMMs may switch to Triton-generated matmuls IF its autotuner
+beats cuBLAS at your shapes (it benchmarks both — a4-autotune with a bigger
+budget); glue kernels get more config sweeps; compile time grows several×;
+runtime delta at T4 scale: usually small — record it as an honest data point.</code></pre>
+<p>Reading machine-generated kernels without flinching is the graduation exercise of A4+A9: from here on, "what did the compiler do" is a question you answer with evidence in five minutes, which is precisely the skill A11's r1-vs-r2 bar requires.</p>
+</div></details>
+
+<hr>
+<h1>Go deeper — operating the compiler</h1>
+
+<h2>1. CUDA graphs via reduce-overhead (5.9 §2, productized)</h2>
+<pre><code>mode="reduce-overhead": after warmup, the whole step's kernel sequence is
+captured ONCE and replayed with a single launch — 5.2's per-kernel µs floor
+amortized to ~zero: transformative for small-model/small-batch serving
+(decode loops! A8's per-token confetti) where launch overhead rivaled math.
+constraints (all 5.3/5.9 alumni): static tensor ADDRESSES between replays
+(the runtime maintains a static input pool — feed via copy-in), no
+data-dependent shapes inside, no syncs/.item() (breaks capture anyway), RNG
+handled specially. When it works: p50 drops like quiz 1's 25%. When violated:
+cryptic replay errors or silent recapture churn — the 5.9 scenario's lint
+rule (justify every sync) is literally a cudagraph-readiness audit.</code></pre>
+
+<h2>2. AOTInductor & the deployment boundary (A10's door)</h2>
+<pre><code>torch.compile is a JIT living in your Python process (guards, cache, warmup).
+AOTInductor EXPORTS the compiled artifact ahead of time (.so + weights):
+no Python, no Dynamo, no first-request compile — the serving-friendly shape
+(and why A10's images must otherwise carry the whole Triton/C++ toolchain:
+a JIT compiles IN PRODUCTION, so prod needs the compiler — the container
+gotcha people discover at 2 a.m.). The mental model: compile-the-JIT for
+training/research velocity; export-the-artifact for fleets — the same
+JIT-vs-AOT trade as 5.1's fatbin PTX story, one abstraction up.</code></pre>
+
+<h2>3. Gotchas</h2>
+<div class="gotcha"><strong>Timing the compiler.</strong> First calls include capture+codegen+autotune (quiz 2's 31 s). Warmup until steady, then measure — and report compile time SEPARATELY (it's a real cost, just a different budget line).</div>
+<div class="gotcha"><strong>Silent eager fallback.</strong> cache_size_limit exceeded, or an internal error → dynamo runs eager without raising. Export and alarm on the counters (torch._dynamo.utils.counters) or your "compiled" fleet quietly isn't.</div>
+<div class="gotcha"><strong>Side effects reordered or duplicated.</strong> Python side effects in forward (appending to lists, logging, RNG calls outside torch) happen at TRACE time, not run time (A4 gotcha 2's law, model-scale). Keep forward pure; hooks and callbacks go outside the compiled region.</div>
+<div class="gotcha"><strong>Global flags changing under a cached graph.</strong> tf32 settings, deterministic mode, autocast policy — flipped AFTER compilation, some are guarded (recompile), some are baked (stale behavior). Pin numerics-affecting globals before compile and treat them as part of the model version (A6 P3's CI heisenbug, compiled edition).</div>
+<div class="gotcha"><strong>Compile as a rescue for bad kernels.</strong> It cannot fix your custom op's uncoalesced access (5.7 is physics), un-break an unregistered extension (A3 §2's debt), or re-algorithm an O(N²) attention (A5 exists for that). The compiler optimizes the graph BETWEEN your mistakes.</div>
+<div class="gotcha"><strong>Version-skew fragility.</strong> Compiled-artifact caches and generated code are torch-version-coupled; upgrading torch under a warm cache directory or shipping artifacts across versions invites subtle breakage — pin, rebuild, re-fixture per upgrade (A3 §2's stable-ABI note is about the C++ side; the compiler side still moves).</div>
+
+<h2>Scenario — the 30% win that came with a 40-minute time bomb</h2>
+<p>A serving team enables reduce-overhead compile on their embedding+ranker model: p50 −30%, dashboards celebrated, change frozen for the quarter. Three weeks later: rare 8-second request stalls, then a pager storm one Tuesday — p99 through the roof while p50 stays gorgeous. The on-call, compile-literate, pulls the two counters this lesson said to export: compiled-graph count = 847 and climbing; eager-fallback = just started incrementing. Root cause hunt, guided by guards: a upstream service began sending a rare "batch of 1 with trailing metadata column" shape — every occurrence minted a new guard set (shape × a CLOSURE CONSTANT: a feature-flag dict whose key order varied per pod!), recompiles burned 6–8 s each on the request path, and that Tuesday the cache limit tripped → silent eager fleet-wide → p50 drift that DIDN'T page because it was slow, not broken (gotcha 2's exact trajectory). Fixes, in the order deployed: shape bucketing at the API gateway (entropy spent before the hot path — quiz 1's law), the flag dict frozen into a tuple (guard surface minimized), warmup-per-bucket in the readiness probe, and the two counters promoted to SLO-adjacent alarms. The postmortem's title is the lesson's thesis: <em>"torch.compile is a stateful service we deployed without realizing we'd deployed a service."</em> Treat the JIT like you treat any cache-plus-compiler system — warm it, bound it, monitor it — and it pays its 30% forever; treat it as a flag, and it pays until the first novel Tuesday.</p>
+
+<h2>Practice</h2>
+<details><summary>1. Predict compile's win (big/modest/negative) with one-line mechanisms: (a) BERT-large fine-tune, fixed 512 seq; (b) tiny MLP policy net in an RL loop, batch 1, called 10k×/s; (c) research notebook, new architecture daily; (d) 70B decode serving already on CUDA graphs + FA; (e) a diffusion U-Net with hundreds of convs+norms+activations; (f) your A3 custom-op-heavy model, fake kernels unregistered.</summary><div class="body">(a) Modest-solid (1.2–1.5×): GEMM-heavy but real glue share; stable shapes = perfect amortization. (b) BIG: launch-bound confetti — reduce-overhead's CUDA graphs erase 5.2's floor (this is the poster child). (c) Negative: daily recompiles, shape churn, compile tax never amortizes (a9-when's losing row — use eager, keep velocity). (d) ~Nothing left: the stack already hand-applied every trick compile knows (it's chasing 5.11's cuBLAS bar from below). (e) BIG: hundreds of fusable norm/act/conv-epilogue seams — the A5 ledger's dream client. (f) NEGATIVE until A3 §2's debt is paid: every unregistered op is a break; islands don't fuse — register fake kernels FIRST, then re-run the ledger. Six predictions, six mechanisms, zero benchmarks needed to rank them — benchmarks then confirm (M1 L7's order).</div></details>
+<details><summary>2. Explain guards to a new teammate via three concrete misses: same code called with (a) batch 32 then 33; (b) fp16 then bf16 input; (c) a module whose config dict gained a key. For each: what was guarded, miss cost, and the stabilization. Then: why does dynamic=True not simply solve all three?</summary><div class="body">(a) Shape guard (s0==32): miss → recompile; stabilize with mark_dynamic/bucketing — becomes a symbolic-range guard. (b) Dtype guard: recompile is CORRECT here (different kernels are genuinely needed — A6's dispatch reality); stabilize by not flip-flopping dtypes per call (pick the policy). (c) Constant/structure guard on the closure (dict keys!): the scenario's silent assassin — stabilize by freezing config into immutable structures before compile. dynamic=True only generalizes SHAPES (symbolic ints with 0/1 specialization); dtype and structure guards remain exact by necessity — a graph fused for fp16 math cannot serve bf16. The teaching: guards are a CORRECTNESS mechanism (5.4's spirit: refuse silently-wrong reuse) that becomes a performance problem only when your inputs' entropy exceeds your warmup's coverage — entropy management, not guard avoidance, is the fix (quiz 1).</div></details>
+<details><summary>3. reduce-overhead requires static input addresses across replays. Explain why (what does a captured CUDA graph actually store? — 5.9 §2), how torch satisfies it (the static-input copy-in pool = which 5.3/5.9 pattern?), and the failure signature when a user tensor's storage moves anyway.</summary><div class="body">A captured graph records kernel launches with their ARGUMENT VALUES — device pointers baked in (5.9 §2: record once, replay cheap; the replay re-issues the same pointers). New iteration, new input allocation → the graph would read stale addresses. torch's fix: a static input pool — persistent buffers at fixed addresses; each step COPIES user inputs in, replays, copies out: 5.3 P6's pinned-pool/ring pattern, repurposed (stable addresses as the contract instead of DMA-ability). Failure signature: silent staleness is prevented by design (torch copies), but OUT-of-graph tensors captured accidentally (a Python-held reference to an intermediate) or allocator churn under memory pressure → "tensor used in graph capture was freed/resized" errors or recapture storms — the fix is the 5.9 lint: no allocations, no syncs, no shape changes inside the captured region. One mental model: a CUDA graph is a compiled 5.9 pipeline; treat its inputs like memory-mapped registers, not Python objects.</div></details>
+<details><summary>4. Your compiled training step shows in the profiler as: [big fused kernel][big fused kernel][200 µs GAP][eager island: 14 tiny kernels][big fused kernel]. Reconstruct what the code likely looks like, the two-command investigation, and the fix's expected shape.</summary><div class="body">The eager island bracketed by fused regions = a graph break mid-step: 14 tiny kernels of un-fused glue running eager, plus the gap (guard evaluation + Python transition costs — the toll EVERY step, 5.2's floor's cousin). Likely code: a metrics/logging line (.item(), tensor print), a data-dependent if, or an unregistered op right between two module groups. Investigation: (1) torch._dynamo.explain → the break's reason + line; (2) profiler's CPU row at the gap (5.10's read-the-whole-timeline law) → see the Python frame names confirming it. Fix shape: move the offending line outside the step (log every N steps from an on-device accumulator — A2 gotcha 2), or torch.where the branch, or register the op's fake kernel (A3 §2) → expected: islands merge, the 14 kernels fuse into ~2, the 200 µs toll disappears per step — at 5k steps/hour that's real money (the arithmetic habit, always).</div></details>
+<details><summary>5. Design the compile rollout playbook for a 40-model inference fleet (the A10 preview): the four pre-prod gates, the two runtime counters with alarm thresholds, the warmup contract, and the rollback trigger — each tied to a mechanism from this lesson.</summary><div class="body">Gates: (1) explain() break count == 0 (or waivered with owner) per model — breaks are per-model debt (a9-breaks); (2) fixture parity vs eager at deployment dtype (compiled numerics differ in fused order — A5 P6's policy applies); (3) shape-bucket inventory declared + warmup script covering every bucket (quiz 1's entropy budget); (4) cold-start budget measured: compile-or-load(AOTInductor) time within deploy SLO (§2's JIT-vs-AOT decision made explicit per model). Counters: recompile rate (alarm: &gt;0 sustained in steady state — every recompile is an unplanned shape) and eager-fallback count (alarm: &gt;0, PERIOD — the silent win-evaporation, gotcha 2). Warmup contract: readiness probe replays one request per bucket per dtype — pods serve only after (the scenario's fix, standardized). Rollback trigger: p99 regression OR fallback alarm → flag off per model (compile must be a per-model flag, never fleet-global). The playbook is quiz 1 + the scenario, turned into checkboxes — which is what playbooks are for.</div></details>
+<details><summary>6. Compare torch.compile's philosophy to writing everything in A4 Triton by hand, along four axes: coverage, peak, maintenance, and debuggability — ending with the boundary rule for when a hand kernel enters a compiled codebase (A11's admission test).</summary><div class="body">Coverage: compile touches EVERY op in every model automatically (the fleet's long tail no human would hand-fuse); hand-Triton covers what you write. Peak: hand wins where structure exceeds the compiler's fusion rules (into-GEMM epilogues, cross-op algebraic tricks like flash's rescale — A5); compile matches or beats hand on routine glue (its search never gets bored). Maintenance: compiled code re-optimizes per torch release and new hardware for free; hand kernels rot (5.6's register-weather, A3 P6's arch churn). Debuggability: compile adds a layer (guards/recompiles/generated code) but with tools (explain, LOGS); hand kernels are transparent but YOURS at 3 a.m. Boundary rule: a hand kernel enters when it beats mode='max-autotune' at production shapes with fixtures attached, and it ships with an eager-twin oracle + an owner — otherwise the compiler's version wins by total-cost (A11's r1-vs-r2 bar, stated as policy). This four-axis answer is also precisely quiz-grade interview material.</div></details>
+<details><summary>7. Interview closer: "What actually happens when I wrap my model in torch.compile?" — 90 seconds: the three-stage stack with each stage's artifact, guards and their production consequences, what Inductor's output literally is, the two modes worth naming, the honest win table, and the closing sentence about where the engineer's job moves.</summary><div class="body">Skeleton: "Three machines run. Dynamo hooks Python's frame evaluation and traces your forward into an FX graph, installing GUARDS — asserts on shapes, dtypes, and captured constants that decide cache validity; a guard miss recompiles on the spot, which is why shape discipline and warmup are production requirements, and why exceeding the cache limit silently reverts to eager — I export those counters [quiz 1, scenario]. AOTAutograd traces forward AND backward jointly — so fusion reaches the backward pass, which eager autograd can't offer. Inductor plans fusion groups under the memory-traffic ledger, delegates GEMMs to cuBLAS, and emits literal Triton source for the rest — I read it with TORCH_LOGS=output_code, and it looks like the kernels I write by hand: masks, tiles, fp32 accumulation [worked ex]. Modes: reduce-overhead wraps steps in CUDA graphs — the launch-overhead killer for decode-style confetti; max-autotune spends longer searching configs, sometimes beating cuBLAS at odd shapes. Wins follow the glue share: ~2× on fusion-rich blocks, ~1.1× on GEMM-dominated ones, negative under shape churn [a9-when]. And the job change: I stopped hand-writing routine fusions — now I clear capture obstacles, stabilize shapes, audit generated kernels, and hand-write only what the compiler structurally can't: fusing into the GEMM itself — which is my capstone project" [A11]. The last clause is the interview's segue, on purpose.</div></details>
+
+<div class="pager">
+  <a href="lesson-08.html">← Inference</a>
+  <a href="lesson-10.html">Next: Deployment →</a>
+</div>
+<div class="footer">GPU Mastery · Track A · Lesson 9 — works offline · progress saved in your browser</div>
+</div>
+<script src="../assets/diagramsA.js"></script>
+<script src="../assets/app.js"></script>
+</body>
+</html>

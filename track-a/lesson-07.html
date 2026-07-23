@@ -1,0 +1,205 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>A7 Multi-GPU — NCCL, DDP, FSDP — GPU Mastery</title>
+<link rel="stylesheet" href="../assets/style.css">
+</head>
+<body data-lesson="al7">
+<nav><div class="inner">
+  <a class="logo" href="../index.html">GPU<span>Mastery</span></a>
+  <a class="item" href="../index.html">Home</a>
+  <a class="item on" href="../curriculum.html">Curriculum</a>
+  <a class="item" href="../labs.html">Labs</a>
+  <a class="item" href="../setup.html">Lab setup</a>
+  <a class="item" href="../prompt.html">Generator prompt</a>
+</div></nav>
+<div class="wrap">
+
+<div class="lesson-top">
+  <div><span class="badge">Track A · Lesson 7</span><span class="badge dim">≈ 3.5 h</span></div>
+  <button id="donebtn" class="donebtn">Mark lesson complete</button>
+</div>
+<h1>Multi-GPU — the Σ leaves the building</h1>
+<p class="lead">Data-parallel training is 5.8's reduction with network cables for lanes: every GPU computes gradients on its shard, and an allreduce averages them. This lesson derives the ring algorithm (and verifies it by simulation), prices DDP's overlap and FSDP's memory trade with real arithmetic, and hands you the one law that decides every scaling question: <em>compute the comm lane and the compute lane; the max rules (5.9).</em></p>
+
+<h2>Concept</h2>
+
+<h3>The primitive: allreduce is 5.8 across machines</h3>
+<pre><code>data parallel, N GPUs: same weights everywhere, different data shards
+  each rank: forward → backward → LOCAL gradients gᵢ
+  allreduce: every rank ends holding  Σgᵢ / N   → identical optimizer step
+  → weights stay bit-synchronized (5.8's determinism caveats apply PER RANK)
+NCCL is the library that runs the reduction over NVLink/PCIe/InfiniBand —
+topology-aware (it discovers the wiring and builds rings/trees to fit), and
+since 2.28 kernels can even ISSUE communication (device API — compute/comm
+fusion's frontier, verified 2026). Your job is not to reimplement it; your
+job is to PRICE it — which the next section makes mechanical.</code></pre>
+
+<h3>Ring allreduce: derived, then verified by simulation</h3>
+<div class="diagram" data-diagram="a7-ring" data-caption="Phase 1: reduce-scatter — shards circulate, each GPU ends OWNING one fully-summed shard. Phase 2: all-gather — finished shards circulate back. Every link busy every step."></div>
+<pre><code>N GPUs, tensor of S bytes, split into N shards of S/N:
+reduce-scatter: N−1 steps; each step every GPU sends ONE shard (S/N) to its
+  neighbor, adding into what it receives → after N−1 steps, shard k is fully
+  summed and lives on exactly one GPU (5.8's privatize-then-merge, on wires)
+all-gather:     N−1 more steps circulating the finished shards
+bytes sent per GPU = 2(N−1)·S/N ≈ 2S            ← the formula to memorize
+VERIFIED by simulation (3 ranks, 12 units): correct sums on all ranks,
+  16 units sent per GPU = 2·(2/3)·12 exactly.
+two regimes (4.6's toll vs width, cluster edition):
+  BIG tensors: ring is bandwidth-optimal (~2S regardless of N — scaling wins!)
+  SMALL tensors: 2(N−1) hop LATENCIES dominate → NCCL switches to trees
+  (log N hops); this is why gradient BUCKETING exists (small grads ride together).</code></pre>
+
+<h3>DDP: hide the allreduce under backward</h3>
+<div class="diagram" data-diagram="a7-overlap" data-caption="Backward produces gradients last-layer-first; DDP buckets them and allreduces finished buckets WHILE earlier layers still compute — 5.9's copy/compute overlap with the network as the copy engine."></div>
+<pre><code>step time ≈ max(compute_backward, comm_total) + unoverlapped tails   (5.9's law)
+bucket size trade (bucket_cap_mb):
+  too small → many small allreduces → hop-latency regime (tolls, 4.6)
+  too big   → last bucket finishes long after backward → tail exposed
+gradient accumulation × DDP: allreduce fires per backward BY DEFAULT —
+  wrap the k−1 warmup micro-batches in model.no_sync() or you pay comm
+  k× for one step's worth of sync (A2 Ex.2's feature, now with a bill).</code></pre>
+
+<h3>FSDP: shard the STATE, gather on demand</h3>
+<div class="diagram" data-diagram="a7-fsdp" data-caption="Params, grads, and optimizer state live sharded 1/N per GPU; each layer's weights are all-gathered just-in-time for compute, then freed. Memory ÷N, bought with ~1.5× DDP's traffic."></div>
+<pre><code>what's sharded: params + grads + optimizer states (Adam's fp32 m,v — the
+  worked example of A6 said those are 8 B/param: THE memory hog)
+per step traffic (P = param bytes): all-gather P (fwd) + all-gather P (bwd)
+  + reduce-scatter P (grads) ≈ 3P   vs DDP's 2P → ~1.5× comm for ÷N memory
+decision rule (4.7's binding-resource question):
+  model + states FIT per GPU?  → DDP (simpler, better overlap, fewer sharp edges)
+  don't fit? → FSDP pays 1.5× comm to exist at all — a fine price for possible
+beyond data parallel (the taxonomy, one line each — A8/A11 touch them):
+  TP (tensor parallel): split individual matmuls across GPUs — needs NVLink-class
+  links, every layer communicates. PP (pipeline): split LAYERS into stages —
+  4.1's pipeline with bubbles to amortize. EP (expert): route tokens to expert
+  shards. Real systems COMPOSE these (\"3D parallelism\") — but 90% of jobs are
+  DDP/FSDP, which is why they get the lesson.</code></pre>
+
+<h2>Worked example</h2>
+<div class="card">
+<p><strong>Task:</strong> The scaling audit — 7B model, bf16 grads (14 GB), 8 GPUs, two interconnects. Predict scaling efficiency BEFORE renting anything (all formula-driven; label: representative bandwidths from the course ledger).</p>
+<pre><code>comm bytes/GPU per step = 2(N−1)/N · 14 GB = 2·(7/8)·14 = 24.5 GB
+A100 NVLink island (effective allreduce bus ~200 GB/s):
+  comm lane = 24.5/200 ≈ 0.12 s   | compute lane (this batch) ≈ 0.21 s
+  → overlapped step ≈ max(0.21, 0.12) ≈ 0.21 s → efficiency ≈ 97%  ✓ scale away
+same 8 GPUs across PCIe gen4 boxes + 25 GbE between nodes (~3 GB/s!):
+  comm lane = 24.5/3 ≈ 8.2 s      | compute 0.21 s
+  → step ≈ 8.2 s → efficiency ≈ 2.5%  ✗ — the cluster is a space heater
+levers, in cost order (each re-run through the SAME two-lane arithmetic):
+  overlap verified working (free — check before buying anything, quiz 1)
+  grads to fp16/bf16-compressed (halve S — comm 4.1 s: still hopeless here)
+  bigger per-GPU batch (raise compute lane — weak scaling: amortize the pipe)
+  real fabric (IB/NVLink between nodes: the 4.6 answer — topology is destiny)</code></pre>
+<p><strong>What to internalize:</strong> two divisions and a max predicted a 40× efficiency gap between two clusters with IDENTICAL GPUs. Every scaling disappointment you will ever debug is this table with worse formatting — and every "should we buy N more GPUs" meeting deserves this arithmetic on the first slide (4.6's economics, promoted to fleet purchasing). Interconnect isn't a spec-sheet footnote; at gradient sizes, it IS the training system.</p>
+</div>
+
+<h2>Key points</h2>
+<ul class="keypoints">
+<li>Data parallelism = replicate weights, shard data, allreduce gradients — 5.8's privatize-and-merge with the network as the merge fabric; NCCL builds topology-aware rings/trees so you can price, not reimplement.</li>
+<li>Ring allreduce moves 2(N−1)/N·S ≈ 2S bytes per GPU regardless of N (verified by simulation) — bandwidth-optimal for big tensors; small tensors are latency-ruled, hence trees and gradient bucketing.</li>
+<li>Step time ≈ max(compute, comm) + tails: DDP hides comm under backward via buckets (5.9's overlap law); bucket size trades hop tolls against exposed tails.</li>
+<li>FSDP shards params/grads/optimizer states (÷N memory) for ~3P traffic vs DDP's 2P — take the 1.5× only when the state doesn't fit; activations are NOT sharded by it (quiz 2's trap).</li>
+<li>Gradient accumulation under DDP needs no_sync on warmup micro-batches, or you allreduce k× per step — the single most common silent comm-waste bug.</li>
+<li>Scaling efficiency is computable in advance from S, N, link bandwidth, and compute time — run the two-lane arithmetic before every hardware decision; interconnect topology dominates identical-GPU comparisons by 10–40×.</li>
+</ul>
+
+<h2>Quiz</h2>
+<div class="quiz">
+  <div class="q">1. Moving from 8 to 32 GPUs (same per-GPU batch), tokens/s/GPU drops 34%. nsys on rank 0 shows ncclAllReduce kernels running AFTER backward completes, serially, not overlapped — on 8 GPUs the same trace shows them interleaved with backward. The model/code are unchanged. What plausibly broke, in what order do you check, and why did it only appear at 32?</div>
+  <button class="opt">32 GPUs always scale worse — accept it</button>
+  <button class="opt" data-c="1">The overlap collapsed, not the bandwidth: with 4× ranks, per-bucket allreduce LATENCY grew (more hops per ring step — 2(N−1) latencies) while bucket compute-time between gradient-ready events stayed fixed → buckets now finish arriving after backward ends (the a7-overlap timeline's network row slid right past the compute row). Check order: (1) bucket_cap_mb — fewer, larger buckets amortize hops (tolls, 4.6) but verify the tail; (2) confirm no stray synchronize/.item() between backward and step that serializes (A2's drains break overlap too and can COINCIDE with scale-up commits); (3) NCCL topology dump — did 32 GPUs span a slower inter-node link the 8-GPU job never touched? (the worked example's cliff hiding inside "same cluster"). It appeared at 32 because latency terms scale with N while overlap headroom didn't — a regime crossing, not a mystery (5.9 P6)</button>
+  <button class="opt">NCCL has a 16-GPU limit</button>
+  <button class="opt">The dataloader can't feed 32 GPUs</button>
+  <div class="expl">The trace's serial-vs-interleaved comparison is the whole diagnosis — 5.10's timeline literacy pointed at a new row (network). Note the checking order: config (free) → code drains (cheap) → topology (the expensive truth). Option 4 is checkable in the same trace (gaps BEFORE forward, not after backward) — one capture arbitrates all hypotheses, which is why the capture comes before any opinion (5.10's law, fleet edition).</div>
+</div>
+<div class="quiz">
+  <div class="q">2. A team enables FSDP on their 13B model across 8×80GB GPUs expecting ~"13B×16 bytes ÷ 8 ≈ 26 GB/GPU — plenty of headroom" — and OOMs at sequence length 8192, batch 4. Their arithmetic isn't wrong about what it counts. What did it not count, what's the actual ledger, and what are the two fixes (one from A1, one from A5)?</div>
+  <button class="opt">FSDP has overhead that doubles memory</button>
+  <button class="opt" data-c="1">FSDP shards params/grads/optimizer STATE — it does not shard ACTIVATIONS: the tape (A1 §3) is per-GPU, proportional to LOCAL batch × seq × hidden × layers, untouched by sharding. Ledger: sharded state ≈ 26 GB ✓, plus the momentarily-gathered layer (~small), plus activations at seq 8192 batch 4 for a 13B (≈5120 hidden, 40 layers): tens of GB — attention's naive tape alone would be catastrophic; even flash-based, MLP/norm activations land ~30–45 GB → OOM. Fixes: activation checkpointing (A1 §3's recompute trade — store layer boundaries only, ~√-ish memory for ~30% recompute), and FlashAttention if not already on (A5: the N² tape term deleted). Sharding answers a STATE problem; tapes are a RECOMPUTE problem — different axes, different levers</button>
+  <button class="opt">80 GB cards ship with ~66 GB usable — that's the gap</button>
+  <button class="opt">Sequence 8192 requires tensor parallelism, full stop</button>
+  <div class="expl">The memory ledger has THREE independent columns — state (sharding's domain), tape (checkpointing/flash's domain), workspace/fragmentation (the small print) — and every OOM war-room that conflates them burns a day. The trap sentence "their arithmetic isn't wrong about what it counts" is the lesson: OOM math fails by omission, not calculation. TP (option 4) does shard activations along hidden — a real but heavyweight answer; the checkpoint+flash pair usually buys the same fit for one config line (cost ladders before architecture changes — 5.10 quiz 1's Amdahl discipline).</div>
+</div>
+
+<h2>Exercises</h2>
+<details><summary>Exercise 1 — Build the ring simulator (pure Python, runs anywhere — the course sandbox ran it): N ranks, S units, execute reduce-scatter + all-gather with per-rank byte counters; verify correctness vs a direct sum and bytes/GPU = 2(N−1)/N·S for N ∈ {2,4,8,32}. Then add a latency model (α per hop, β per byte) and find the message size where a ring loses to a binary tree (2·log₂N hops) at α=10 µs, β=1/(100 GB/s) — the bucketing crossover, derived by YOU.</summary><div class="body">
+<pre><code>expected: bytes/GPU → 2S asymptotically (1.0S at N=2, 1.75S at 8, 1.94S at 32
+— the formula's N-independence emerging); crossover: ring time ≈ 2(N−1)α +
+2S/N·(N−1)β vs tree ≈ 2log₂N·(α + S·β/…) — at N=32: ring pays 62 hops of α
+(620 µs!) vs tree's 10; solve for S where bandwidth advantage overtakes:
+S* lands in the ~1–10 MB range — EXACTLY why DDP's default bucket is 25 MB
+(comfortably in ring territory) and why tiny per-tensor allreduces are a
+disaster. You've now derived NCCL's algorithm-selection logic and DDP's
+bucket default from two constants — 4.6's toll/width model, third deployment.</code></pre>
+</div></details>
+<details><summary>Exercise 2 — The topology worksheet (no cluster needed; the point is the arithmetic you'll run before ever renting one): for models {1B, 7B, 70B} × grads bf16 × hardware {8×T4-PCIe3 (11 GB/s), 8×A100-NVLink (200 GB/s), 8×H100-NVLink5 (course ledger: ~350+ GB/s effective)} — fill the table: comm bytes/GPU, comm lane, and the compute-lane each would NEED for 90% efficiency. Then answer: which cells are trainable at all, and which need FSDP for memory before comm even matters?</summary><div class="body">
+<pre><code>comm bytes/GPU = 2·(7/8)·2·params ≈ 3.5·params bytes.  Comm lanes:
+        1B (3.5GB)      7B (24.5GB)     70B (245GB)
+T4-PCIe   0.32 s          2.2 s           22 s      ← need compute ≥ 2.9/20/200 s
+A100-NVL  17 ms           122 ms          1.2 s        per step for 90% — i.e.
+H100-NVL5 10 ms           70 ms           0.7 s        huge batches on slow pipes
+trainability: 70B on 8×T4 fails on MEMORY first (140 GB weights alone vs
+16 GB/card → even FSDP: 17.5 GB/GPU params + states ≈ 70 GB/GPU: impossible)
+— comm analysis is moot when the state doesn't fit: run the MEMORY ledger
+first, then the comm ledger (quiz 2's columns, in the right order).</code></pre>
+<p>Deliverable: the filled table + three sentences of purchasing advice. This worksheet — literally this one — is what "senior" sounds like in capacity-planning meetings; the numbers are two multiplications each, and almost nobody in the room has done them.</p>
+</div></details>
+
+<hr>
+<h1>Go deeper — the distributed fine print</h1>
+
+<h2>1. Collectives beyond allreduce (the vocabulary)</h2>
+<pre><code>broadcast     rank0 → all      (initial weights: everyone starts identical)
+reduce-scatter / all-gather    (the ring's two halves — FSDP uses them RAW:
+                                grads reduce-scatter to shards, params
+                                all-gather on demand: a7-fsdp IS these two)
+all-to-all    everyone ↔ everyone (expert parallelism's token shuffle — EP's
+                                whole cost lives here)
+barrier       don't. (a cluster-wide 5.9 sync — same pathology, N× the blast)
+NCCL invariant: ALL ranks call the SAME collectives in the SAME order —
+one rank skipping an allreduce (a conditional someone added rank-locally!)
+deadlocks the fleet: 5.5's barrier law at datacenter scale (gotcha 3).</code></pre>
+
+<h2>2. Determinism across ranks (5.8's registry, sharded)</h2>
+<pre><code>ranks stay weight-synchronized only if every rank applies the SAME update:
+allreduce guarantees identical sums (NCCL's reduction order is fixed per
+topology/config — deterministic across runs on the same setup), but each
+rank's LOCAL backward has its own 5.8 wobble sources (atomics in custom ops).
+Weights don't drift — the allreduce SUM is shared — but reproducibility
+across cluster-size changes is off the table (different N = different
+reduction tree = different bits: 5.8 quiz 2, fleet edition). Write it in
+the numerics doc before someone burns a week comparing 8-GPU vs 16-GPU
+loss curves at the bit level.</code></pre>
+
+<h2>3. Gotchas</h2>
+<div class="gotcha"><strong>no_sync forgotten under grad accumulation.</strong> k micro-batches = k allreduces where 1 suffices — comm bill ×k, silently (the flag exists because the default must be safe, not cheap).</div>
+<div class="gotcha"><strong>DistributedSampler without set_epoch(e).</strong> Same shuffle every epoch → each rank sees the same shard order forever: quietly worse models, zero errors. One line in the epoch loop.</div>
+<div class="gotcha"><strong>Rank-conditional collectives.</strong> `if rank == 0: extra_allreduce(...)` → 31 ranks wait forever → NCCL watchdog kills the job at timeout with a stack pointing NOWHERE useful (5.4's async-blame problem, fleet edition). Collective calls are structurally unconditional — audit every `if rank` near comm.</div>
+<div class="gotcha"><strong>One rank OOMs, the JOB "hangs."</strong> The dead rank never joins the next collective; everyone else blocks. Fleet debugging rule: the rank that ISN'T in the collective is the suspect — read the one traceback that differs (per-rank logs or you're blind).</div>
+<div class="gotcha"><strong>BatchNorm in DDP.</strong> Per-rank BN statistics diverge from the single-GPU model's semantics (each rank normalizes by its shard's stats) — SyncBatchNorm or (modern nets) LayerNorm-family, which is per-sample and doesn't care. Silent accuracy drift otherwise.</div>
+<div class="gotcha"><strong>Scaling graphs without regime labels.</strong> Weak scaling (fixed per-GPU batch, total grows) vs strong (fixed total, shards shrink) tell OPPOSITE stories on the same hardware — a "94% efficient!" claim without the label is 5.9 P6's unlabeled-benchmark sin, and strong scaling's shrinking compute lane hits the comm wall first (worked example's arithmetic decides where).</div>
+
+<h2>Scenario — the 64-GPU purchase that bought 11%</h2>
+<p>A well-funded team quadruples their fleet: 16 → 64 identical GPUs, expecting ~4× training throughput for their 12B model. Delivered: +11%. The vendor blames the framework; the framework forum blames NCCL versions; two weeks of tuning flags follow. A course-literate engineer finally runs the worked example's audit on the ACTUAL topology — and finds the purchase order's silent assumption: the original 16 lived in two NVLink islands with InfiniBand between; the new 48 landed in racks wired with 25 GbE "to be upgraded later" (3 GB/s, shared). The two-lane table for 64 ranks with cross-rack rings: comm lane 6.1 s vs compute lane 0.4 s — 6% efficiency PREDICTED; the observed +11% was the arithmetic being generous. The recovery ladder, each step priced with the same table: hierarchical allreduce (reduce within islands over NVLink, only shard-sums cross the slow fabric — NCCL does this given correct topology hints) → comm ÷16 → 1.9× total; bf16 grad compression → another ×2 off S; final state ~3.1× of the hoped 4× — and the IB fabric for the new racks got ordered with the NEXT PO, this time with the table attached. Two morals, both old friends wearing datacenter clothes: <em>bandwidth between compute is part of the compute</em> (4.6, always), and <em>a 30-second arithmetic audit before the purchase beats two weeks of flag archaeology after it</em> (M1 L7's predict-first, at its most expensive scale yet).</p>
+
+<h2>Practice</h2>
+<details><summary>1. Price these three synchronization designs for 8 ranks averaging 14 GB of grads (200 GB/s links): (a) all ranks send to rank 0, rank 0 averages and broadcasts; (b) ring allreduce; (c) reduce-scatter only, keep grads sharded and let a sharded OPTIMIZER step, then all-gather the updated params. Which is FSDP's ancestor, and what did (c) just save?</summary><div class="body">(a) rank 0 receives 7×14=98 GB and sends 98 GB → 0.98 s in+out at its single link: the star topology's bottleneck rank (and everyone else idles — this is why parameter-servers lost to rings at gradient scale). (b) 24.5 GB/GPU → 0.12 s, all links busy (§2). (c) SAME wire bytes as (b) (RS ≈ S, then param all-gather ≈ S) — but the optimizer ran SHARDED: each rank updated 1/8 of the weights, so Adam's states existed only sharded → you just derived ZeRO/FSDP's core insight from a comm-scheduling question: the optimizer never needed replicated state at all. (c) is ZeRO stage 1→3's ancestry in one step, and the reveal that a7-fsdp's design is the ring's two halves used separately.</div></details>
+<details><summary>2. Your job's per-step timeline: backward 380 ms; grads 10 GB in 25 MB buckets over a 100 GB/s link. Compute: total comm time, whether it hides under backward, the exposed tail if buckets only start flowing after the first 80 ms of backward (deepest layers first), and the ONE config change if the tail is exposed.</summary><div class="body">Comm: 2·(N−1)/N·10 ≈ 20 GB at 100 GB/s = 200 ms of wire time spread over ~400 buckets. Overlap window: backward's remaining 300 ms after first-bucket-ready at 80 ms → 200 &lt; 300 → fully hidden IF flow is smooth… but per-bucket: 25 MB → 2(N−1)/N·25 ≈ 50 MB wire = 0.5 ms each vs α-hops (Ex.1: at 8 ranks, 14 hops × 10 µs = 0.14 ms latency per bucket — fine; at 64 ranks, 1.26 ms latency &gt; the 0.5 ms payload: latency-dominated → effective comm time ballooons ~3×  → 600 ms &gt; 300 ms window → EXPOSED ~300 ms tail). The one change: bucket_cap_mb 25 → 100 at 64 ranks (fewer, fatter buckets — Ex.1's crossover applied). The drill's real lesson: bucket tuning is a function of N — configs that scaled 8 ranks silently rot at 64 (quiz 1's mechanism, now computed by hand).</div></details>
+<details><summary>3. Enumerate what each parallelism axis shards and its characteristic comm pattern: DP/DDP, FSDP(ZeRO-3), TP, PP, EP — then explain in two sentences why real 70B+ training COMPOSES three of them instead of scaling one to 512 GPUs.</summary><div class="body">DDP: shards DATA; allreduce grads once/step (2P). FSDP: + shards state; RS/AG per layer (3P, §fsdp). TP: shards WITHIN matmuls (hidden dim); allreduce activations EVERY layer, both passes — needs NVLink-class latency, so it lives INSIDE a node (8-way max, typically). PP: shards LAYERS across stages; point-to-point activations between neighbors + bubble overhead amortized by micro-batches (4.1's pipeline law, resurrected). EP: shards EXPERTS; all-to-all token routing (the nastiest pattern on slow fabrics). Composition logic: each axis has a scaling CEILING set by its comm pattern's tolerance of the next-slower link — TP saturates intra-node, DP/FSDP's 2–3P per step tolerates inter-node IB, PP tolerates almost anything (tiny point-to-point) → 512 GPUs = TP×8 inside nodes × PP×8 across × DP×8 across islands: each axis running where its comm pattern can afford to live (the worked example's topology arithmetic, three-dimensional). One axis alone hits its ceiling and stalls — composition is topology-matching, not cleverness.</div></details>
+<details><summary>4. A "hanging" 32-rank job: no progress 30 min, GPUs at 100% util (!), then NCCL watchdog timeout kills it. Explain the 100%-util paradox, the three most likely root causes in base-rate order, and the fleet-debugging protocol that names the guilty rank in minutes.</summary><div class="body">Paradox: blocked NCCL collectives SPIN on-device (busy-wait kernels) — a10-metrics' law: util% measures occupancy of ANY kernel, including 31 ranks politely spinning on a 32nd that never arrived (the metric that lies, at its most expensive). Causes: (1) one rank crashed/OOM'd out of the collective (gotcha 4 — most common); (2) rank-conditional collective or mismatched ORDER (gotcha 3 — someone's new logging allreduce inside `if rank==0`); (3) genuine network partition/link flap (rarest; comes with fabric-level counters). Protocol: per-rank stack dumps (py-spy/NCCL's own flight recorder) → diff them — 31 identical stacks parked in allreduce #N and ONE rank elsewhere (dead, or parked in allreduce #N+1: the order-mismatch signature distinguishes cause 1 from 2 instantly) → read the outlier's log. The habit transfers from 5.4's first-error-is-real doctrine: in fleets, the DIFFERENT rank is the first error; everything else is echo.</div></details>
+<details><summary>5. Gradient compression pitch: an engineer proposes fp16-ing the 14 GB bf16 gradients before allreduce ("half the comm!"). Evaluate: what's actually saved (careful), what's risked (A6's two failure modes on WHICH values), the standard safer variant, and the arithmetic condition under which NONE of this matters.</summary><div class="body">Careful: bf16→fp16 is a same-SIZE cast (both 2 B!) — the proposal as stated saves ZERO bytes; the real options are grads-in-8-bit (PowerSGD/quantized comm: genuine ÷2 vs bf16) or fp16 SUMS if links/NCCL reduce in half precision. Risks: reduction ACCUMULATION in fp16 across 32 ranks of small grads = A6's absorption (the 96%-lost experiment, on wires — why NCCL reduces bf16 payloads in fp32 internally when asked); plus fp16's range vs unscaled grad spikes (flush/inf — A6's other mode). Safer standard: keep bf16 payload, ensure fp32 reduction (NCCL's default accumulation behavior for half types), or true int8 schemes with error-feedback (the residual re-added next step — absorption converted to delay, clever). None matters when: comm lane already &lt; compute lane with margin (worked example's 97% row) — compressing a hidden lane buys 0% (5.9's max-lane law: optimize the BINDING lane only; the pitch needed the two-lane table before the PR).</div></details>
+<details><summary>6. Write the six-line "distributed training pre-flight" checklist you'd pin above the launch script — each line one command/assertion and the incident it pre-empts (harvest this lesson's gotchas + quizzes).</summary><div class="body">(1) `torchrun --nproc… env-check`: NCCL version + topology dump saved to the run log — pre-empts the scenario (know your fabric BEFORE the bill). (2) Assert sampler.set_epoch wired (grep or unit test) — gotcha 2's silent same-shuffle. (3) Assert no_sync wraps accumulation warmups — gotcha 1's k× comm. (4) Grep collectives under rank conditionals — gotcha 3's deadlock. (5) One 50-step dry run with per-rank loss logged: all ranks' losses within tolerance (catches sharding/BN drift — gotcha 5) and step time vs the TWO-LANE PREDICTION within 20% (catches broken overlap on day zero — quiz 1, pre-empted). (6) Kill-one-rank drill in staging: verify watchdog timeout + clean restart path (gotcha 4 rehearsed BEFORE 4 a.m., 5.4's watchdog philosophy at fleet scale). Six lines, six week-class incidents — the checklist IS the lesson compressed.</div></details>
+<details><summary>7. Interview closer: "Design the training setup for a 30B model on 64 H100s" — 90 seconds: the memory ledger first (state/tape/columns), the parallelism composition with WHY per axis, the two-lane efficiency estimate with real-ish numbers, the three configs you'd verify in a dry run, and the one sentence about what you'd measure on day one.</summary><div class="body">Skeleton: "Memory first (quiz 2's columns): 30B bf16 weights 60 GB + Adam fp32 states 240 GB + grads 60 GB = 360 GB of STATE — doesn't fit one 80 GB card → FSDP/ZeRO-3 across the fleet: ÷64 ≈ 5.6 GB/GPU state ✓; tape at seq 8k needs FlashAttention + activation checkpointing (state sharding doesn't touch the tape [quiz 2]). Composition: TP×8 within each NVLink node ONLY if single-layer matmuls need it at 30B — likely yes at hidden ~7k for latency, else pure FSDP; across nodes, FSDP's ~3P over IB: 3·60 GB ≈ 180 GB/GPU-step… so comm lane = 180/350 ≈ 0.5 s vs compute lane sized by batch — pick global batch so compute ≥ 2.5 s/step → 80%+ efficiency by the two-lane law [worked ex]; bucket/prefetch tuning closes the rest. Dry-run verifications: overlap actually overlapping (trace, not faith [quiz 1]), per-rank loss agreement, step time vs prediction ±20% [P6's checklist]. Day one metric: MFU — achieved FLOPs over peak — because it compresses the whole stack (kernels, comm, input pipeline) into one honest number and its gap decomposes exactly along this course's lessons." Close with: "and the topology diagram goes in the design doc BEFORE the purchase order [scenario]" — the sentence that gets you the follow-up questions you want.</div></details>
+
+<div class="pager">
+  <a href="lesson-06.html">← Mixed precision & tensor cores</a>
+  <a href="lesson-08.html">Next: Inference — quantization, KV-cache, vLLM →</a>
+</div>
+<div class="footer">GPU Mastery · Track A · Lesson 7 — works offline · progress saved in your browser</div>
+</div>
+<script src="../assets/diagramsA.js"></script>
+<script src="../assets/app.js"></script>
+</body>
+</html>

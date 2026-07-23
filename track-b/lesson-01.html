@@ -1,0 +1,198 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>B1 Numerical Calculus from Scratch — GPU Mastery</title>
+<link rel="stylesheet" href="../assets/style.css">
+</head>
+<body data-lesson="bl1">
+<nav><div class="inner">
+  <a class="logo" href="../index.html">GPU<span>Mastery</span></a>
+  <a class="item" href="../index.html">Home</a>
+  <a class="item on" href="../curriculum.html">Curriculum</a>
+  <a class="item" href="../labs.html">Labs</a>
+  <a class="item" href="../setup.html">Lab setup</a>
+  <a class="item" href="../prompt.html">Generator prompt</a>
+</div></nav>
+<div class="wrap">
+
+<div class="lesson-top">
+  <div><span class="badge">Track B · Lesson 1</span><span class="badge dim">≈ 3.5 h</span></div>
+  <button id="donebtn" class="donebtn">Mark lesson complete</button>
+</div>
+<h1>Numerical Calculus — the math of simulation, taught by experiment</h1>
+<p class="lead">Track B computes PHYSICAL quantities: heat, orbits, prices, fields. The calculus is school-level; the craft is knowing each method's ERROR LAW and STABILITY CONTRACT — and in this track we don't cite those laws, we measure them. Every order, wall, and drift below was executed for this lesson; you'll re-measure them all in the exercises.</p>
+
+<h2>Concept</h2>
+
+<h3>Derivatives from neighbors: finite differences</h3>
+<div class="diagram" data-diagram="b1-fd" data-caption="Sample f at neighboring points, combine per Taylor. Symmetric stencils cancel odd error terms — an order of accuracy, free, from symmetry."></div>
+<pre><code>Taylor: f(x±h) = f ± h·f' + h²/2·f'' ± h³/6·f''' + …
+forward  (f(x+h)−f(x))/h        = f' + (h/2)f'' + …      → error O(h)
+central  (f(x+h)−f(x−h))/2h     = f' + (h²/6)f''' + …    → error O(h²)
+second   (f(x+h)−2f(x)+f(x−h))/h² = f'' + O(h²)          → the Laplacian's atom
+MEASURED (f = sin, x = 1):        h=1e-1     1e-2      1e-3
+  forward err                     4.3e-2    4.2e-3    4.2e-4   (×10/decade ✓)
+  central err                     9.0e-4    9.0e-6    9.0e-8   (×100/decade ✓)
+  second-derivative err           7.0e-4    7.0e-6    7.0e-8   (×100/decade ✓)
+# The exponent in O(hᵖ) is not a vibe — it's the SLOPE of your log-log error
+# plot, and you can always demand it from a method (or from a bug report).</code></pre>
+
+<h3>The V-shape again — now it sets your step size</h3>
+<div class="diagram" data-diagram="b1-vshape" data-caption="Truncation error falls as h shrinks; cancellation (M1 L8) rises. The dip is the only trustworthy zone — smaller h is NOT always better."></div>
+<pre><code>same V you measured in A1, new consequence: in simulation, h is the GRID/STEP —
+choosing it too small doesn't just waste compute, it ADDS float noise
+(fp64 central-diff dip ≈ 1e-5·max(1,|x|); fp32's floor is ~1e-3: B8's
+argument for fp64 in science begins right here).</code></pre>
+
+<h3>Integrating ODEs: order buys digits</h3>
+<div class="diagram" data-diagram="b1-euler" data-caption="Euler: one slope per step, O(h). RK4: four slope samples blended, O(h⁴). Measured: halving h buys 2× for Euler, 16.4× for RK4."></div>
+<pre><code>y' = f(y):   Euler   y ← y + h·f(y)                        global error O(h)
+             RK4     four staged slopes k1..k4, weighted    global error O(h⁴)
+MEASURED (y'=−y to t=1, vs e⁻¹):
+  h=1/10   Euler 1.9e-2    RK4 3.3e-7
+  h=1/20   Euler 9.4e-3    RK4 2.0e-8      Euler ratio 2.0 ✓ O(h)
+  h=1/40   Euler 4.6e-3    RK4 1.2e-9      RK4 ratio 16.4 ✓ O(h⁴)
+  h=1/80   Euler 2.3e-3    RK4 7.6e-11
+# RK4 costs 4 f-evals/step vs Euler's 1 — and buys ~5 DIGITS at h=0.1.
+# Order is the best deal in numerical computing; buy it before buying GPUs.</code></pre>
+
+<h3>Stability is a SEPARATE contract</h3>
+<pre><code>y' = −λy, Euler: y ← (1−λh)·y — amplification factor |1−λh| must be ≤ 1
+→ STABLE only for h ≤ 2/λ.  MEASURED at λ=50 (wall at h = 0.04):
+  h = 0.035 → y decays to 1e-25  ✓        h = 0.045 → EXPLODES to 2e+19  ✗
+# Razor-sharp, and NOT an accuracy issue: at h=0.045 every step is quite
+# accurate — the ERRORS get amplified faster than the solution decays.
+# Stiff systems (λ_fast ≫ λ_interesting) force tiny h for stability alone
+# → implicit methods (backward Euler: y ← y/(1+λh), stable for ANY h) trade
+# a solve-per-step for freedom from the wall. §2 prices that trade.</code></pre>
+
+<h2>Worked example</h2>
+<div class="card">
+<p><strong>Task:</strong> The energy audit — integrate the harmonic oscillator (x'' = −x, exact energy E = (x²+v²)/2 constant) for 100 seconds at h = 0.05 with three integrators, and read each method's CHARACTER from one number. (Executed; you'll reproduce in Ex.2.)</p>
+<pre><code>method                    E(100 s) / E(0)     the character it reveals
+Euler                     147.49              injects energy EVERY step —
+                                              orbits spiral OUT; useless for
+                                              long-horizon dynamics at any
+                                              reasonable h
+RK4                       1.000000 (6 digits) tiny drift, one-directional —
+                                              superb for finite horizons;
+                                              over 1e6+ periods it still walks
+semi-implicit Euler       1.0219              only FIRST-order accurate, yet
+(v first, then x — the                        energy stays BOUNDED forever:
+ symplectic one)                              it oscillates around truth
+                                              instead of walking away
+# The punchline: for million-year orbital mechanics or long MD runs,
+# the "worse" first-order symplectic method beats glorious RK4 — because
+# it conserves the STRUCTURE (phase-space volume) rather than chasing
+# per-step accuracy. Method choice is about which ERROR SHAPE your science
+# can live with: drift kills dynamics; bounded wobble usually doesn't.</code></pre>
+<p><strong>What to internalize:</strong> three integrators, three error PERSONALITIES — growth, drift, bounded wobble — all visible from one conserved quantity. Conservation laws are the fixtures physics hands you for free (M2 L6's oracle doctrine — nature wrote the reference implementation), and B10's capstone leans on exactly this: total heat conserved is the test that catches what eyeballing plots never will.</p>
+</div>
+
+<h2>Key points</h2>
+<ul class="keypoints">
+<li>Finite differences come from Taylor; symmetric stencils cancel odd terms — forward is O(h), central and the second-derivative stencil are O(h²), and the measured error slopes (×10 vs ×100 per decade) confirm it.</li>
+<li>The truncation-vs-cancellation V returns with a new job: it sets simulation step/grid sizes, and it's why serious simulation defaults to fp64 (fp32's V-floor is ~1e-3 — B8 finishes this argument).</li>
+<li>Integrator order is measured, not trusted: Euler's error halves with h (O(h)), RK4's divides by ~16 (O(h⁴)) — five digits better at the same step, for 4× the f-evals: the best deal in the field.</li>
+<li>Stability is a separate contract from accuracy: Euler's wall at h = 2/λ is razor-sharp (measured: decay at 0.035, explosion at 0.045 for λ=50); stiffness forces implicit methods, which buy unconditional stability with a solve per step.</li>
+<li>Long-horizon dynamics care about error SHAPE: Euler injects energy (×147 in 100 s), RK4 drifts slowly, symplectic methods wobble boundedly forever — conservation is the fixture that reveals which you have.</li>
+<li>Every method claim in this track is demanded as a log-log slope or a conserved-quantity ledger — "it converges" without a measured order is a rumor (M1 L7, now applied to mathematics itself).</li>
+</ul>
+
+<h2>Quiz</h2>
+<div class="quiz">
+  <div class="q">1. A colleague's reaction-diffusion sim "randomly explodes — must be a race condition in the CUDA port." Same code, same inputs: some runs finish, some blow up to 1e30 around different steps. The chemistry has a fast decay term (rate λ ≈ 800/s) they consider "boring background." Timestep: dt = 0.0024, chosen "for accuracy of the slow dynamics." Diagnose, explain the run-to-run randomness WITHOUT a race, and give the two-branch fix.</div>
+  <button class="opt">It's a race — run compute-sanitizer racecheck</button>
+  <button class="opt" data-c="1">dt vs the FASTEST mode: the wall for the λ=800 term sits at h = 2/800 = 0.0025, and their 0.0024 is 4% under it — every step's amplification factor |1−λh| = 0.92 barely damps that mode, so any perturbation feeding it (varying initial noise, last-bit nondeterminism from 5.8-style atomics in the port!) can push the EFFECTIVE local rate over the edge in some runs and not others: stochastic-LOOKING explosion from a deterministic stability cliff grazed too closely. Fix, two branches: (a) explicit + smaller dt (safe margin below the wall: dt ≤ 1/λ_max is a healthy rule) — costs steps; (b) treat the stiff decay IMPLICITLY (it's "boring" precisely because it's fast — backward-Euler that one term: unconditionally stable, one extra divide) and keep dt sized for the slow dynamics you actually care about — the standard IMEX pattern. Sanitizer's fine to run (option 1 isn't wrong to CHECK), but the λ-audit takes 60 seconds and names the wall exactly</button>
+  <button class="opt">fp32 rounding — switch to fp64 and it'll stop</button>
+  <button class="opt">The GPU's fused multiply-adds change the chemistry</button>
+  <div class="expl">The tell is "boring background fast term + dt chosen for the slow physics" — stiffness in one sentence. Grazing a stability boundary produces exactly the intermittent, input-sensitive explosions people blame on races and hardware (and the CUDA port's benign last-bit wobble becomes the trigger, which is why it "started when we moved to GPU"!). The 60-second audit — list every rate/eigenvalue in the system, compute 2/λ_max, compare dt — belongs at the top of every "sim explodes" runbook, before any debugger opens.</div>
+</div>
+<div class="quiz">
+  <div class="q">2. To "future-proof accuracy," a teammate switches the gradient checks and Jacobian builds in your optimizer from central differences at h=1e-6 to h=1e-12 ("a million times more accurate!"), in fp64. Checks start failing on known-good code, and the optimizer's convergence degrades. Explain both symptoms quantitatively, and state the actual rule for choosing h.</div>
+  <button class="opt">1e-12 underflows to zero in fp64</button>
+  <button class="opt" data-c="1">They walked off the V's right side: central-difference error = truncation O(h²) + cancellation O(eps/h). At h=1e-6, terms ≈ 1e-12 + 1e-10 — fine; at h=1e-12: truncation ~1e-24 but cancellation ≈ eps/h = 2.2e-16/1e-12 ≈ 2e-4 — the "million times more accurate" h delivers FOUR significant digits, worse than fp32! Gradient checks on good code now fail their 1e-7 tolerances (measuring noise, A1 quiz 2's teammate reborn), and the optimizer's Jacobians carry 1e-4-level noise → search directions wobble → degraded convergence. The rule: minimize the sum — h* ≈ (3·eps)^(1/3)·scale ≈ 1e-5·max(1,|x|) for fp64 central (the measured dip's location, derived); one-sided differences want h* ≈ √eps ≈ 1e-8. Print the V for YOUR f once; trust the dip, not intuition about smallness</button>
+  <button class="opt">fp64 can't represent 1e-12 — use long double</button>
+  <button class="opt">The tolerance is too strict; loosen to 1e-3</button>
+  <div class="expl">The arithmetic IS the answer: eps/h at the proposed h gives 2e-4 in one division — no simulation needed to reject the change (though the V-plot settles arguments with people who don't divide). Option 4 treats the symptom by destroying the test's power (a 1e-3-tolerance gradcheck catches almost nothing — A1's fp32 lesson). This bug ships constantly because "smaller h = more accurate" feels like calculus; the V is the correction calculus never taught.</div>
+</div>
+
+<h2>Exercises</h2>
+<details><summary>Exercise 1 — Measure everything this lesson claimed (NumPy, runs anywhere): (a) the three FD stencils' error slopes on f=sin (log-log fit — demand ×10 and ×100 per decade); (b) Euler and RK4 global-error ratios at h = 1/10…1/80 (demand 2.0 and ~16); (c) the stability wall for λ=50: bisect h until you bracket the explosion to 3 digits — compare to 2/λ = 0.0400.</summary><div class="body">
+<pre><code>expected: slopes 1.00/2.00/2.00 ±0.02 from polyfit on log10(err) vs log10(h)
+(use the h-range BEFORE each stencil's V-floor — combine with A1 Ex.2's dip
+finder if your slope bends at small h: that bend IS the cancellation regime
+arriving, and identifying it in your own plot is the exercise's real point);
+Euler ratios 2.04, 2.02, 2.01 (→2 asymptotically); RK4 16.7, 16.3, 16.2;
+wall bracket: 0.0399–0.0401 — theory to 3 digits on your first bisection.</code></pre>
+<p>Deliverable: one page with three log-log plots and the fitted slopes printed on them. This artifact — "I measured the order" — is the B-track's signature move; you will produce its cousins for Monte Carlo (B4), summation error (B8), and scaling curves (B10), and referees/interviewers recognize practitioners by exactly this reflex.</p>
+</div></details>
+<details><summary>Exercise 2 — The energy audit, extended: reproduce the worked example's three integrators on the oscillator (h=0.05, 100 s), then (a) plot E(t)/E(0) for all three on one chart; (b) halve h and report how each curve responds (which improve, which just wobble smaller?); (c) run the symplectic one for 10,000 seconds and confirm the energy error stays BOUNDED (no trend) — then write the three-sentence method-selection memo for: a 2-hour weather forecast, a million-orbit asteroid integration, a molecular-dynamics production run.</summary><div class="body">
+<pre><code>expected: Euler's E-curve is an exponential ramp (×147 at 100 s; halving h
+halves the RATE, never the shape); RK4 flat to the eye (drift ~1e-6-class,
+improves ×16 with halved h); symplectic oscillates within ±2.2% at h=0.05,
+±0.55% at h=0.025 (bounded band shrinks as h², but NEVER trends — 10k-second
+run confirms: max deviation at t=10,000 same as at t=100).</code></pre>
+<p>Memo skeleton: weather (finite horizon, smooth error tolerated) → high-order explicit (RK-class) with dt from the stability audit of the fastest resolved wave; asteroid (structure over eons) → symplectic, order 2–4, energy ledger as the CI fixture; MD (stiff bonds + long runs) → symplectic core (velocity Verlet — semi-implicit Euler's respectable sibling) with constraints/implicit treatment of the stiffest bonds (quiz 1's IMEX logic). Three workloads, three different "best" — the worked example's punchline, now yours in writing.</p>
+</div></details>
+
+<hr>
+<h1>Go deeper — the numerical analyst's fine print</h1>
+
+<h2>1. Stencil coefficients to order — the general recipe</h2>
+<pre><code>want f' at x using {x−h, x, x+h, x+2h}? Write Taylor for each, solve the
+small linear system for weights that kill low-order terms:
+  one-sided O(h²) first derivative: (−3f(x) + 4f(x+h) − f(x+2h)) / 2h
+  (BOUNDARIES need these — the domain edge has no left neighbor: B3/B10's
+   edge handling in one formula)
+  five-point O(h⁴) central: (−f₂ + 8f₁ − 8f₋₁ + f₋₂)/12h — wider stencil,
+  higher order, MORE halo to exchange (B5's cost, bought here: order vs
+  communication is a real HPC trade, not a math triviality)
+Richardson extrapolation: combine A(h) and A(h/2) to cancel the leading
+error term — (4·A(h/2) − A(h))/3 turns O(h²) into O(h⁴) for one extra run:
+the cheapest order upgrade in existence, and a great convergence CHECK
+(if the extrapolation doesn't improve things, your assumed order is wrong —
+a built-in lie detector for "it's second order, trust me").</code></pre>
+
+<h2>2. Stiffness and implicit methods, priced</h2>
+<pre><code>backward Euler: y_{n+1} = y_n + h·f(y_{n+1})   — the unknown on BOTH sides
+  linear f: one divide (quiz 1's fix). nonlinear/PDE: a SOLVE per step
+  (Newton + a linear system — cuSOLVER's B2 territory, not an accident)
+the trade: explicit = cheap step × many (stability-capped h);
+           implicit = expensive step × few (accuracy-sized h)
+crossover: stiffness ratio λ_fast/λ_slow ≫ cost(solve)/cost(f-eval) → implicit
+(chemistry with rates spanning 1e6: implicit by decades; gentle waves:
+explicit forever). IMEX splits the difference — implicit for the stiff terms
+only. This ONE trade explains half of scientific software's architecture.</code></pre>
+
+<h2>3. Gotchas</h2>
+<div class="gotcha"><strong>dt chosen for the physics you like, not the physics you have.</strong> Quiz 1's whole story: the stability wall belongs to λ_MAX, including the "boring" fast modes. Audit every rate before choosing dt.</div>
+<div class="gotcha"><strong>Convergence claimed, never measured.</strong> A method "of order 4" implemented with one wrong coefficient runs happily at order 1 — only the log-log slope catches it (Ex.1's fit is a CORRECTNESS test, not a formality; Richardson's lie detector too).</div>
+<div class="gotcha"><strong>Shrinking h into the V's floor.</strong> Quiz 2. More steps + more noise = worse and slower — the only combination with no upside. Know your method's dip.</div>
+<div class="gotcha"><strong>Testing integrators on problems without known answers.</strong> Start where truth exists (linear decay, oscillator, Kepler) — conservation ledgers and analytic solutions are free oracles (M2 L6); debug on the unknown problem and you'll "fix" correct code.</div>
+<div class="gotcha"><strong>fp32 simulation because "the GPU is faster there."</strong> The V's floor at ~1e-3 eats your order-4 method's advantage entirely at practical h. fp64 (or mixed with fp64 accumulation — B8) is the default for science; fp32 is a MEASURED exception, never a reflex (A6's logic, opposite conclusion — different field, different budgets).</div>
+<div class="gotcha"><strong>Blaming the port.</strong> "It worked on CPU" usually means the CPU run sat further from a stability/cancellation cliff (different rounding, different reduction order — 5.8) — the cliff was always there. Port bugs exist, but the λ-audit and the V-check are cheaper than the debugger and exonerate the innocent fast.</div>
+
+<h2>Scenario — the six-week "GPU bug" that was a 60-second audit</h2>
+<p>A combustion group ports their solver to GPUs (directives, B6-style — sensible). Within a month: intermittent explosions, only at scale, only on GPU. Six weeks of hunting follows — sanitizers (clean), fp64 everywhere (no change), rollback of the port (explosions vanish! — "proof" it's the GPU code), re-port with paranoid syncs (explosions return). Morale describes a stability wall of its own. The visiting numerics person asks one question: <em>"what's the largest eigenvalue in your chemistry Jacobian, and what's your dt?"</em> Answer, after a day of instrumenting: λ_max ≈ 1.9e4 in ignition cells; dt = 1.02e-4; the wall 2/λ = 1.05e-4. The CPU version sat 3% under the cliff and survived on luck and its particular rounding; the GPU's reordered reductions (5.8's legitimate wobble) perturbed ignition cells just differently enough to push some runs over. Nothing was ever wrong with the port. The fix was quiz 1's branch (b): implicit chemistry (they had cuSOLVER in the stack already), dt raised 20× for the transport physics, net 6× FASTER than the pre-port CPU code and stable at every scale tested. The postmortem's first line, now taped above their CI: <em>"Before debugging the code, audit the mathematics: λ_max, the wall, the V. Sixty seconds. Six weeks."</em> The GPU didn't break their solver — it removed the luck their timestep had been living on.</p>
+
+<h2>Practice</h2>
+<details><summary>1. Derive (don't look up) the one-sided O(h²) first-derivative stencil from Taylor at {x, x+h, x+2h}, verify its order numerically on f=sin, and say where in a PDE code it's load-bearing.</summary><div class="body">Taylor: f₁ = f + hf' + h²/2 f'' + O(h³); f₂ = f + 2hf' + 2h²f'' + O(h³). Kill f'': 4f₁ − f₂ = 3f + 2hf' + O(h³) → f' = (−3f + 4f₁ − f₂)/2h. Numeric check: errors 1.4e-3 → 1.5e-5-class per decade (×100 ✓ — run it). Load-bearing at DOMAIN BOUNDARIES: the edge row has no x−h neighbor, and lazily dropping to the O(h) forward stencil there poisons the global order (a chain is its worst link — the whole solution degrades toward O(h) as h shrinks; a classic "my method isn't converging at order 2" mystery whose answer lives in one boundary line).</div></details>
+<details><summary>2. Your λ-audit finds rates {2, 40, 1.8e5} in a system you must integrate to t=100 with the slow dynamics resolved (say 50 steps per period of the rate-2 mode). Price three strategies in f-evals and solves: pure explicit RK4, fully implicit, IMEX — and pick.</summary><div class="body">Explicit: stability needs h ≤ 2/1.8e5 ≈ 1.1e-5 → ~9e6 steps × 4 f-evals = 3.6e7 evals (all to babysit a mode that decays instantly). Fully implicit: h from ACCURACY of the slow mode: 50 steps/period → h ≈ 0.0628 → ~1600 steps × (Newton: ~3 f-evals + 1 linear solve each) — if the solve costs ≤ ~1000 f-eval-equivalents you're ahead by 10×+; for small systems it's a triviality, for big PDEs it's cuSOLVER's bill (B2). IMEX: implicit ONLY the 1.8e5 term (often linear → one cheap divide/tridiagonal), explicit RK for the rest at h ≈ 0.06 → ~1600 steps × ~4 evals + trivial solves: the winner by an order of magnitude, which is why IMEX is production-standard for advection–diffusion–reaction. The drill's habit: price strategies in evals-and-solves BEFORE coding any (4.6's tolls, mathematical edition).</div></details>
+<details><summary>3. A paper claims their new integrator is "4th order." Referee it with two cheap numerical experiments that would each expose a false claim, and name what each catches that the other misses.</summary><div class="body">(1) The slope test: run at h, h/2, h/4 on a problem with an exact solution; fit log-log — slope must be ~4.0 (Ex.1's fit). Catches wrong coefficients/implementation (order lower than claimed). Misses: order that's only 4 on SPECIAL problems (e.g., linear ones — some methods degrade on nonlinear f). (2) Richardson lie-detector on a NONLINEAR problem without exact solution: compute (16·A(h/2) − A(h))/15 — if the method is truly 4th order this should improve error by ~another factor 16 vs A(h/2) (check against a very-fine-h reference); no improvement → the assumed order is fiction off the linear test-track. Together they cover implementation AND regime. Bonus referee move: demand the energy ledger on a Hamiltonian problem — "4th order" says nothing about drift character (worked example), and papers conflate them weekly.</div></details>
+<details><summary>4. Explain to a systems engineer (fluent in Module 5, innocent of numerics) why implicit methods turn timestepping into LINEAR ALGEBRA, what the resulting matrix looks like for the 1D heat equation (structure, size, who solves it), and which GPU library lesson this hands the baton to.</summary><div class="body">Backward Euler on u_t = α u_xx: u_{n+1} − h·α·D₂ u_{n+1} = u_n → (I − hαD₂) u_{n+1} = u_n: every step SOLVES A·x = b where A is tridiagonal (D₂ = B1's second-difference stencil as a matrix: −2 on the diagonal, 1 on neighbors), size = grid points, same A every step (factor ONCE, solve many — 5.3's alloc-once law wearing LU clothes). 2D/3D: block-tridiagonal/banded-sparse → cuSPARSE storage + cuSOLVER/iterative solvers (B2's whole reason), and for huge grids, Krylov methods where the only operation is... SpMV, a bandwidth-bound stencil in disguise (B3 closes the circle). The systems translation: "implicit = trade many cheap memory-bound steps for few steps each containing a solver kernel whose roofline YOU already know how to read."</div></details>
+<details><summary>5. The oscillator worked example used h=0.05. Predict WITHOUT running: Euler's E(100s)/E(0) at h=0.025 (mechanism: per-step energy factor (1+h²) for x''=−x), then verify the prediction's logic against the measured 147.5 at h=0.05 — and explain why symplectic's band shrank as h² while its BOUNDEDNESS didn't change.</summary><div class="body">Euler on the oscillator multiplies energy by (1+h²ω²)... careful: per step E ← E·(1+h²) for ω=1. At h=0.05: (1.0025)^2000 = e^(2000·ln1.0025) ≈ e^4.994 ≈ 147.5 ✓ — the measured number derived exactly. At h=0.025: 4000 steps of (1+6.25e-4) → e^2.5 ≈ 12.2 — better but still exponential growth: halving h halves the EXPONENT, never the character. Symplectic: its modified-equation analysis shows it EXACTLY conserves a slightly-perturbed Hamiltonian H̃ = H + O(h²) — the band's width is the O(h²) perturbation (hence h²-shrinkage), but conservation of H̃ is exact forever (hence bounded, at any run length). One method has an error that compounds; the other has an error that's a fixed, bounded LENS. That distinction — compounding vs structural error — is the deepest sentence in this lesson.</div></details>
+<details><summary>6. Design the "numerics preflight" for B10's heat-equation capstone (run before ANY performance work): the four checks, each with its command-level description and the failure it pre-empts — harvesting this lesson plus M2 L6.</summary><div class="body">(1) CFL audit: compute dt·4α/h² ≤ 1 (the 2D wall — b10-heat) from the CONFIG, assert at startup: pre-empts quiz 1's intermittent explosions, permanently. (2) Order verification: run 3 grid resolutions on the analytic Gaussian-spread solution, fit the slope, assert ≈ 2.0: pre-empts wrong-coefficient stencils and boundary-order poisoning (P1). (3) Conservation ledger: insulated-boundary run, assert Σu constant to fp64 budget per 1000 steps: pre-empts flux bookkeeping bugs the eye calls "diffusion." (4) Symmetry fixture: symmetric initial condition must stay symmetric to round-off: pre-empts indexing/halo bugs (B3/B5's classic off-by-one shows up as creeping asymmetry long before it shows up as wrongness). Four checks, ~40 lines, and every one is an oracle PHYSICS provided free — the B-track's testing constitution in miniature.</div></details>
+<details><summary>7. Interview closer: "How do you choose a timestep?" — 90 seconds: the two ceilings (stability from λ_max/CFL, accuracy from the mode you must resolve), the V-floor below, the order-vs-cost trade, the stiffness escape hatch, the conservation ledger as the ongoing audit, and the one-sentence philosophy.</summary><div class="body">Skeleton: "Two ceilings and a floor. Stability first: audit every rate in the system — λ_max or the CFL wave speed — and the explicit wall is 2/λ-shaped; I've measured it razor-sharp: 4% under survives, 12% over explodes to 1e19 [§stability]. Accuracy second: h small enough that the SLOWEST physics I care about gets ~dozens of steps per period at my method's order — and order is measured, not assumed: I fit the log-log slope as a fixture [Ex.1]. The floor: below the truncation-cancellation dip, smaller h adds noise and cost — the V from finite differences governs steps too [quiz 2]. If stability forces h far below accuracy's need, that's stiffness by definition — I go implicit or IMEX for the fast terms and re-price in solves [P2]. And the running audit isn't the timestep at all: it's conservation ledgers in CI — energy, mass, symmetry — because they catch what per-step accuracy hides [worked ex]. Philosophy in one line: the timestep is a CONTRACT with the fastest mode in the system, whether or not that mode interests you — and most 'GPU bugs' in simulation are that contract, broken" [scenario]. Delivered with the λ-audit story, this answer reads as a decade of scars — which is the point of having measured everything.</div></details>
+
+<div class="pager">
+  <a href="../curriculum.html">← Curriculum</a>
+  <a href="lesson-02.html">Next: cuBLAS, cuSPARSE & cuSOLVER →</a>
+</div>
+<div class="footer">GPU Mastery · Track B · Lesson 1 — works offline · progress saved in your browser</div>
+</div>
+<script src="../assets/diagramsB.js"></script>
+<script src="../assets/app.js"></script>
+</body>
+</html>

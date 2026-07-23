@@ -1,0 +1,188 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>A11 Capstone — The Fused Epilogue, Shipped — GPU Mastery</title>
+<link rel="stylesheet" href="../assets/style.css">
+</head>
+<body data-lesson="al11">
+<nav><div class="inner">
+  <a class="logo" href="../index.html">GPU<span>Mastery</span></a>
+  <a class="item" href="../index.html">Home</a>
+  <a class="item on" href="../curriculum.html">Curriculum</a>
+  <a class="item" href="../labs.html">Labs</a>
+  <a class="item" href="../setup.html">Lab setup</a>
+  <a class="item" href="../prompt.html">Generator prompt</a>
+</div></nav>
+<div class="wrap">
+
+<div class="lesson-top">
+  <div><span class="badge">Track A · Capstone</span><span class="badge dim">≈ 2–3 days</span></div>
+  <button id="donebtn" class="donebtn">Mark lesson complete</button>
+</div>
+<h1>Capstone — a fused matmul epilogue, from Triton to a served endpoint</h1>
+<p class="lead">The project: fuse bias+GELU into the GEMM itself — the one fusion torch.compile structurally can't do (it delegates GEMMs to cuBLAS and fuses AROUND them, A9) — then prove it, profile it, wrap it in autograd, and serve it behind an endpoint with honest dashboards. Small enough for three days; complete enough that every Track A lesson appears in the repo. This is your ML-infra portfolio piece; 5.11 was its ancestor.</p>
+
+<h2>The spec</h2>
+<pre><code>DELIVERABLE  public repo: fused_linear_gelu(x, W, b) — Triton kernel,
+             autograd Function, fixtures, benchmarks, ncu evidence,
+             a served demo (FastAPI-or-similar + the A10 checklist), README
+             to the 5.11 stranger-test standard
+THE BAR      r2 must beat r1 = torch.compile(max-autotune) of the same
+             pattern at DECLARED shapes — or the README explains exactly
+             why not, with the ledger (an honest loss, documented, passes;
+             an unmeasured win does not)
+RULE         predictions before measurements, per rung, committed first
+             (M1 L7 — the git log is part of the deliverable)</code></pre>
+
+<h2>The ladder and its honest terrain</h2>
+<div class="diagram" data-diagram="a11-ladder" data-caption="r0 eager oracle → r1 torch.compile (the real bar) → r2 Triton fused → r3 production-shaped → r4 served. Beating eager is a warmup; beating the compiler is the result."></div>
+<div class="diagram" data-diagram="a11-fused" data-caption="Unfused: GEMM writes C, pointwise reads C, writes out — the output round-trips HBM twice more than needed. Fused: bias+GELU applied while the accumulator tile is still in registers; one write, ever."></div>
+<pre><code>the arithmetic BEFORE any code (T4 fp16, M=N=4096, out = 33.5 MB, ~220 GB/s):
+  what fusion deletes vs r1: one C write + one C read = 67 MB ≈ 0.30 ms
+  what fusion risks: your tl.dot GEMM vs cuBLAS (5.11's 1.4× gap looms —
+  Triton typically lands 85–95% of cuBLAS on T4-class fp16)
+representative ladder (do_bench medians; YOUR numbers will differ — the
+SHAPE and the reasoning must not):
+  K=4096: eager 4.61 ms | r1 4.31 | r2 4.18  → +3% over r1 (GEMM-dominated:
+          the 0.30 ms win minus the Triton-GEMM tax ≈ a wash — HONEST row)
+  K=1024: eager 1.63    | r1 1.33 | r2 1.09  → +22% (epilogue share rising)
+  K=256:  eager 0.94    | r1 0.64 | r2 0.42  → +52% (epilogue-dominated)
+the finding you'll defend: the fused win scales with EPILOGUE SHARE
+(A5 §1's ledger predicts every row) — so the kernel's contract declares the
+shapes where it's engaged, and the dispatcher falls back to r1 elsewhere.
+Shipping a kernel WITH its no-win regimes mapped is the senior move;
+shipping "faster!" without them is how A5's scenario happens.</code></pre>
+
+<h2>Phase 0 — the trust stack (build before the kernel, as always)</h2>
+<div class="diagram" data-diagram="a11-ship" data-caption="Every claim stands on the layer below: contracts → gradcheck+budgets → ncu mechanism proof → regime-labeled medians → served p50/p99. A fast kernel on a broken layer is a liability with good numbers."></div>
+<pre><code>repo/
+  kernels/fused_linear_gelu.py   (Triton — A4's matmul skeleton + epilogue)
+  ops/fused.py                    (autograd.Function — A3's uniform)
+  tests/test_contracts.py         cuda/dtype/contiguity/shape rejections (A3)
+        test_numerics.py          vs eager oracle: per-dtype budgets; WHICH
+                                  gelu (tanh vs erf — pin it! A9 Ex.2's find);
+                                  adversarial rows (A5 Ex.1's family)
+        test_gradcheck.py         fp64, small shapes, kink-aware probes (A3 Ex.2)
+        test_variants.py          golden per config (bias/no-bias, dtype ×
+                                  shape buckets) — A5's scenario insurance
+  bench/ladder.py                 r0–r2, do_bench, REGIME-LABELED shapes
+  serve/app.py + Dockerfile       A10's checklist made real (preflight,
+                                  warmup contract, known-answer health, metrics)
+  NUMERICS.md · MACHINE.md · README.md
+BACKWARD design decision (write it in the README): save the pre-activation
+z = acc+bias (one output-sized tensor — the SAME tensor eager's tape kept:
+no tape regression), backward computes gelu'(z)·g then two matmul VJPs
+(A1 P6's formulas — your backward is two matmuls plus a pointwise, and
+gradcheck referees it).</code></pre>
+
+<h2>Phases 1–4 — the climb</h2>
+<pre><code>P1  r0 + r1: eager oracle (also serves fixtures) and torch.compile
+    max-autotune baseline — PROFILE r1 first (A9 Ex.2): confirm it emits
+    cuBLAS + one fused pointwise; that pointwise's cost IS your prize; commit
+    the prediction table.
+P2  r2 kernel: A4 §2's tl.dot skeleton (fp32 accumulator — the law), epilogue
+    in-register: out = gelu(acc + bias[None, :]); masks on every load/store
+    (5.2's guard law); autotune configs pruned by 5.5-P2 arithmetic BEFORE
+    benching (A4 P5's discipline).
+P3  the uniform: contracts, current-stream launch (A3 quiz 1's ONE line),
+    fake-kernel registration so r2 composes with compile (A3 §2 — your custom
+    op must not become a graph break in the very system it augments!),
+    save-z backward + gradcheck, variant goldens.
+P4  evidence: ncu on r1-vs-r2 — the MECHANISM row: global bytes written/read
+    drops by ~2×output-size (the a11-fused claim, measured in counters,
+    5.10's court); ladder table with regime labels; the no-win row kept.</code></pre>
+
+<h2>Phase 5 — serve it (r4)</h2>
+<pre><code>endpoint: /score → tokenize-ish → fused block in a tiny model → response
+A10's checklist, executed: pinned image; preflight (arch allowlist + known-
+answer); readiness = warmup per shape-bucket (autotune keys hot, A4 q2);
+metrics: per-stage p50/p99 + envelope-vs-observed line (A8/A10) + recompile
+counters if compile wraps the rest (A9); watchdog on sticky errors (5.4);
+load test vs YOUR envelope arithmetic, gap attributed in the README.
+This phase is deliberately small in code and large in habits — it's the
+difference between "I wrote a kernel" and "I shipped one."</code></pre>
+
+<h2>Key points</h2>
+<ul class="keypoints">
+<li>The capstone's thesis: into-GEMM epilogue fusion is the custom-kernel niche the compiler can't reach (it fuses around cuBLAS, not inside it) — and its win is exactly the deleted output round-trip, priced by A5's ledger before any code.</li>
+<li>The honest bar is r1 = torch.compile max-autotune, not eager: beating a strawman is self-deception; an honest +3%-at-K=4096 row with its mechanism explained beats a fake 2× (5.10 P5's evidence standards).</li>
+<li>The win scales with epilogue share (measured: +3% → +52% as K shrinks): ship the kernel with its engagement contract (shape buckets where it wins) and fall back to r1 elsewhere — regime maps are part of the artifact.</li>
+<li>The uniform is half the work: contracts, stream law, fp32 accumulation, save-z backward with gradcheck, fake-kernel registration (so your op and the compiler compose), golden fixtures per variant — every A3/A5/A6 discipline, on one op.</li>
+<li>Evidence over adjectives: ncu's bytes-moved delta proves the MECHANISM; do_bench medians at labeled regimes prove the effect; the served endpoint's envelope-vs-observed line proves it survives contact with production (A10).</li>
+<li>The repo is the credential: predictions committed before measurements, no-win rows preserved, README passing the stranger test — the evidence habit is what interviews are actually probing (5.11's closing law, Track A edition).</li>
+</ul>
+
+<h2>Defense quiz — the two you WILL be asked</h2>
+<div class="quiz">
+  <div class="q">1. Interviewer: "Your table shows +3% at K=4096. Why ship a custom kernel for 3%?" — what's the complete answer, including the case where you DON'T ship?</div>
+  <button class="opt">3% at scale is millions — always ship</button>
+  <button class="opt" data-c="1">The 3% row isn't the product — the REGIME MAP is: at the epilogue-heavy shapes my serving workload actually runs (K≤1024 projections, the +22–52% rows), the win is large, and the dispatcher engages the kernel ONLY there, falling back to compile elsewhere — so the fleet pockets the big rows and never pays the wash. I don't ship if: the workload's shape histogram lives in the no-win regime (then the README's honest rows just saved us a maintenance liability), or the win doesn't survive the TOTAL cost — an owner, fixtures in CI, re-validation per torch/Triton upgrade (A3's scenario priced this). A kernel is an ASSET with a carrying cost; the table plus the shape histogram is the underwriting, and sometimes underwriting says no — which is a successful analysis, not a failed project</button>
+  <button class="opt">Rewrite in CUDA to get the 3% up to 30%</button>
+  <button class="opt">Never ship — compile always wins eventually</button>
+  <div class="expl">The trap is defending 3% (option 1's eagerness or option 3's escalation); the senior answer reframes: per-regime engagement + total-cost underwriting. Option 3 specifically: the 3% gap at K=4096 is Triton-GEMM-vs-cuBLAS efficiency (5.11's vendor-tuning moat) — CUDA won't cheaply close it either; the fix is not fighting cuBLAS where cuBLAS wins (5.11 quiz 1, third appearance, because interviewers love it). "Sometimes the deliverable is the decision not to ship" is a sentence that reads as maturity in exactly the rooms that decide levels.</div>
+</div>
+<div class="quiz">
+  <div class="q">2. Interviewer: "Your backward saves the pre-activation z. A reviewer says 'recompute z in backward instead — you already have x, W, b; save nothing and win memory.' Adjudicate with numbers for M=N=4096, K=4096 fp16."</div>
+  <button class="opt">Reviewer is right — saving anything is amateur</button>
+  <button class="opt" data-c="1">Recomputing z means re-running the GEMM in backward: 137 GFLOP ≈ 4 ms extra per backward (T4) to avoid storing 33.5 MB — a terrible exchange HERE: activations-to-FLOPs ratios matter, and a matmul is the most expensive way known to reproduce a tensor (contrast A5's flash, where recompute won because the saved tensor was O(N²) and the recompute was cheap relative to the memory catastrophe). The ledger: save-z costs 33.5 MB of tape (identical to what eager's composition saved — no regression); recompute costs ~2× backward matmul time forever. Checkpointing logic (A1 §3) always asks: bytes saved vs FLOPs to regenerate — flash sat on one extreme, this op sits on the other, and the reviewer applied a slogan where a division was required. Counter-proposal that IS worth benching: save gelu'(z) directly as int8/bf16 (the derivative's range is [~-0.09, ~1.1] — quantization-friendly) if tape memory ever becomes the binding resource (A7 quiz 2's ledger decides, not fashion)</button>
+  <button class="opt">Save both z and gelu(z) to be safe</button>
+  <button class="opt">Backward doesn't need z — gelu' can use the output</button>
+  <div class="expl">Option 4 is the subtle trap: unlike relu (A3 Ex.2b's legitimate output-mask trick), GELU's derivative is NOT recoverable from its output alone (gelu is not invertible cheaply near the origin's curvature; you'd need x anyway) — knowing WHICH activations admit the save-output trick is real currency. The division framework (bytes vs regeneration FLOPs) is A1 §3 + A3 P3 unified, and delivering it with the flash contrast shows you own the principle, not the instances. Option 3 doubles tape for zero benefit — "to be safe" is not a mechanism.</div>
+</div>
+
+<h2>The build — acceptance criteria</h2>
+<details><summary>Days 1–2 (P0–P2): trust stack, r0/r1 profiled, r2 kernel green. ACCEPT when: contracts reject cpu/strided/wrong-dtype loudly; numerics fixtures pass at fp32 AND bf16 budgets with the gelu variant PINNED and tested (tanh vs erf differ at 1e-3 — a real fixture, not a footnote); the prediction table (per-K ladder with the A5-ledger arithmetic) is committed BEFORE bench results; r2 beats r1 at K≤1024 buckets on your card, and the K=4096 wash is RECORDED, not deleted.</summary><div class="body">
+<p>Guidance: build r1's profile FIRST (A9 Ex.2) — seeing compile's generated pointwise kernel tells you the exact bytes you're fusing away, and its kernel name goes in your ncu comparison. The autotune config list: prune with the 5.5-P2 shared-memory bill and 5.6 register estimates before benchmarking (A4 P5's drill — budget: ≤8 configs). Most common day-2 bug: the bias broadcast inside the tile (bias[None, :] offsets vs the N-dim mask) — one adversarial fixture with N not divisible by BLOCK_N catches it (5.2's tail law, forever). If your Triton GEMM lands below ~85% of cuBLAS at K=4096, don't tune heroically — record it and let the regime map carry the project (that IS the lesson).</p>
+</div></details>
+<details><summary>Day 3 (P3–P5): the uniform + served. ACCEPT when: gradcheck-fp64 green with kink-aware probes; fake kernel registered and PROVEN (compile a model containing your op: explain() shows 0 breaks — the op composes with the compiler it competes with); ncu table shows the output-bytes delta matching the a11-fused prediction within ~15%; the endpoint passes A10's checklist including warmup-gated readiness and the known-answer healthcheck; README passes the stranger test (fresh GPU + your repo = every number reproduced from committed scripts, regimes labeled, no-win rows present).</summary><div class="body">
+<p>The served demo can be small (a two-layer model around the fused op) — the HABITS are the deliverable: watch the first readiness probe fail because autotune ran on the request path, fix it with the warmup contract, and you've lived A4 q2/A9 q1/A10 q2 in one afternoon. Final touch: NUMERICS.md documents the fused-order differences vs eager (A5 P6's pre-emption paragraph) and the nondeterminism status (deterministic per config — no atomics in this kernel; say so, it's a selling point). Then the 5.11 ritual: read your own README as a hostile stranger, and fix what flinches.</p>
+</div></details>
+
+<hr>
+<h1>Beyond — where this project points</h1>
+
+<h2>1. The natural extensions (each a weekend, each interview-visible)</h2>
+<pre><code>residual + dropout into the epilogue   (A5's full glue chain — watch the
+                                        RNG story: dropout mask saving vs
+                                        philox-offset replay, A3 P1e)
+bf16 storage + fp32 tape-lite          (quiz 2's int8-gelu' idea, benched)
+the attention epilogue                 (fuse the output projection into
+                                        flash's O-write — A5's kernel grows
+                                        one more fused stage)
+split-K for the K=256 regime           (your best rows get better; 5.8's
+                                        determinism note comes due — the
+                                        registry entry writes itself)
+port to ROCm via Triton                (D-track preview: same source, new
+                                        backend — the portability dividend)</code></pre>
+
+<h2>2. Gotchas (capstone-specific, pre-bled)</h2>
+<div class="gotcha"><strong>Wrong GELU.</strong> tanh-approx vs erf differ ~1e-3 — enough to fail fixtures against the WRONG reference and to "pass" against a sloppy one. Pin the variant in the contract, test both references once, document (A9 Ex.2 found compile's choice; match it).</div>
+<div class="gotcha"><strong>Benchmarking r2's autotuner into r1's timing (or vice versa).</strong> Both systems lazily tune (A4/A9): warm BOTH per shape before any comparison, or the ladder measures toolchains (M1 L7's oldest sin, dual-JIT edition).</div>
+<div class="gotcha"><strong>The fp16 accumulator "optimization."</strong> Someone will suggest acc in fp16 for register headroom — A6's 96%-lost experiment is the pre-filed rebuttal; K=4096 sums are exactly the absorption regime. fp32 acc is the law; occupancy is negotiated elsewhere (5.6's dial).</div>
+<div class="gotcha"><strong>Fake kernel wrong shapes.</strong> A meta function returning the wrong dtype/shape corrupts compile's downstream planning SILENTLY (it plans on fictions). Test the fake against the real op's outputs explicitly (A3 §2's registration, verified not vibed).</div>
+<div class="gotcha"><strong>Serving the kernel outside its regime map.</strong> The dispatcher's shape-bucket check is part of the OP, not the caller's manners — a contract assert (engage or fall back), or A5's scenario re-runs with your name on it.</div>
+<div class="gotcha"><strong>Repo rot.</strong> torch/Triton upgrades shift both r1's strength and r2's codegen (A9 gotcha 6): the CI re-runs the ladder monthly and the README dates its numbers — an undated benchmark is a rumor (5.11 P7, forever).</div>
+
+<h2>Scenario — forty-five minutes, one repo, the offer</h2>
+<p>ML-infra loop, systems round. "Tell me about a performance project" — the candidate opens the capstone README. The interviewer, who has seen a hundred "I made it 10× faster" repos, goes straight for the K=4096 row: <em>"+3%? Why is this row even here?"</em> — and the candidate's answer (quiz 1: regime maps, engagement contracts, underwriting the carrying cost) visibly recalibrates the interview. The follow-ups walk the trust stack exactly as designed: <em>how do you know it's correct</em> → gradcheck with kink-aware probes, per-variant goldens, the pinned GELU story; <em>prove the mechanism</em> → the ncu bytes-delta table matching the a11-fused prediction; <em>what about backward's memory</em> → quiz 2's division, delivered with the flash contrast; <em>does it break torch.compile</em> → "no — fake kernel registered, zero graph breaks, here's the explain() output in CI"; <em>would you ship it at my company</em> → "show me your shape histogram and I'll tell you — that's the underwriting step." The interviewer's private note, more or less: <em>candidate distinguishes evidence from adjectives; knows when not to build; artifacts verify.</em> That note is the track's entire objective. The offer follows — and the first month on the job is spent, of course, adding golden fixtures to someone else's unfixtured fused kernels (A5's scenario, now yours to prevent), which is exactly how the evidence habit propagates: one repo, one review, one team at a time.</p>
+
+<h2>Defense bank — answer all seven in writing before any interview</h2>
+<details><summary>1. Walk the ladder: r0→r4, each rung's purpose and its lesson citation, 60 seconds.</summary><div class="body">r0 eager: the oracle — fixtures' ground truth (M2 L6). r1 compile max-autotune: the honest bar — the machine applying A5's ledger (A9); profiling it names the exact bytes at stake. r2 Triton fused: the thesis — epilogue into the GEMM's registers, the one seam compile can't cross (A4/A5). r3 the uniform: contracts, stream law, gradcheck, fake-kernel composition (A3) — trust made transferable. r4 served: warmup contracts, known-answer health, envelope-vs-observed (A8/A10) — proof it survives production. The rehearsal bar: every rung's MULTIPLIER and MECHANISM without notes; the ladder is your track-A transcript.</div></details>
+<details><summary>2. "Why can't torch.compile do your fusion?" — the precise mechanism, plus the one config where it partially can, and why yours still differs.</summary><div class="body">Inductor's fusion operates on ITS generated loops; GEMMs are delegated to cuBLAS as opaque extern calls (a9-stack's extern_kernels — the compiler respects 5.11 quiz 1), so pointwise ops fuse with each other but stop at the GEMM boundary: the C-write + C-read round-trip survives. Partial exception: max-autotune can select a Triton-GENERATED matmul (A9 Ex.2), and Inductor can then fuse simple epilogues into it — so the honest claim is narrower: my kernel wins where (a) its GEMM+epilogue beats the autotuner's choice at my shapes, and (b) the epilogue is richer than what Inductor's matmul templates fuse (bias+gelu+residual+dropout chains). Which is why r1 is max-autotune specifically: I benchmarked against the compiler's BEST self, and the regime map records where each wins — precision about the boundary is what makes the claim durable across torch versions.</div></details>
+<details><summary>3. Numerics: enumerate every way r2's outputs differ from r0's, the comparison policy per fixture tier, and the sentence that pre-empts the "results changed" ticket.</summary><div class="body">Differences: fp32-accumulated GEMM in-register vs cuBLAS's (different tile orders — last-bits, 5.8 q2's vocabulary); gelu applied to fp32 acc pre-downcast vs eager's applied to fp16 stored C (r2 is MORE accurate — the direction that surprises, A5 P6); pinned gelu variant. Policy: unit vs fp64 oracle with per-dtype rtol (1e-6 fp32 / 1e-2-scaled bf16, M1 L8's ladder); goldens per variant bitwise ONLY against themselves per version; end-to-end metric budgets. The sentence (NUMERICS.md + PR): "Outputs differ from eager in final bits by design — fused fp32-register epilogue, documented order differences; typically CLOSER to the fp64 reference than eager (table attached); comparison policy per our ladder." One paragraph, zero tickets — A5 P6's pre-emption, deployed.</div></details>
+<details><summary>4. "Your kernel is 2 years old and torch 2.15 just dropped — what's your maintenance story?" — the four-part answer with its CI artifacts.</summary><div class="body">(1) The ladder re-runs in scheduled CI: r1 is re-measured per torch release (the bar MOVES — A9 gotcha 6), and the regime map updates or the kernel retires honorably (quiz 1's underwriting, renewed). (2) Fixtures are version-independent (fp64 oracle + budgets), so correctness survives upgrades mechanically; goldens re-baseline with a reviewed diff. (3) The fake-kernel/schema registration rides torch's stable custom-op API (A3 §2's 2.9+ ABI fact) — no rebuild treadmill. (4) An OWNER is named in the repo; unowned kernels are decommissioned by policy (A3's scenario: the template's discipline). Closing line: "a custom kernel without a maintenance story is technical debt with good benchmarks — mine ships with its own retirement criteria." That sentence has ended more than one architecture debate.</div></details>
+<details><summary>5. Extend to the full glue chain (bias+gelu+residual+dropout): what changes in the kernel, the tape, the RNG story, and the fixtures — and which ONE addition most endangers determinism?</summary><div class="body">Kernel: two more in-register ops + a second input pointer (residual) + a mask draw. Tape: still save z (+ the dropout MASK or its seed — A3 P1e's choice: philox seed+offset replay saves 33 MB of mask at the cost of exact RNG-state bookkeeping; benchmark, don't vibe). RNG: the kernel must draw per-element randomness reproducibly — counter-based philox indexed by (seed, element offset) makes dropout REPLAYABLE and deterministic per config; naive per-thread RNG state would not be. Fixtures: goldens per (dropout on/off × training/eval), plus a replay test (same seed → bitwise-same mask — the determinism fixture). The danger: dropout is the one addition that imports RANDOMNESS into a previously deterministic kernel — handled with counter-based RNG it stays replayable; handled casually it becomes the untestable op (5.8's registry gains an entry either way). Bonus flag: residual adds an aliasing question (in-place into the residual buffer? — A2 quiz 2's version counter says: don't, or contract it loudly).</div></details>
+<details><summary>6. The ncu evidence: which three counters you present, their predicted values from the a11-fused arithmetic, and what a MISMATCH in each would have meant.</summary><div class="body">(1) DRAM bytes written: r1 ≈ 2×output (C then out) vs r2 ≈ 1× — predicted delta 33.5 MB; mismatch = the epilogue is spilling or the store isn't where you think (5.6's local-memory signature check). (2) DRAM bytes read: r2 drops the C re-read (−33.5 MB); mismatch = your tl.dot staging re-reads inputs unexpectedly (num_stages/config issue — a4-autotune's dials). (3) Kernel count & names: r1 = extern GEMM + triton_poi_fused_*; r2 = ONE kernel; mismatch (a sneaky second kernel) = Inductor wrapped your op or a contract fallback engaged silently (gotcha 5's dispatcher, caught in the act). The meta-point for the interviewer: each counter is a PREDICTION tested, not a screenshot decorated — 5.10's worked-example discipline, applied to my own kernel. Mechanism proven, then medians believed.</div></details>
+<details><summary>7. The 90-second full walkthrough (rehearse aloud): problem → arithmetic → bar → kernel → trust stack → evidence → regime map → serving → the closing sentence.</summary><div class="body">Skeleton: "Transformer glue costs one HBM round-trip per op at near-zero FLOPs — A5's ledger; torch.compile fuses the glue but stops at the cuBLAS boundary, so the GEMM's output still round-trips. I fused bias+GELU into the GEMM's register tile in Triton: the deleted round-trip is worth 0.3 ms at my shapes — predicted from the ledger, committed before benching. My bar was compile's max-autotune, not eager: results — +52% where epilogues dominate, an honest wash at K=4096 where cuBLAS's moat rules, so the op ships with a regime map and falls back outside it. Trust stack: contracts, fp64 gradcheck with kink-aware probes, per-variant goldens, pinned GELU semantics; ncu confirms the bytes-delta mechanism within 15% of prediction; fake-kernel registered — zero graph breaks, my op composes with the compiler it competes against. It's served behind a warmup-gated endpoint with known-answer health and an envelope-vs-observed dashboard line. And the part I'm proudest of isn't the +52% — it's that the K=4096 row is still in the README: the project's product is a decision procedure, and sometimes the decision is 'don't engage here.' Every number reproduces from committed scripts on your GPU — want the repo link?" Time it. Trim it. Own it.</div></details>
+
+<div class="pager">
+  <a href="lesson-10.html">← Deployment</a>
+  <a href="../curriculum.html">Curriculum — Track A complete →</a>
+</div>
+<div class="footer">GPU Mastery · Track A · Capstone — works offline · progress saved in your browser</div>
+</div>
+<script src="../assets/diagramsA.js"></script>
+<script src="../assets/app.js"></script>
+</body>
+</html>

@@ -1,0 +1,206 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>WebGPU Live Lab — GPU Mastery</title>
+<link rel="stylesheet" href="../assets/style.css">
+<style>
+  .lab-card{background:#161b26;border:1px solid #2a3444;border-radius:12px;padding:20px 22px;margin:18px 0}
+  .lab-row{display:flex;flex-wrap:wrap;gap:14px;align-items:center;margin:10px 0}
+  .lab-row label{font-size:14px;color:#aab4c4}
+  .lab-row input,.lab-row select{background:#10141d;color:#e8edf5;border:1px solid #3b4760;border-radius:6px;padding:7px 9px;font-size:14px}
+  .runbtn{background:#27406e;color:#8fb6ff;border:1px solid #5b9bff;border-radius:7px;padding:9px 18px;font-weight:600;cursor:pointer;font-size:14px}
+  .runbtn:hover{background:#2f4d84}
+  .runbtn:disabled{opacity:.5;cursor:not-allowed}
+  #status{font-size:13.5px;margin:8px 0;min-height:20px}
+  .ok{color:#5fd6a4}.bad{color:#ff6b6b}.warn{color:#f5b850}
+  table.res{border-collapse:collapse;width:100%;margin-top:10px;font-size:13.5px}
+  table.res td{border:1px solid #2a3444;padding:7px 10px}
+  table.res td:first-child{color:#aab4c4;width:46%}
+  table.res td:last-child{color:#e8edf5;font-variant-numeric:tabular-nums}
+</style>
+</head>
+<body data-lesson="dlab">
+<nav><div class="inner">
+  <a class="logo" href="../index.html">GPU<span>Mastery</span></a>
+  <a class="item" href="../index.html">Home</a>
+  <a class="item on" href="../curriculum.html">Curriculum</a>
+  <a class="item" href="../labs.html">Labs</a>
+  <a class="item" href="../setup.html">Lab setup</a>
+  <a class="item" href="../prompt.html">Generator prompt</a>
+</div></nav>
+<div class="wrap">
+
+<div class="lesson-top">
+  <div><span class="badge">Track D · Live Lab</span><span class="badge dim">WebGPU · runs in your browser</span></div>
+</div>
+<h1>WebGPU Live Lab — the 5.8 reduction, on your GPU, right now</h1>
+<p class="lead">This page runs a real GPU compute kernel — a parallel sum reduction — on <em>your</em> hardware, with no install and no server. It is the universal GPU lab from D5: the same warps/tiles/barriers ideas from the core (5.5, 5.8), expressed in WGSL, executed by the browser. Open your devtools console to watch it work; read the WGSL below to see how little it differs from CUDA.</p>
+
+<div class="lab-card">
+  <div class="lab-row">
+    <label>N (elements):
+      <select id="n">
+        <option value="65536">65,536</option>
+        <option value="1048576" selected>1,048,576</option>
+        <option value="4194304">4,194,304</option>
+        <option value="16777216">16,777,216</option>
+      </select>
+    </label>
+    <label>fill:
+      <select id="fill">
+        <option value="ones">all 1.0 (sum should = N)</option>
+        <option value="rand" selected>uniform random [0,1)</option>
+      </select>
+    </label>
+    <button class="runbtn" id="run">Run on GPU</button>
+  </div>
+  <div id="status">Checking for WebGPU&hellip;</div>
+  <table class="res" id="restable" style="display:none">
+    <tr><td>device</td><td id="r-dev">&mdash;</td></tr>
+    <tr><td>elements reduced</td><td id="r-n">&mdash;</td></tr>
+    <tr><td>GPU reduction (partials summed on host)</td><td id="r-gpu">&mdash;</td></tr>
+    <tr><td>CPU reference sum (fp64)</td><td id="r-cpu">&mdash;</td></tr>
+    <tr><td>absolute error (fp32 vs fp64 oracle)</td><td id="r-err">&mdash;</td></tr>
+    <tr><td>within budget (|err| &lt; N&middot;1e-3)?</td><td id="r-ok">&mdash;</td></tr>
+    <tr><td>GPU compute time</td><td id="r-time">&mdash;</td></tr>
+  </table>
+</div>
+
+<h2>The kernel (WGSL) &mdash; read it against CUDA</h2>
+<p>Two-level reduction: each workgroup grid-strides over its slice, reduces in <code>var&lt;workgroup&gt;</code> shared memory with a barrier tree (5.5/5.8), and writes one partial. The host sums the handful of partials. Note the one-to-one map: <code>@workgroup_size</code> is <code>blockDim</code>, <code>workgroupBarrier()</code> is <code>__syncthreads()</code>, <code>var&lt;workgroup&gt;</code> is <code>__shared__</code>.</p>
+<pre><code id="wgsl-src"></code></pre>
+
+<div class="footer">GPU Mastery &middot; Track D &middot; Live Lab &mdash; works offline &middot; needs a WebGPU browser (Chrome/Edge 113+, Firefox 141+, Safari 26+)</div>
+</div>
+
+<script>
+const WGSL = `
+@group(0) @binding(0) var<storage, read>       input:    array<f32>;
+@group(0) @binding(1) var<storage, read_write>  partials: array<f32>;
+
+var<workgroup> scratch: array<f32, 256u>;
+
+@compute @workgroup_size(256)
+fn main(@builtin(global_invocation_id) gid: vec3<u32>,
+        @builtin(local_invocation_id)  lid: vec3<u32>,
+        @builtin(workgroup_id)         wid: vec3<u32>,
+        @builtin(num_workgroups)       nwg: vec3<u32>) {
+  // grid-stride load: each thread sums input[gid], input[gid+stride], ...
+  // (5.2's grid-stride loop, so any N is covered by a fixed grid)
+  let n      = arrayLength(&input);
+  let stride = nwg.x * 256u;
+  var sum    = 0.0;
+  var i      = gid.x;
+  loop {
+    if (i >= n) { break; }
+    sum = sum + input[i];
+    i   = i + stride;
+  }
+  // workgroup tree reduction in shared memory (5.5 tiling, 5.8 tree)
+  scratch[lid.x] = sum;
+  workgroupBarrier();
+  var s = 128u;
+  loop {
+    if (s == 0u) { break; }
+    if (lid.x < s) { scratch[lid.x] = scratch[lid.x] + scratch[lid.x + s]; }
+    workgroupBarrier();                 // barrier OUTSIDE the guard (5.6's law)
+    s = s / 2u;
+  }
+  if (lid.x == 0u) { partials[wid.x] = scratch[0]; }   // one partial per workgroup
+}`;
+document.getElementById('wgsl-src').textContent = WGSL.trim();
+
+const WORKGROUPS = 64, WGSIZE = 256;   // 64 partials, 16384 threads, grid-strided over N
+const $ = id => document.getElementById(id);
+const fmt = x => x.toLocaleString(undefined,{maximumFractionDigits:4});
+
+async function main(){
+  const status = $('status');
+  if (!('gpu' in navigator)) {
+    status.innerHTML = '<span class="bad">WebGPU not available in this browser.</span> ' +
+      'Use Chrome/Edge 113+, Firefox 141+, or Safari 26+ (see the footer). The WGSL below still shows how it works.';
+    $('run').disabled = true; return;
+  }
+  let adapter;
+  try { adapter = await navigator.gpu.requestAdapter(); } catch(e){ adapter = null; }
+  if (!adapter) { status.innerHTML = '<span class="bad">No GPU adapter.</span> WebGPU is present but no adapter was granted.'; $('run').disabled=true; return; }
+  const canTime = adapter.features.has('timestamp-query');
+  const device  = await adapter.requestDevice({ requiredFeatures: canTime ? ['timestamp-query'] : [] });
+  const info = adapter.info || {};
+  const devName = [info.vendor, info.architecture, info.description].filter(Boolean).join(' ') || 'WebGPU device (name hidden by browser)';
+  status.innerHTML = '<span class="ok">WebGPU ready.</span> Adapter acquired' + (canTime ? ' (timestamp-query supported).' : ' (no timestamp-query &mdash; timing hidden).');
+  $('r-dev').textContent = devName;
+
+  const module = device.createShaderModule({ code: WGSL });
+  const pipeline = device.createComputePipeline({ layout:'auto', compute:{ module, entryPoint:'main' } });
+
+  $('run').onclick = async () => {
+    $('run').disabled = true; status.innerHTML = 'Running&hellip;';
+    try {
+      const N = parseInt($('n').value);
+      const fill = $('fill').value;
+      const input = new Float32Array(N);
+      if (fill === 'ones') input.fill(1.0);
+      else for (let i=0;i<N;i++) input[i] = Math.random();
+      let cpu = 0; for (let i=0;i<N;i++) cpu += input[i];   // fp64 oracle
+
+      const inBuf = device.createBuffer({ size: input.byteLength, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST });
+      device.queue.writeBuffer(inBuf, 0, input);
+      const partBuf = device.createBuffer({ size: WORKGROUPS*4, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC });
+      const readBuf = device.createBuffer({ size: WORKGROUPS*4, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ });
+
+      const bind = device.createBindGroup({ layout: pipeline.getBindGroupLayout(0), entries:[
+        { binding:0, resource:{ buffer:inBuf } }, { binding:1, resource:{ buffer:partBuf } } ]});
+
+      let querySet, tsResolve, tsRead;
+      const enc = device.createCommandEncoder();
+      const passDesc = {};
+      if (canTime) {
+        querySet = device.createQuerySet({ type:'timestamp', count:2 });
+        tsResolve = device.createBuffer({ size:16, usage: GPUBufferUsage.QUERY_RESOLVE | GPUBufferUsage.COPY_SRC });
+        tsRead    = device.createBuffer({ size:16, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ });
+        passDesc.timestampWrites = { querySet, beginningOfPassWriteIndex:0, endOfPassWriteIndex:1 };
+      }
+      const pass = enc.beginComputePass(passDesc);
+      pass.setPipeline(pipeline); pass.setBindGroup(0, bind);
+      pass.dispatchWorkgroups(WORKGROUPS);
+      pass.end();
+      enc.copyBufferToBuffer(partBuf, 0, readBuf, 0, WORKGROUPS*4);
+      if (canTime){ enc.resolveQuerySet(querySet,0,2,tsResolve,0); enc.copyBufferToBuffer(tsResolve,0,tsRead,0,16); }
+      device.queue.submit([enc.finish()]);
+
+      await readBuf.mapAsync(GPUMapMode.READ);
+      const partials = new Float32Array(readBuf.getMappedRange().slice(0));
+      readBuf.unmap();
+      let gpu = 0; for (let i=0;i<WORKGROUPS;i++) gpu += partials[i];   // host reduction of 64 partials
+
+      let timeStr = canTime ? '&hellip;' : 'n/a (timestamp-query not supported)';
+      if (canTime){
+        await tsRead.mapAsync(GPUMapMode.READ);
+        const t = new BigUint64Array(tsRead.getMappedRange().slice(0)); tsRead.unmap();
+        const ns = Number(t[1]-t[0]);
+        timeStr = ns>0 ? (ns/1e6).toFixed(3)+' ms (quantized ~100&micro;s)' : 'below timer resolution';
+      }
+
+      const err = Math.abs(gpu - cpu), budget = N*1e-3;
+      $('r-n').textContent = fmt(N);
+      $('r-gpu').textContent = fmt(gpu);
+      $('r-cpu').textContent = fmt(cpu);
+      $('r-err').textContent = err.toExponential(3);
+      $('r-ok').innerHTML = err < budget ? '<span class="ok">yes &checkmark;</span>' : '<span class="bad">no</span>';
+      $('r-time').textContent = timeStr;
+      $('restable').style.display = '';
+      status.innerHTML = err < budget
+        ? '<span class="ok">Done &mdash; GPU reduction matches the CPU oracle within the fp32 budget.</span> That is the fixture doctrine (M2 L6): same answer, budget not bitwise.'
+        : '<span class="warn">Done, but error exceeds budget &mdash; inspect N and fill.</span>';
+    } catch(e){
+      status.innerHTML = '<span class="bad">Error:</span> ' + e.message;
+      console.error(e);
+    } finally { $('run').disabled = false; }
+  };
+}
+main();
+</script>
+</body>
+</html>

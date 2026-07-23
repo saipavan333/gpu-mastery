@@ -1,0 +1,179 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>1.3 Exponents, Logs & Orders of Magnitude — GPU Mastery</title>
+<link rel="stylesheet" href="../assets/style.css">
+</head>
+<body data-lesson="m1l3">
+<nav><div class="inner">
+  <a class="logo" href="../index.html">GPU<span>Mastery</span></a>
+  <a class="item" href="../index.html">Home</a>
+  <a class="item on" href="../curriculum.html">Curriculum</a>
+  <a class="item" href="../labs.html">Labs</a>
+  <a class="item" href="../setup.html">Lab setup</a>
+  <a class="item" href="../prompt.html">Generator prompt</a>
+</div></nav>
+<div class="wrap">
+
+<div class="lesson-top">
+  <div><span class="badge">Module 1 · Lesson 3</span><span class="badge dim">≈ 2–3 h</span></div>
+  <button id="donebtn" class="donebtn">Mark lesson complete</button>
+</div>
+<h1>Exponents, Logarithms & Orders of Magnitude — thinking in powers</h1>
+<p class="lead">GPU work is a numbers game played across 18 orders of magnitude — nanoseconds to seconds, one FLOP to 10¹⁵ per second. This lesson gives you exponent fluency, log intuition, and the estimation habit that lets pros predict a kernel's runtime before writing it.</p>
+
+<h2>Concept</h2>
+
+<h3>Exponents from zero (literally)</h3>
+<p>aⁿ starts as shorthand for repeated multiplication (a·a·…·a, n times), but the rules extend it far beyond counting:</p>
+<pre><code>aᵐ · aⁿ = aᵐ⁺ⁿ        multiply → add exponents      2³·2⁴ = 2⁷ = 128
+aᵐ / aⁿ = aᵐ⁻ⁿ        divide → subtract             2⁷/2⁷ = 2⁰  →  a⁰ = 1
+(aᵐ)ⁿ  = aᵐⁿ          power of power → multiply     (2¹⁰)² = 2²⁰ ≈ 10⁶
+a⁻ⁿ    = 1/aⁿ          negative → reciprocal          2⁻³ = 1/8 = 0.125
+a^(1/n) = ⁿ√a          fraction → root                2^0.5 = √2 ≈ 1.414</code></pre>
+<p>Each extension is forced by keeping the first rule true — a⁰ must be 1 so that a⁵·a⁰ = a⁵. Math grows by refusing to break its own patterns; once you see that, none of these need memorizing.</p>
+
+<h3>Scientific notation and the two tribes of powers</h3>
+<p>Scientists write 6.4 × 10⁷; engineers type <code>6.4e7</code>. Computing runs on two ladders at once — powers of 10 (specs, marketing, SI) and powers of 2 (memory, addressing) — bridged by the most useful coincidence in the field: <strong>2¹⁰ = 1024 ≈ 10³</strong>. So 2²⁰ ≈ 10⁶ (Mi), 2³⁰ ≈ 10⁹ (Gi), and each pair drifts ~2.4% further apart per step.</p>
+<div class="diagram" data-diagram="m1l3-magnitude" data-caption="The two ladders you must feel: time per event, operations per second."></div>
+
+<h3>Logarithms: exponents, asked backwards</h3>
+<p>log₂(x) answers: <em>2 to what power gives x?</em> That's the whole definition. log₂(1024) = 10 because 2¹⁰ = 1024. Every exponent rule flips into a log rule:</p>
+<pre><code>log(a·b) = log a + log b        products → sums (this built the slide rule)
+log(a/b) = log a − log b
+log(aⁿ)  = n · log a            powers → multiples
+log_b(x) = log(x) / log(b)      change of base — any log computes any other</code></pre>
+<p>Three bases, three jobs: <strong>log₂</strong> (bits, halvings, tree depth), <strong>log₁₀</strong> (orders of magnitude, "how many digits"), <strong>ln</strong> (calculus, growth — waits for Track A/B). In CS, an unmarked "log" is almost always log₂, and inside big-O the base doesn't even matter (change-of-base is just a constant factor).</p>
+<div class="diagram" data-diagram="m1l3-log2" data-caption="log₂ n = how many halvings from n to 1 — the shape of every parallel reduction."></div>
+
+<h3>Growth rates: the table that prices algorithms</h3>
+<div class="diagram" data-diagram="m1l3-growth" data-caption="Operation counts by growth class. The bottom-right corner is where projects die."></div>
+<p>Read it as a menu of costs. log n barely notices scale; n is honest work; n log n is "n with a tax" (sorting); n² means all-pairs and dies around n = 10⁵ on one chip; 2ⁿ means enumerate-all-subsets and dies around n = 40 <em>anywhere</em>. A GPU gives you maybe 100–1000× more throughput — that moves an n² wall from 10⁵ to about 10⁶·⁵ (since you need the <em>square root</em> of the speedup in n). Hardware shifts walls; algorithms remove them.</p>
+
+<h3>FLOP/s and the estimation habit</h3>
+<p>One FLOP = one floating-point add or multiply. A fused multiply-add (FMA, <code>a*b+c</code>) counts as 2 FLOPs and is the native operation of every GPU core — hardware does the pair in one instruction. The pro habit: before writing any kernel, estimate <strong>work</strong> (FLOPs), <strong>data</strong> (bytes), and divide by hardware peaks for time floors. You did the algebra for this in Lessons 1–2; now it becomes reflex.</p>
+
+<h2>Worked example</h2>
+<div class="card">
+<p><strong>Task:</strong> Will multiplying two 4096×4096 fp32 matrices take closer to a millisecond, a second, or a minute on one modern GPU (~50 TFLOP/s fp32, ~1 TB/s memory)?</p>
+<p><strong>Work:</strong> matmul does 2·n³ FLOPs (n³ multiply-adds — n² outputs × n MACs each × 2). n = 4096 = 2¹²:</p>
+<pre><code>2·(2¹²)³ = 2·2³⁶ = 2³⁷ ≈ 1.37 × 10¹¹ FLOPs        (no calculator: exponents add)
+time_compute ≈ 1.37×10¹¹ / 5×10¹³ ≈ 2.7 ms</code></pre>
+<p><strong>Data:</strong> 3 matrices × 4096² × 4 B = 3 × 2²⁴ × 4 ≈ 201 MB → time_memory ≈ 0.2 ms at 1 TB/s.</p>
+<p><strong>Verdict:</strong> compute floor 2.7 ms ≫ memory floor 0.2 ms → this kernel is <em>compute-bound</em>; ~3 ms is the target, and a naive kernel hitting 300 ms is leaving 100× on the table (Lesson 5.11 closes exactly that gap). <strong>Decision made:</strong> two exponent facts (2¹⁰≈10³, exponents add) turned "no idea" into a 3 ms target with 30 seconds of arithmetic. Interviewers ask this exact estimate constantly.</p>
+</div>
+
+<h2>Key points</h2>
+<ul class="keypoints">
+<li>All exponent rules follow from aᵐ·aⁿ = aᵐ⁺ⁿ; a⁰=1, negatives are reciprocals, fractions are roots — extensions that keep the pattern alive.</li>
+<li>2¹⁰ ≈ 10³ bridges the binary and decimal ladders: 2²⁰≈10⁶, 2³⁰≈10⁹, 2³²≈4.3×10⁹.</li>
+<li>log_b(x) asks "b to what power gives x"; products become sums, and change-of-base makes all logs interchangeable up to a constant.</li>
+<li>log₂ n counts halvings: reduction rounds, tree depth, bits to index n things (⌈log₂ n⌉).</li>
+<li>Growth class beats hardware: a 1000× faster machine moves an n² wall only ~31× further out in n (√1000).</li>
+<li>Estimate before coding: FLOPs / peak-FLOP/s and bytes / bandwidth give two time floors; the larger one names the bottleneck (compute-bound vs memory-bound).</li>
+</ul>
+
+<h2>Quiz</h2>
+<div class="quiz">
+  <div class="q">1. Without a calculator: 2²⁰ × 2¹² / 2² = ?</div>
+  <button class="opt">2¹²⁰ — multiply the exponents</button>
+  <button class="opt" data-c="1">2³⁰ ≈ 10⁹ — add 20+12, subtract 2</button>
+  <button class="opt">2³⁴ — add all three</button>
+  <button class="opt">4³⁰ — the base doubles too</button>
+  <div class="expl">Multiplying same-base powers adds exponents; dividing subtracts: 20+12−2 = 30, and 2³⁰ ≈ 10⁹ via the 2¹⁰≈10³ bridge. Multiplying exponents is the rule for (aᵐ)ⁿ — a different situation.</div>
+</div>
+<div class="quiz">
+  <div class="q">2. A parallel reduction halves the number of active values each round. For 16 million (≈2²⁴) values, how many rounds until one value remains — and what growth class is that?</div>
+  <button class="opt">16 million rounds — O(n)</button>
+  <button class="opt">4096 rounds — O(√n)</button>
+  <button class="opt" data-c="1">24 rounds — O(log n)</button>
+  <button class="opt">12 rounds — O(log n) but half of 24</button>
+  <div class="expl">Each round is one halving; halvings to 1 = log₂(2²⁴) = 24. This is why GPUs sum a billion numbers in ~30 rounds of parallel work — the log₂ staircase is the deepest idea in parallel algorithms.</div>
+</div>
+
+<h2>Exercises</h2>
+<details><summary>Exercise 1 — Your model has 7 billion parameters in bf16 (2 bytes each). Estimate: (a) VRAM just for weights, (b) time to read all weights once at 3 TB/s, (c) tokens/second ceiling if generating one token requires reading every weight once (the memory-bound LLM inference law).</summary><div class="body">
+<p>(a) 7×10⁹ × 2 B = 14 GB. (b) 14×10⁹ / 3×10¹² ≈ 4.7 ms. (c) one token per full weight read → ceiling ≈ 1/0.0047 ≈ <strong>~214 tokens/s</strong> for batch-1 generation. This three-line estimate is the actual first-order model of LLM inference speed used in industry: generation is memory-bound, which is why batching, quantization (fewer bytes/weight), and speculative decoding exist — each attacks a term in <em>your</em> formula. You just derived the economics of Track A lesson A8 with school math.</p>
+</div></details>
+<details><summary>Exercise 2 — A teammate replaces an O(n²) similarity search (n = 10⁶ vectors) with an O(n log n) index, but each of the n log n steps is 50× more expensive than the old inner step. Did they win? Show the arithmetic and state the crossover n.</summary><div class="body">
+<p>Old: n² = 10¹² cheap steps. New: 50 · n log₂n = 50 · 10⁶ · 20 = 10⁹ steps — <strong>1000× fewer</strong>. Win, decisively. Crossover where n² = 50·n·log₂n → n = 50·log₂n; try n=512: 50·9=450 < 512 ✓, n=256: 50·8=400 > 256 ✗ → crossover ≈ 450–500. Above ~500 items the "slower but smarter" algorithm already wins, and the gap grows without bound. The general lesson: constants decide small n, exponents decide everything else — and production n is never small.</p>
+</div></details>
+
+<hr>
+<h1>Go deeper — the complete guide</h1>
+<p>Full rules including the fractional cases, the log toolbox with the one numerical trick every ML system uses, big-O made honest, and the estimation discipline (roofline thinking) that separates engineers who predict from engineers who guess.</p>
+
+<h2>1. The complete exponent laws (and the classic misreads)</h2>
+<table>
+<tr><th>Law</th><th>Example</th><th>Classic misread (wrong!)</th></tr>
+<tr><td>aᵐaⁿ = aᵐ⁺ⁿ</td><td>2³·2⁴ = 128</td><td>aᵐ + aⁿ ≠ aᵐ⁺ⁿ (2³+2⁴ = 24, not 128)</td></tr>
+<tr><td>(aᵐ)ⁿ = aᵐⁿ</td><td>(2³)⁴ = 2¹²</td><td>a^(mⁿ) ≠ (aᵐ)ⁿ — towers bind top-down: 2^3² = 2⁹</td></tr>
+<tr><td>(ab)ⁿ = aⁿbⁿ</td><td>(2·5)³ = 1000</td><td>(a+b)ⁿ ≠ aⁿ+bⁿ — ask (3+4)² vs 9+16</td></tr>
+<tr><td>a^(m/n) = ⁿ√(aᵐ)</td><td>8^(2/3) = 4</td><td>a^(1/2) is √a, not a/2</td></tr>
+</table>
+<p>The (a+b)ⁿ ≠ aⁿ+bⁿ misread returns in Lesson 8 wearing a float costume: (a+b)² expanded vs computed directly round differently. Exponent towers (a^b^c) bind right-to-left in math and in Python (<code>2**3**2 == 512</code>) — one more reason to parenthesize.</p>
+
+<h2>2. The log toolbox, ending at every softmax on Earth</h2>
+<p>Logs turn multiplicative problems additive. Three working examples, ascending stakes:</p>
+<p><strong>Digits & bits:</strong> a number x needs ⌊log₁₀ x⌋+1 digits, ⌊log₂ x⌋+1 bits. "How many bits index N items" = ⌈log₂ N⌉ — you used it in Lesson 1 without the name.</p>
+<p><strong>Products that overflow:</strong> the probability of a 1000-token sentence is a product of 1000 numbers each ~10⁻⁵ — about 10⁻⁵⁰⁰⁰, unrepresentable even in fp64 (min ~10⁻³⁰⁸). Every language model therefore works with <em>log-probabilities</em>: the product becomes Σ log pᵢ ≈ −5000·2.3, a perfectly ordinary number. Multiplication overflowed; addition doesn't.</p>
+<p><strong>The log-sum-exp trick:</strong> softmax needs Σⱼ e^{zⱼ}. If any z ≈ 90, e⁹⁰ overflows fp32 (max ~3.4×10³⁸, e⁸⁹ ≈ 4.5×10³⁸). Exponent laws to the rescue — factor out the max M:</p>
+<pre><code>Σ e^{zⱼ} = e^M · Σ e^{zⱼ−M}          (each zⱼ−M ≤ 0, so each term ≤ 1: no overflow)
+log Σ e^{zⱼ} = M + log Σ e^{zⱼ−M}    the "log-sum-exp" identity</code></pre>
+<p>That one line of school algebra is implemented inside every numerically-stable softmax, attention kernel, and loss function you will ever ship. When you write your fused softmax in Track A5, this identity <em>is</em> the kernel's inner structure.</p>
+
+<h2>3. Big-O without the folklore</h2>
+<p>f(n) = O(g(n)) means: beyond some size, f is at most a constant times g. It deliberately ignores constants and small n — which is a modeling <em>choice</em>, and you should know when it misleads:</p>
+<table>
+<tr><th>Big-O says</th><th>Reality check on a GPU</th></tr>
+<tr><td>O(n) beats O(n log n)</td><td>A coalesced n-log-n pass can beat a random-access O(n) pass — memory pattern can outweigh a log factor (Lesson 4.2, 5.7).</td></tr>
+<tr><td>constants don't matter</td><td>2 GB of extra traffic per pass is a "constant" that costs 2 ms every launch, forever.</td></tr>
+<tr><td>asymptotics rule</td><td>If n is bounded (say, ≤ 4096 sequence length), a "worse" O(n²) with perfect hardware behavior (FlashAttention's core loop) wins in practice.</td></tr>
+</table>
+<p>The mature statement: <strong>big-O picks the algorithm; hardware behavior picks the implementation.</strong> You need both eyes open, which is exactly why this curriculum teaches math and architecture in the same breath.</p>
+
+<h2>4. Estimation discipline: the three-number method</h2>
+<p>For any proposed kernel, compute three numbers <em>before writing code</em>:</p>
+<pre><code>W  = FLOPs of useful work            (count the math, 2 per FMA)
+Q  = bytes that must cross DRAM      (inputs read once + outputs written once, at minimum)
+AI = W / Q   "arithmetic intensity"  (FLOPs per byte)
+
+machine balance ≈ peak FLOP/s ÷ bandwidth ≈ 5×10¹³ / 10¹² = 50 FLOP/byte (typical 2026 GPU)
+AI  <  balance  →  memory-bound: time ≈ Q / bandwidth   (optimize traffic, fuse, reuse)
+AI  >  balance  →  compute-bound: time ≈ W / peak       (optimize math, tensor cores)</code></pre>
+<p>Worked instances: elementwise add of two n-vectors: W = n, Q = 12n bytes → AI ≈ 0.08 ≪ 50 — hopelessly memory-bound (nothing to do but fuse it into a neighbor). 4096³ matmul: W = 1.37×10¹¹, Q ≈ 2×10⁸ → AI ≈ 680 ≫ 50 — compute-bound, tensor-core territory. This is the <em>roofline model</em>, and you just learned it with division. Module 4.7 adds the pretty chart; the thinking is already yours.</p>
+
+<h2>5. Powers in the wild: growth and decay you'll meet</h2>
+<p><strong>Geometric series</strong> (Lesson 2's r-sum) with r = ½ prices multi-pass algorithms: total = first pass × 1/(1−½) = 2×. <strong>Exponential decay</strong> x ← 0.9·x models learning-rate schedules, momentum, EMA — after k steps, 0.9ᵏ = e^{k·ln 0.9} ≈ e^{−0.105k}, so "half-life" ≈ 6.6 steps (solve 0.9ᵏ = ½ with logs). <strong>Doubling</strong> models scaling laws and outages alike: anything growing 7%/week is 2× in 10 weeks (log₂ 1.07 ≈ 0.0977 → 1/0.0977 ≈ 10.2). You now own both directions: given growth, find time (logs); given time, find growth (exponents).</p>
+
+<h2>6. Gotchas</h2>
+<div class="gotcha"><strong>log(a+b) has no expansion.</strong> Only products split. Needing log of a sum is exactly when you reach for log-sum-exp.</div>
+<div class="gotcha"><strong>2¹⁰ ≠ 1000.</strong> KiB/KB confusion compounds: at GiB scale the gap is 7.4%. Bandwidth specs are decimal (GB/s); capacity readouts are usually binary (GiB). Label your units or your roofline math drifts.</div>
+<div class="gotcha"><strong>log(0) = −∞ and log of negatives is NaN.</strong> <code>log(p)</code> with p = 0 from an underflowed probability silently poisons a loss. Clamp (<code>log(max(p, 1e-9))</code>) or use log-space end-to-end.</div>
+<div class="gotcha"><strong><code>pow(x, 2.0)</code> instead of <code>x*x</code>.</strong> Generic pow is a log-exp dance costing tens of cycles; the compiler usually saves you for integer constants, but in hot GPU loops write the multiply (or let FMA fuse it).</div>
+<div class="gotcha"><strong>Comparing growth at one point.</strong> "n log n was slower than n² in my test" — at n = 100, sure (constants!). Growth claims are claims about the trend; test at 3+ scales a decade apart.</div>
+<div class="gotcha"><strong>Exponent towers read top-down.</strong> 2^3² = 2⁹ = 512, not 8² = 64 — and <code>**</code> in Python is right-associative to match. C has no <code>**</code>; <code>^</code> is XOR, a legendary source of "why is 10^2 = 8".</div>
+
+<h2>Scenario — the fusion decision, made by arithmetic</h2>
+<p>Track-A preview, staffed entirely by this lesson: your inference pipeline runs <em>layernorm → matmul → GELU → matmul</em> on tensors of 8192×8192 fp16. A teammate proposes hand-fusing all four into one mega-kernel ("fewer launches = faster, right?"). You price it instead. The two matmuls: W = 2·2·8192³ ≈ 2.2×10¹² FLOPs, AI ≈ 680 — compute-bound; fusing them with anything saves memory traffic they barely notice. The layernorm and GELU: each ~10⁹ FLOPs but 4×10⁸ bytes → AI < 3, memory-bound, and each currently costs a full read+write of the tensor (0.8 ms of pure traffic at 1 TB/s). Verdict from the numbers: fuse <em>layernorm into the first matmul's prologue</em> and <em>GELU into its epilogue</em> (saving two full tensor round-trips ≈ 1.6 ms), leave the matmuls to the library (they're at 90% of peak already), and skip the mega-kernel (weeks of work to save microseconds on launch overhead ≈ 10 µs each). Ten minutes of exponent arithmetic replaced a month of misdirected engineering. That is what this lesson buys.</p>
+
+<h2>Practice</h2>
+<details><summary>1. Simplify without calculator: (2⁵)³ · 2⁻⁷ / 4²  — express as 2ⁿ, then in decimal via the bridge.</summary><div class="body">4² = 2⁴. So 2¹⁵ · 2⁻⁷ · 2⁻⁴ = 2⁴ = 16. (Exponents: 15−7−4 = 4.)</div></details>
+<details><summary>2. How many bits to give every one of 8.1 billion humans a unique ID? Every one of 10²⁴ stars?</summary><div class="body">⌈log₂ 8.1×10⁹⌉: 2³³ ≈ 8.6×10⁹ → 33 bits. Stars: 10²⁴ ≈ 2⁸⁰ (since 10³ ≈ 2¹⁰ → 10²⁴ ≈ 2⁸⁰) → 80 bits. Note how the bridge did all the work.</div></details>
+<details><summary>3. A GPU claims 989 TFLOP/s fp16. Your kernel does 10¹² FLOPs and runs in 4.7 ms. What fraction of peak did you achieve, and is that good?</summary><div class="body">Achieved = 10¹²/0.0047 ≈ 2.13×10¹⁴ = 213 TFLOP/s → 21.5% of peak. For a memory-bound kernel that could be excellent; for a matmul-class kernel it's poor (libraries hit 70–95%). The number is meaningless until you know the kernel's arithmetic intensity — compute AI first, then judge.</div></details>
+<details><summary>4. Prove log₂(x) = ln(x)/ln(2), and use it to compute log₂(10⁶) from ln(10) ≈ 2.302.</summary><div class="body">Let y = log₂ x → 2ʸ = x → y·ln 2 = ln x → y = ln x/ln 2. Then log₂ 10⁶ = 6·ln 10/ln 2 ≈ 6·2.302/0.693 ≈ 19.93 ≈ 20 — matching 10⁶ ≈ 2²⁰.</div></details>
+<details><summary>5. Your training loss involves log(softmax(z)). A logit hits z = 104. Walk through what overflows, when, and write the stable formula.</summary><div class="body">e¹⁰⁴ > fp32 max (e⁸⁹ ≈ 4.5×10³⁸ already exceeds 3.4×10³⁸) → inf; inf/inf → NaN; NaN poisons all gradients in one step. Stable: log softmax(zᵢ) = zᵢ − M − log Σⱼ e^{zⱼ−M} with M = max z. Every term in the sum is ≤ e⁰ = 1. This is log-sum-exp; PyTorch's F.log_softmax does exactly this.</div></details>
+<details><summary>6. Sorting n = 10⁹ keys takes n log₂ n comparisons. At 10⁹ comparisons/s/core, how long on 1 core? On a GPU doing 10¹² comparisons/s? What does the log factor cost vs a hypothetical O(n) radix pass?</summary><div class="body">n log n = 10⁹·30 = 3×10¹⁰ → 30 s on the core, 30 ms on the GPU. O(n) radix: 10⁹ ops → 1 ms-scale — the log₂n = 30× factor is exactly the gap, which is why GPU sorting is radix-based (Thrust/CUB) rather than comparison-based whenever keys allow.</div></details>
+<details><summary>7. Design: you must choose between (A) recomputing a value costing 8 FLOPs per use, or (B) caching it in DRAM (4-byte read per use). The GPU does 5×10¹³ FLOP/s and 10¹² B/s. Which is faster per use, by how much, and what general rule does this instance prove?</summary><div class="body">A: 8/5×10¹³ = 0.16 ps per use. B: 4/10¹² = 4 ps per use — recompute is 25× cheaper. Rule: at a 50 FLOP/byte machine balance, any value costing fewer than ~200 FLOPs (50 × 4 bytes) is cheaper to recompute than to re-read from DRAM. "FLOPs are free, bytes are expensive" — the sentence that summarizes modern GPU optimization, now derived by you from two divisions. (It's why activation recomputation exists in training, and why FlashAttention recomputes attention scores rather than storing them.)</div></details>
+
+<div class="pager">
+  <a href="lesson-02.html">← Algebra as computation</a>
+  <a href="lesson-04.html">Next: Geometry & trigonometry →</a>
+</div>
+<div class="footer">GPU Mastery · Module 1 · Lesson 3 — works offline · progress saved in your browser</div>
+</div>
+<script src="../assets/diagrams.js"></script>
+<script src="../assets/app.js"></script>
+</body>
+</html>

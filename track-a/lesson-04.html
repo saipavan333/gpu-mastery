@@ -1,0 +1,215 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>A4 Triton Kernels in Python — GPU Mastery</title>
+<link rel="stylesheet" href="../assets/style.css">
+</head>
+<body data-lesson="al4">
+<nav><div class="inner">
+  <a class="logo" href="../index.html">GPU<span>Mastery</span></a>
+  <a class="item" href="../index.html">Home</a>
+  <a class="item on" href="../curriculum.html">Curriculum</a>
+  <a class="item" href="../labs.html">Labs</a>
+  <a class="item" href="../setup.html">Lab setup</a>
+  <a class="item" href="../prompt.html">Generator prompt</a>
+</div></nav>
+<div class="wrap">
+
+<div class="lesson-top">
+  <div><span class="badge">Track A · Lesson 4</span><span class="badge dim">≈ 3.5 h</span></div>
+  <button id="donebtn" class="donebtn">Mark lesson complete</button>
+</div>
+<h1>Triton — kernels at the tile level, in Python, without surrendering the physics</h1>
+<p class="lead">Triton (3.x, the language inside torch.compile) moves your unit of authorship from the THREAD to the TILE: you write what one block computes; the compiler picks threads, vector widths, and staging. Module 5's cost model survives intact — coalescing, occupancy, and identity elements are still YOUR job. That's why you learned CUDA first, and why you'll now be fast in Triton instead of lost in it.</p>
+
+<h2>Concept</h2>
+
+<h3>The program model: one PROGRAM = one tile</h3>
+<div class="diagram" data-diagram="a4-model" data-caption="CUDA: author one thread, guard one element. Triton: author one tile; the compiler owns the threads inside it. Same grid outside, new unit inside."></div>
+<pre><code>import triton, triton.language as tl
+
+@triton.jit
+def saxpy(n, a, X, Y, BLOCK: tl.constexpr):        # BLOCK: compile-time (3.7's
+    pid  = tl.program_id(0)                         #   templates, Python-flavored)
+    offs = pid*BLOCK + tl.arange(0, BLOCK)          # a VECTOR of indices — the
+    mask = offs &lt; n                                 #   5.2 identity + guard,
+    x = tl.load(X + offs, mask=mask)                #   whole-tile at once
+    tl.store(Y + offs, a*x + tl.load(Y+offs, mask=mask), mask=mask)
+
+grid = lambda meta: (triton.cdiv(n, meta['BLOCK']),)   # 5.2's ceiling formula
+saxpy[grid](n, 2.0, x_ptr, y_ptr, BLOCK=1024)
+# translation table (keep it taped to your monitor for a week):
+# program_id ↔ blockIdx · BLOCK ↔ blockDim·tile (5.5) · mask ↔ if (i&lt;n)
+# tl.arange ↔ threadIdx.x · num_warps ↔ 5.6's dial · NO __syncthreads —
+# the compiler inserts barriers between dependent tile ops FOR you.</code></pre>
+
+<h3>Masks: the guard, the zero-fill, and the identity element</h3>
+<div class="diagram" data-diagram="a4-mask" data-caption="mask=offs&lt;n switches lanes off for both load and store — 5.2's guard vectorized, with 'other=' choosing what dead lanes pretend to hold."></div>
+<pre><code>x = tl.load(X + offs, mask=mask, other=0.0)     # dead lanes read "0.0"
+# 'other' is 5.5's ragged-edge zero-fill AS AN ARGUMENT — and choosing it is
+# the identity-element decision from 5.8/M2 L4: 0 for sums, -inf BEFORE a max,
+# 1 for products. The worked example's softmax lives or dies on this choice —
+# quiz 1 has the measured damage when someone picks wrong.</code></pre>
+
+<h3>Autotuning: 5.6's knob ritual, mechanized</h3>
+<div class="diagram" data-diagram="a4-autotune" data-caption="Declare configs; Triton benchmarks them on first call per key and caches the winner — your 5.6 Ex.2 afternoon, compressed into a decorator."></div>
+<pre><code>@triton.autotune(configs=[
+    triton.Config({'BLOCK': 512},  num_warps=4),
+    triton.Config({'BLOCK': 1024}, num_warps=4),
+    triton.Config({'BLOCK': 1024}, num_warps=8),
+  ], key=['n'])                      # ← re-tune when n's bucket changes
+@triton.jit
+def kernel(...): ...
+# num_warps: how many warps execute your tile (5.6's occupancy/ILP dial);
+# num_stages: software pipelining depth (5.5 P4's double-buffering,
+# generalized — the compiler builds the ring you built by hand).
+# The configs list is NOT a random grid: prune it with 5.5 P2's shared-memory
+# arithmetic and 5.6's register budgets BEFORE benchmarking (practice 5).</code></pre>
+
+<h2>Worked example</h2>
+<div class="card">
+<p><strong>Task:</strong> Row-wise softmax — Triton's canonical first real kernel, and A5's fusion thesis in miniature: four torch ops (max, sub+exp, sum, div) with four HBM round-trips become ONE kernel, one round-trip. Runs on Colab's T4.</p>
+<pre><code>@triton.jit
+def softmax(OUT, IN, stride, n_cols, BLOCK: tl.constexpr):
+    row  = tl.program_id(0)                          # one program per ROW
+    offs = tl.arange(0, BLOCK)                       # BLOCK = next_pow2(n_cols)
+    mask = offs &lt; n_cols
+    x = tl.load(IN + row*stride + offs, mask=mask, other=-float('inf'))  # ← THE choice
+    x = x - tl.max(x, axis=0)          # M1 L8's overflow shield (fp32 exp
+    num = tl.exp(x)                    #   overflows at 89: exp(88)=1.7e38, exp(89)=inf
+    den = tl.sum(num, axis=0)          #   — measured; the shift makes it impossible)
+    tl.store(OUT + row*stride + offs, num/den, mask=mask)
+
+fixture: vs torch.softmax, fp32 (1000, 781):  max rel-diff ≈ 1e-7  ✓ budget pass
+   (781 → BLOCK=1024: 243 dead lanes per row — the mask earns its living)
+why other=-inf is load-bearing (all numbers executed):
+   pad with 0.0 instead, row = [-5,-6,-7]:  padded 0 BECOMES the max → shift
+   is wrong → output [0.007, 0.002, 0.001] vs true [0.665, 0.245, 0.090] —
+   catastrophic. Even on a POSITIVE row: exp(0−max) joins the denominator →
+   true lanes sum to 0.96, not 1.0 — a quiet 4% tax on every probability.
+-inf is max's identity (max(x,−inf)=x) AND exp(−inf)=0 is sum's identity —
+   ONE value that's dead for both reductions. That's not luck; that's why
+   softmax is written max-then-sum (M2 L4's identity table, earning rent).</code></pre>
+<p><strong>What to internalize:</strong> the kernel is eight lines, and every line is a citation — the row-per-program mapping (5.2), the pow2-padded tile with masked edges (5.5), the identity-element fill (5.8), the overflow shift (M1 L8), the fused single-pass traffic win (a5-unfused's ledger, ÷4). Triton didn't remove the thinking; it removed the ceremony. When A9 shows you torch.compile's GENERATED kernels, they will look almost exactly like this one — you're learning the compiler's target language.</p>
+</div>
+
+<h2>Key points</h2>
+<ul class="keypoints">
+<li>Triton's unit is the program/tile: program_id ↔ blockIdx, tl.arange spans the tile, masks are the vectorized guard, and intra-tile barriers are the compiler's job — the 5.x concepts renamed, not replaced.</li>
+<li>Pointer arithmetic is in ELEMENTS (X + offs), strides come from tensor.stride() and are your responsibility — coalescing is still decided by YOUR index expressions (5.7 did not retire).</li>
+<li>other= on masked loads is an identity-element declaration (0 for sum, −inf before max, 1 for product) — the wrong choice is numerically catastrophic on edge rows and quiet on typical ones (0.66 vs 0.04 error, measured).</li>
+<li>BLOCK sizes are constexpr and tl.arange spans must be powers of two — pad to next_pow2 and mask, exactly 5.5's ragged-edge discipline.</li>
+<li>@autotune benchmarks declared configs per cache key: first call per key IS the tuner (warm up before timing — M1 L7); num_warps/num_stages are 5.6's dial and 5.5 P4's double-buffer as arguments.</li>
+<li>Accumulate wide regardless of storage dtype: tl.dot and reductions take acc dtype fp32 (5.11's law is an argument here, not a hope) — A3 quiz 2's bug class, pre-blocked.</li>
+</ul>
+
+<h2>Quiz</h2>
+<div class="quiz">
+  <div class="q">1. A teammate's Triton softmax passes its fixture on random test data (rtol 1e-5, 10k random rows — green). In production, a classifier's "no detection" rows (all logits strongly negative) return garbage probabilities. Their load: <code>tl.load(..., mask=mask, other=0.0)</code>. Explain both facts — why 10k random rows never caught it, and what the production rows hit — then state the fixture doctrine this violates.</div>
+  <button class="opt">Random testing is sufficient; production hit a driver bug</button>
+  <button class="opt" data-c="1">With other=0.0, padded lanes enter BOTH reductions. On typical random rows (max &gt; 0), the damage is only exp(0−max) extra in the denominator — rel-error ~1e-2 at worst, often UNDER a loose rtol with wide rows... and their rows were 781 wide with 243 pad lanes: 243·exp(−max) can still pass rtol on high-max rows — the green suite measured the bug as noise. All-negative rows are the cliff: the padded 0 BECOMES the max, the shift normalizes against a phantom, outputs are ~100× off (measured: [.007,.002,.001] vs [.665,.245,.090]). Doctrine violated: M2 L6's boundary fixtures — edge regimes (all-negative, single-element, all-equal, ±inf logits) are chosen, not sampled; random data systematically avoids exactly the corners where identity-element bugs live</button>
+  <button class="opt">The mask comparison should be &lt;= not &lt;</button>
+  <button class="opt">BLOCK wasn't a power of two</button>
+  <div class="expl">The two-regime damage profile (quiet 4%-class error on normal rows, catastrophe on edge rows) is what makes identity-element bugs the WORST class: they pass casual tests and detonate on the inputs that matter (a "no detection" row is precisely when a downstream threshold reads the probabilities!). The executed numbers are in the worked example. Fixture rule to keep: every masked reduction gets an adversarial-row suite — all-negative, all-equal (softmax must return uniform), one-hot-large (must saturate), and n_cols == BLOCK (zero dead lanes — the OTHER edge).</div>
+</div>
+<div class="quiz">
+  <div class="q">2. Your autotuned matmul kernel benchmarks beautifully in the sweep notebook. In the training job, the profiler shows periodic multi-hundred-ms stalls on the training loop's critical path, correlated with batch-size changes from the ragged final batch of each epoch. Mechanism, and the two-level fix?</div>
+  <button class="opt">The GPU is thermal-throttling at epoch boundaries</button>
+  <button class="opt" data-c="1">The autotune cache is keyed on shape (key=['M','N','K']): every NEW shape triggers a full config benchmark ON the critical path — the tuner runs in your training step (a4-autotune's "first call per key is the tuner"). Ragged final batches mint a new key every epoch → periodic tuning stalls. Fixes: (1) shape-level — pad/bucket batch sizes so the key set is small and stable (5.7 P2's padding economics: a few wasted rows buy away the stalls; also what serving systems do); (2) tuner-level — warm up all expected keys at startup (run each shape once before training), and/or coarsen the key (bucket M to multiples of 64) so raggedness maps to existing entries. The general law: any lazily-specializing system (autotune, torch.compile's guards — a9-when's recompile row, JITs everywhere) turns shape churn into critical-path compilation; stabilize shapes or pre-pay</button>
+  <button class="opt">Triton kernels can't handle non-square matrices</button>
+  <button class="opt">num_stages is too high for small batches</button>
+  <div class="expl">This is the production face of "the first call is the benchmark" — harmless in notebooks, a tail-latency machine in jobs with shape diversity. The signature (stalls correlated with novel shapes) plus the fix vocabulary (bucketing, warmup, key coarsening) transfers verbatim to torch.compile (A9) and inference servers (A8's shape buckets). M1 L7's warmup ritual, it turns out, was also a PRODUCTION architecture principle all along.</div>
+</div>
+
+<h2>Exercises</h2>
+<details><summary>Exercise 1 — Colab: write saxpy in Triton with the full 5.2 coverage kit ported (n ∈ {0, 1, 1023, 1024, 1025, 10M} vs torch reference), then sweep BLOCK ∈ {128…4096} × num_warps ∈ {1,2,4,8} at n=10M with proper timing (triton.testing.do_bench — it warms up and medians for you; compare its numbers to your own GpuTimer-style events once, to trust it). Find the plateau and explain its left and right edges with 5.6/5.2 citations.</summary><div class="body">
+<pre><code>expected T4 shape: rising to a wide plateau near bandwidth-bound (~all configs
+within ~10% for BLOCK ≥ 512, warps ≥ 4), falling at the edges:
+  left edge (tiny BLOCK / 1 warp): more programs → launch+scheduling overhead
+    (5.2's floor) and too little ILP per program to feed the bus (5.6 P6)
+  right edge (BLOCK 4096 × 8 warps): register pressure per program rises;
+    fewer resident programs per SM → occupancy dial (5.6) — mild here because
+    saxpy is bandwidth-bound with a low latency-hiding need at high ILP</code></pre>
+<p>The deliverable is the annotated plateau table in your machine-model repo, plus one sentence you'll reuse forever: "for streaming kernels, config choice is a WIDE plateau, not a peak — autotune buys little; save it for tl.dot kernels where tiling actually moves the roofline (5.5)." Knowing where tuning DOESN'T matter is as load-bearing as knowing where it does (4.7's stopping rule, applied to knobs).</p>
+</div></details>
+<details><summary>Exercise 2 — Build the worked example's softmax on Colab: fixture vs torch.softmax (budget, per quiz 1's adversarial suite INCLUDED — all-negative, all-equal, one-hot, n_cols==BLOCK), stage the other=0.0 bug and watch which fixtures catch it, then print kernel.asm['ptx'] and find three old friends in the PTX (the 3.6 Godbolt reflex, final boss form).</summary><div class="body">
+<pre><code>fixture outcomes with other=0.0 staged: random-rows PASS at rtol 1e-3 (the
+trap!), FAIL at 1e-5 on wide rows; all-negative rows FAIL catastrophically
+(the 0.66 error — quiz 1's cliff, reproduced on your own GPU).
+PTX safari — find: (1) ld.global / st.global with predicates (%p) — your MASK
+compiled into 5.2's guard at instruction level; (2) a shfl.sync or shared-mem
+reduction sequence — tl.max/tl.sum lowered to 5.8's tree/shuffle (you can now
+READ what the compiler chose!); (3) ex2.approx.f32 — exp lowered to the
+hardware exp2 unit (M1 L8's "libm vs hardware" distinction, visible).</code></pre>
+<p>The PTX safari is the point: Triton is not a black box to you — every lowered construct is a Module 5 concept you built by hand, and reading the ASM to verify the compiler's choices (did my reduction become shuffles? did my load vectorize to v4?) is EXACTLY how Triton experts debug performance. You have the reading skills; this exercise just hands you the habit.</p>
+</div></details>
+
+<hr>
+<h1>Go deeper — what the compiler does with your tile</h1>
+
+<h2>1. The lowering pipeline (and which decisions stay yours)</h2>
+<pre><code>your tile ops → Triton IR → optimizations → PTX/SASS (or AMDGCN — D7's door)
+COMPILER owns: thread mapping, vector widths (v2/v4 loads), shared-memory
+  staging for tl.dot, software pipelining (num_stages ring), barrier placement
+YOU still own: index expressions (coalescing! adjacent offs → adjacent bytes —
+  5.7's instant rule is evaluated on YOUR arithmetic), identity fills, acc
+  dtypes, tile shapes, and the algorithm itself
+consequence: a strided access pattern is exactly as slow in Triton as in CUDA
+  (the compiler vectorizes what your indices permit — it cannot repair them).
+  Triton compresses the CEREMONY, not the PHYSICS.</code></pre>
+
+<h2>2. tl.dot and the matmul skeleton (5.11 in twenty lines)</h2>
+<pre><code>acc = tl.zeros((BM, BN), dtype=tl.float32)          # 5.11's law as a literal
+for k in range(0, K, BK):
+    a = tl.load(A_blk, mask=..., other=0.0)         # zero-fill = 5.5's ragged rule
+    b = tl.load(B_blk, mask=..., other=0.0)
+    acc = tl.dot(a, b, acc)                          # tensor-core MMA when dtypes/
+    A_blk += BK * stride_ak; B_blk += BK * stride_bk #   shapes allow (a6-tc's tiles)
+# tl.dot demands tile dims ≥16 (TC shapes — a6-tc's "feed the unit");
+# num_stages≥2 pipelines the loads (5.5 P4's double-buffer, automated);
+# the 5.11 regtile you hand-built is what this COMPILES INTO. Twenty lines,
+# ~85–95% of your v4 — and the missing % is exactly the swizzles you know about.</code></pre>
+
+<h2>3. When Triton, when CUDA (the honest boundary, 2026)</h2>
+<pre><code>Triton wins: fused elementwise/reduction/normalization/attention-class kernels
+  (90% of ML kernel needs), iteration speed (variants per day, the scenario),
+  autotuning across shapes/archs, portability (NVIDIA + ROCm backends — D7)
+CUDA keeps: warp-level choreography Triton doesn't expose (decoupled-lookback
+  scans, cooperative groups, cluster features), exotic memory tricks (TMA
+  descriptors' fine control, though Triton grows these per release), the last
+  10% on flagship GEMM/attention (FA4 is CuTeDSL — the vendor's own tile DSL,
+  verified 2026: the frontier speaks tile languages too, just deeper ones)
+rule: Triton first; drop to CUDA when the PROFILE names a construct Triton
+  can't express — never preemptively (5.10's evidence bar for effort).</code></pre>
+
+<h2>4. Gotchas</h2>
+<div class="gotcha"><strong>Element vs byte arithmetic.</strong> Triton pointers advance by ELEMENTS (X+offs), tensor.stride() returns elements — Module 3 graduates keep multiplying by sizeof; the symptom is a 4× stride and 5.7-style sector waste, visible in Ex.2's PTX as scattered addresses.</div>
+<div class="gotcha"><strong>Python at trace time.</strong> Code inside @triton.jit runs ONCE to build IR: a Python `if x_val &gt; 0` on a runtime value doesn't compile (use tl.where); a `print` fires at compile time, not per element (tl.device_print exists — 5.4's printf rules apply to it).</div>
+<div class="gotcha"><strong>The wrong identity in other=.</strong> Quiz 1. Write the reduction FIRST, then choose other= from its identity table (M2 L4/5.8): sum→0, max→−inf, min→+inf, prod→1.</div>
+<div class="gotcha"><strong>Store masks forgotten.</strong> tl.store without the mask writes the dead lanes — OOB clobber of the next row (5.2's guard law; racecheck-invisible because it's global — 5.8's gotcha 1). Loads AND stores, always.</div>
+<div class="gotcha"><strong>Autotune key too fine or too coarse.</strong> Quiz 2 (per-shape stalls) vs the inverse: key missing a dim that changes the optimum → a config tuned for K=64 reused at K=8192 (silent 2× loss). The key should list exactly the dims that MOVE the plateau (Ex.1 tells you which those are).</div>
+<div class="gotcha"><strong>Benchmarking through the tuner or the JIT.</strong> First call compiles AND tunes (seconds!); triton.testing.do_bench handles warmup/medians — hand-rolled timing that doesn't is measuring the toolchain (M1 L7's oldest sin, two new costumes).</div>
+
+<h2>Scenario — five attention variants in the time CUDA budgeted for one</h2>
+<p>A research team needs a modified attention: per-head learned temperature plus a banded-locality mask — no library implements the combination. The staff engineer's estimate for a CUDA implementation with backward: three weeks (they've done FA-class kernels; the estimate is honest, not padded — tiling, two backward kernels, the fixture matrix). A course-graduate on the team counters: Triton spike first. Day one: forward kernel — the a5-flash skeleton with the temperature folded into the QK scale and the band folded into the MASK (quiz 1's identity discipline: banned positions get −inf BEFORE the online max); fixtures vs a slow torch reference pass at rtol 1e-5 including the adversarial suite. Day three: backward (the online-softmax rescale replayed — A5 §flash's recompute pattern), gradcheck-fp64 green. Day five: autotuned, 82% of FlashAttention's throughput at their sequence lengths — shipped to experiments. The next month, the researchers iterate through FIVE mask/temperature variants — each a ~20-line diff plus rerun fixtures, each live in experiments within a day. One variant genuinely needs a warp-level scan Triton can't express; THAT one — now proven valuable by experiment — gets the CUDA treatment, with its Triton twin as the differential-testing oracle (M2 L6's reference-implementation layer, self-supplied). The ledger: the CUDA-first plan bought one variant in three weeks; the Triton-first plan bought five experiments, one validated winner, and a better-specified CUDA port — same engineer-hours. The moral is §3's rule with money attached: <em>iteration velocity is a performance feature — of the RESEARCH, which is the thing being optimized.</em></p>
+
+<h2>Practice</h2>
+<details><summary>1. Translate each CUDA construct to its Triton equivalent (or name the absence and its workaround): blockIdx.x · threadIdx.x · if (i&lt;n) · __shared__ float t[TILE] · __syncthreads() · grid-stride loop · atomicAdd · warp shuffle reduction.</summary><div class="body">blockIdx.x → tl.program_id(0). threadIdx.x → no direct equivalent — tl.arange(0,BLOCK) spans the tile and the compiler maps lanes (the model hides threads on purpose). if(i&lt;n) → mask=offs&lt;n on loads/stores. __shared__ staging → implicit (compiler stages tl.dot operands; no user-visible smem in the core language). __syncthreads → automatic between dependent tile ops. Grid-stride → a Python for over `offs + k*total` (masks per step — coalesced per 5.7 P3, same proof). atomicAdd → tl.atomic_add (5.8's rules unchanged: cross-PROGRAM communication is atomics-or-nothing, since programs = 5.2's independent blocks). Warp shuffle → not exposed; tl.max/tl.sum LOWER to shuffles (Ex.2's PTX safari proves it) — you request the reduction, the compiler picks 5.8's ladder rung. Scoring 8/8 means the translation table is installed; the two "absences" (threadIdx, shuffles) are the model's boundary — and §3's CUDA-keeps list is exactly what lives beyond it.</div></details>
+<details><summary>2. Write the load expression (pointers + mask) for a (B, H, M, N) fp16 tensor's tile [b, h, m0:m0+BM, n0:n0+BN] given strides (sb, sh, sm, sn) — then state which single stride equaling 1 makes the load coalesced, and why the OTHER cases need a transpose-in-tile (5.7's way-station) rather than hope.</summary><div class="body"><code>offs_m = m0 + tl.arange(0,BM); offs_n = n0 + tl.arange(0,BN); ptr = X + b*sb + h*sh + offs_m[:,None]*sm + offs_n[None,:]*sn; mask = (offs_m[:,None] &lt; M) &amp; (offs_n[None,:] &lt; N)</code> — the [:,None]/[None,:] broadcasting builds the 2D tile address grid (M2 L4's outer-product broadcasting, now generating ADDRESSES). Coalesced iff sn == 1 (the FASTEST-varying tile axis maps to adjacent memory — 5.7's instant rule: lanes along the last tl.arange are the adjacent accessors). If instead sm==1 (you're reading a transposed view), adjacent lanes stride by sn elements → sector waste; the fix is 5.7's worked example verbatim: load the tile along ITS contiguous axis and transpose in-registers/tile (tl.trans), never issue the strided pattern raw. Triton changed the notation; 4.5's bus did not move.</div></details>
+<details><summary>3. Your softmax must now handle n_cols up to 128k — next_pow2 padding would need BLOCK=131072 (too big: registers). Sketch the two-pass online rewrite (a5-online's running (m, s) over column CHUNKS), state what extra the second pass needs, and why this is precisely FlashAttention's inner loop showing up early.</summary><div class="body">Pass structure per row: loop chunks of BLOCK (say 4096): m_new = max(m, max(chunk)); s = s*exp(m−m_new) + sum(exp(chunk−m_new)); m = m_new — a5-online's rescale identity, now in YOUR code. Second pass: reload each chunk, emit exp(x−m)/s (needs the FINAL m, s — hence two passes; or store per-chunk (m_i, s_i) and merge — the segmented variant). Extra state: two scalars per row (registers), zero extra HBM. This chunked-online-softmax IS FlashAttention's inner mechanism minus the V-accumulation (a5-flash adds a running O rescaled the same way) — so when A5 "derives" FA, you'll have already implemented its hardest idea for a mundane reason (rows too wide). Curriculum design confession: that was the plan.</div></details>
+<details><summary>4. Why does Triton not need (or offer) __syncthreads inside a program — mechanism, not slogan — and name the ONE cross-cutting situation where the missing primitive forces an algorithm redesign, with its 5.8 citation.</summary><div class="body">Mechanism: tile ops declare data dependencies (this tl.sum consumes that tl.load's tile); the compiler schedules threads/warps to honor them, inserting hardware barriers exactly where the dependency graph demands (5.5's write-sync-read law, derived automatically from dataflow instead of trusted to your discipline — a whole bug class deleted, including 5.5 quiz 1's missing-second-barrier). The boundary: dependencies BETWEEN programs don't exist by design (programs = 5.2's independent blocks), so algorithms needing inter-block coordination mid-kernel — decoupled-lookback scan being the canonical case — can't be expressed as one cooperating grid: redesign as multi-kernel (5.8's two-phase, the slot-array pattern) or atomics-based (tl.atomic_*, with 5.8's contention arithmetic), or drop to CUDA cooperative groups (§3's boundary). The answer's shape — "the compiler proves what you used to promise" — is the whole Triton value proposition in one sentence.</div></details>
+<details><summary>5. Design the autotune config list for §2's matmul on YOUR T4 (48–64 KB smem, 65536 regs/SM): candidate (BM, BN, BK) ∈ {64,128} × {64,128} × {32,64}, warps ∈ {4,8}, stages ∈ {2,3} — prune to ≤8 configs by ARITHMETIC before any benchmark (show the smem bill per config: stages×(BM+BN)×BK×2 bytes fp16), and defend the pruning order.</summary><div class="body">Smem bill (fp16, ×stages): (128,128,64,s3): 3×(256)×64×2 = 96 KB — EXCEEDS T4's 64 KB: pruned by arithmetic, zero benchmarks spent. (128,128,64,s2): 64 KB — exactly at the ceiling: 1 program/SM, occupancy floor (5.6) — keep ONE such config as a probe, expect it to lose. (128,128,32,s2): 32 KB ✓; (128,64,64,s2): 48 KB ✓; (64,64,64,s3): 48 KB ✓; (64,64,32,s2): 16 KB ✓ (multiple programs/SM — the small-shape winner). Plus warps: 8 warps × big tiles strains registers (est. via 5.6's table: acc alone = BM×BN×4B/threads... 128×128×4/256threads=256 regs/thread at 8 warps→ spills: prune 8-warp big-tile combos). Final ~7 configs spanning small/medium/large shapes. Defense of order: memory-budget pruning is EXACT (no noise, no GPU time), register estimates are close (ptxas confirms), benchmarks are expensive and noisy — spend them only on survivors (M1 L7's controlled-experiment economics; a4-autotune's configs list was never meant to be a lottery).</div></details>
+<details><summary>6. The debugging ladder for a wrong Triton kernel, in order (5.4's rungs, retargeted): name the four rungs with their Triton-specific tools, and which classes of bug each catches. (TRITON_INTERPRET=1, tl.device_print, static_assert/shape prints at trace time, PTX diff.)</summary><div class="body">Rung 0 — trace-time: print Python-side shapes/constexprs inside the jit (runs once at compile — gotcha 2's behavior, used FOR you) + tl.static_assert on tile-shape assumptions: catches wrong-constexpr/wrong-stride wiring before any launch. Rung 1 — TRITON_INTERPRET=1: runs your kernel as NumPy on CPU, sequentially — masks, indexing, and identity bugs reproduce deterministically with printable everything (the 5.4-rung-2 equivalent: full locality, no GPU nondeterminism; quiz 1's bug falls here in minutes). Rung 2 — tl.device_print on-GPU for the one-program view (gate by program_id — 5.4's printf rules verbatim: gated, sync-flushed, exploratory only). Rung 3 — kernel.asm PTX/TTGIR diff vs a known-good variant: catches compiler-interaction bugs (vectorization didn't happen, barrier placement surprises) — rare, but Ex.2 gave you the reading skill. The ladder's economics mirror 5.4's exactly: each rung costs more and localizes better; enter at the rung your symptom names.</div></details>
+<details><summary>7. Interview closer: "Why does Triton exist when CUDA already does everything, and when would you still write CUDA?" — 90 seconds: the authorship-level argument, what the compiler owns vs what you keep (with the physics-survives point), the velocity-as-performance case from the scenario, the honest CUDA-keeps list, and the one-line strategy rule.</summary><div class="body">Skeleton: "CUDA's unit of authorship is the thread; Triton's is the tile — which happens to be the unit performance ACTUALLY lives at (Module 5 was one long lesson in tiles). The compiler takes the mechanical layer: thread mapping, vectorization, shared-memory staging, barrier placement — the layer where CUDA bugs breed (missing __syncthreads, unguarded tails). I keep the layer that determines performance: index arithmetic — coalescing is still mine [P2] — identity fills, accumulator dtypes, tile shapes, the algorithm. The physics survives the abstraction, which is why CUDA-first education pays: I read Triton's PTX and recognize my own reduction ladders [Ex.2]. The business case is velocity: five attention variants in the time one CUDA implementation budgets — iteration speed is a performance feature of the research itself [scenario]. I still write CUDA for warp-level choreography Triton doesn't expose — decoupled scans, cluster/TMA fine control, the last 10% on flagship kernels where vendors themselves use deeper tile DSLs [§3]. Strategy rule: Triton by default, CUDA when a PROFILE names a construct Triton can't express — tool choice is an evidence question, not an identity" [5.10]. That last clause is the senior tell.</div></details>
+
+<div class="pager">
+  <a href="lesson-03.html">← Custom CUDA ops</a>
+  <a href="lesson-05.html">Next: ML kernel patterns — fusion, softmax, FlashAttention →</a>
+</div>
+<div class="footer">GPU Mastery · Track A · Lesson 4 — works offline · progress saved in your browser</div>
+</div>
+<script src="../assets/diagramsA.js"></script>
+<script src="../assets/app.js"></script>
+</body>
+</html>

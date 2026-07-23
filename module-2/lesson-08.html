@@ -1,0 +1,292 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>2.8 Capstone: Image Processing with NumPy — GPU Mastery</title>
+<link rel="stylesheet" href="../assets/style.css">
+</head>
+<body data-lesson="m2l8">
+<nav><div class="inner">
+  <a class="logo" href="../index.html">GPU<span>Mastery</span></a>
+  <a class="item" href="../index.html">Home</a>
+  <a class="item on" href="../curriculum.html">Curriculum</a>
+  <a class="item" href="../labs.html">Labs</a>
+  <a class="item" href="../setup.html">Lab setup</a>
+  <a class="item" href="../prompt.html">Generator prompt</a>
+</div></nav>
+<div class="wrap">
+
+<div class="lesson-top">
+  <div><span class="badge">Module 2 · Lesson 8</span><span class="badge dim">≈ 4–6 h · capstone project</span></div>
+  <button id="donebtn" class="donebtn">Mark lesson complete</button>
+</div>
+<h1>Capstone — Image Processing with NumPy</h1>
+<p class="lead">Everything converges: pixels are arrays (M1's promise), filters are the math you own, and the deliverable is a tested, deployable repo. You'll build an image pipeline — grayscale, brightness, blur, edges, vignette, downscale — where every operation is a Module 1 lesson wearing work clothes. This project, on GPU, is literally Module 5's curriculum.</p>
+
+<h2>The project brief</h2>
+<div class="card">
+<p><strong>Build <code>pixelforge</code>:</strong> a command-line image pipeline in the 2.7 repo structure. <code>python scripts/pipeline.py --input img.png --ops gray,blur,edges --out results/</code> applies operations in sequence, saves outputs and a provenance JSON, and ships with a full pytest suite. No image? The pipeline generates its own synthetic test images — the project works offline, anywhere, forever.</p>
+<p><strong>Acceptance (2.6/2.7 discipline):</strong> a stranger clones, installs pinned deps, runs <code>pytest -q</code> green, runs the pipeline on a generated image, and gets correct outputs — no verbal footnotes. Loading real PNGs: <code>pip install pillow</code>, then <code>img = np.asarray(Image.open(p))</code>; everything else is NumPy.</p>
+</div>
+
+<h3>Stage 0 — the data model (read this twice)</h3>
+<div class="diagram" data-diagram="m2l8-image" data-caption="(H, W, 3) uint8, y-down, img[row, col]. Half the project's bugs die in this one picture."></div>
+<pre><code>def make_test_image(H=256, W=384):
+    """Synthetic RGB test card: gradients + shapes — every op's behavior is predictable."""
+    img = np.zeros((H, W, 3), dtype=np.uint8)
+    img[..., 0] = np.linspace(0, 255, W, dtype=np.uint8)[None, :]     # R: left→right ramp
+    img[..., 1] = np.linspace(0, 255, H, dtype=np.uint8)[:, None]     # G: top→bottom ramp
+    yy, xx = np.ogrid[:H, :W]                                          # coordinate grids
+    ring = (xx - W//2)**2 + (yy - H//2)**2                             # squared distance (M1 L4!)
+    m = min(H, W)                                                       # radii SCALE with size —
+    r_in, r_out = m*15//64, m*5//16                                     # 60/80 at H=256, never empty
+    img[..., 2][(ring > r_in**2) &amp; (ring &lt; r_out**2)] = 255            # a blue ring — no sqrt
+    return img</code></pre>
+<p>Note the habits already loaded: dtype declared, broadcasting builds the ramps (2.5), squared-distance ring (M1 L4's shader example, verbatim), boolean-mask writes (2.5 §3's scatter row). <code>np.ogrid</code> hands you the (H,1) and (1,W) coordinate arrays that broadcasting was born for.</p>
+
+<h3>Stage 1 — grayscale: a dot product per pixel (M1 L5)</h3>
+<div class="diagram" data-diagram="m2l8-gray" data-caption="One @ = two million dot products with the luma vector."></div>
+<pre><code>LUMA = np.array([0.299, 0.587, 0.114], dtype=np.float32)   # human eyes weight green
+
+def to_gray(img):
+    """(H,W,3) uint8 → (H,W) uint8 luminance."""
+    g = img.astype(np.float32) @ LUMA          # (H,W,3) @ (3,) → (H,W): batched dot
+    return np.clip(g + 0.5, 0, 255).astype(np.uint8)   # round + saturate (M1 L1's clamp)</code></pre>
+
+<h3>Stage 2 — brightness & contrast: the uint8 minefield (M1 L1/L8)</h3>
+<pre><code>def brightness(img, delta):
+    """delta in [-255, 255]. THE dtype dance: widen → math → clip → narrow."""
+    out = img.astype(np.int16) + delta               # int16: room for 255+255 and 0-255
+    return np.clip(out, 0, 255).astype(np.uint8)     # saturate, never wrap
+
+def contrast(img, k):
+    """Scale distances from mid-gray: k&gt;1 punchier, k&lt;1 flatter (M1 L2 affine)."""
+    out = (img.astype(np.float32) - 128.0) * k + 128.0
+    return np.clip(out, 0, 255).astype(np.uint8)</code></pre>
+<div class="warnbox">Try the naive version once, on purpose: <code>img + 100</code> in uint8 wraps — bright skies become black speckle (173+100=17, M1 L1's worked example, now on 2 million pixels at once). The widen→compute→clip→narrow dance is non-negotiable and IS one of your tests.</div>
+
+<h3>Stage 3 — box blur: neighborhood means via shifted views (M1 L7 + 2.5)</h3>
+<div class="diagram" data-diagram="m2l8-blur" data-caption="Each output pixel = mean of its 3×3 patch. Views make it loop-free."></div>
+<pre><code>def blur3(gray):
+    """3×3 box blur. Edge policy: output shrinks by 1 pixel per side (documented!)."""
+    g = gray.astype(np.float32)
+    acc = np.zeros_like(g[1:-1, 1:-1])
+    for dy in (-1, 0, 1):
+        for dx in (-1, 0, 1):                        # 9 iterations — NOT per-pixel loops:
+            acc += g[1+dy : g.shape[0]-1+dy,         # each term is a full SHIFTED VIEW
+                     1+dx : g.shape[1]-1+dx]         # (2.5: views = free windows)
+    return np.clip(acc / 9.0 + 0.5, 0, 255).astype(np.uint8)</code></pre>
+<p>The loop runs 9 times total (not 2M×9): each iteration adds a whole shifted image. This "sum of shifted views" is a real convolution implementation pattern — and blur is M1 L7's "means smooth noise" made visible. Edge policy is a <em>decision</em> (shrink vs pad); we shrink and say so in the docstring, and the shape contract goes in a test.</p>
+
+<h3>Stage 4 — edges: finite differences (Track A1/B1's opening act)</h3>
+<pre><code>def edges(gray):
+    """Gradient magnitude via central differences — brightness CHANGE is edge-ness."""
+    g = gray.astype(np.float32)
+    dx = g[1:-1, 2:] - g[1:-1, :-2]                  # ∂/∂x: right neighbor − left neighbor
+    dy = g[2:, 1:-1] - g[:-2, 1:-1]                  # ∂/∂y: below − above (y-down! M1 L4)
+    mag = np.sqrt(dx*dx + dy*dy)                     # gradient length (M1 L5 ‖·‖)
+    return np.clip(mag, 0, 255).astype(np.uint8)</code></pre>
+<p>You are computing derivatives — the slope of brightness — one module before calculus formally arrives. The blue ring in the test card should light up as two crisp circles (inner and outer boundary); the smooth ramps should go near-black. If your edges image is white noise, you forgot the float cast (uint8 subtraction wraps — Stage 2's lesson, and 2.5's gotcha, on purpose again).</p>
+
+<h3>Stage 5 — vignette: broadcasting a radial mask (M1 L4 + 2.5)</h3>
+<pre><code>def vignette(img, strength=0.6):
+    H, W = img.shape[:2]
+    yy, xx = np.ogrid[:H, :W]
+    r2 = ((xx - W/2)/(W/2))**2 + ((yy - H/2)/(H/2))**2      # normalized radius² (aspect-corrected!)
+    mask = 1.0 - strength * np.clip(r2, 0, 1)                # bright center → dark corners
+    out = img.astype(np.float32) * mask[:, :, None]          # (H,W,1) broadcasts over channels
+    return np.clip(out, 0, 255).astype(np.uint8)</code></pre>
+<p>Every 2.5 §2 tool in one function: ogrid coordinates, aspect normalization (M1 L4 §6 — skip it and the vignette is an ellipse), and the <code>[:, :, None]</code> axis-insertion that broadcasts a (H,W) mask over (H,W,3) without copying it three times.</p>
+
+<h3>Stage 6 — downscale: the reshape-pool trick (2.5's finale)</h3>
+<div class="diagram" data-diagram="m2l8-pool" data-caption="Free reshape into 2×2 blocks; mean deletes the little axes. GPUs pool exactly this way."></div>
+<pre><code>def downscale2(img):
+    """(H,W,3) → (H//2, W//2, 3) by 2×2 mean pooling. Odd edges: cropped (documented)."""
+    H, W = img.shape[:2]
+    x = img[:H//2*2, :W//2*2].astype(np.float32)             # crop to even (edge DECISION)
+    x = x.reshape(H//2, 2, W//2, 2, 3).mean(axis=(1, 3))     # the m2l8-pool diagram, executed
+    return np.clip(x + 0.5, 0, 255).astype(np.uint8)</code></pre>
+
+<h2>Worked example — assembling the pipeline</h2>
+<div class="card">
+<p><strong>Task:</strong> the driver that makes it a product: ops as a registry (2.4's design, delivered), provenance (2.7), timing (M1 L7).</p>
+<pre><code># scripts/pipeline.py
+import argparse, json, time
+from pathlib import Path
+import numpy as np
+from pixelforge.ops import OPS, make_test_image        # OPS = {"gray": to_gray, "blur": blur3, ...}
+
+p = argparse.ArgumentParser()
+p.add_argument("--input", type=Path, default=None, help="PNG path; omit for synthetic")
+p.add_argument("--ops", default="gray,blur,edges", help=f"comma list from: {sorted(OPS)}")
+p.add_argument("--out", type=Path, default=Path("results"))
+args = p.parse_args()
+
+img = load_png(args.input) if args.input else make_test_image()
+args.out.mkdir(exist_ok=True)
+report = {"input": str(args.input or "synthetic"), "stages": []}
+
+x = img
+for name in args.ops.split(","):
+    if name not in OPS:
+        raise SystemExit(f"unknown op {name!r} — choose from {sorted(OPS)}")   # loud, helpful (2.4)
+    t0 = time.perf_counter()
+    x = OPS[name](x)
+    ms = (time.perf_counter() - t0) * 1000
+    save_png(args.out / f"{name}.png", x)
+    report["stages"].append({"op": name, "ms": round(ms, 2),
+                             "shape": list(x.shape), "dtype": str(x.dtype)})
+(args.out / "report.json").write_text(json.dumps(report, indent=2), encoding="utf-8")
+print(json.dumps(report, indent=2))</code></pre>
+<p><strong>Sample report</strong> (synthetic 256×384, typical laptop):</p>
+<pre><code>{"stages": [
+  {"op": "gray",  "ms": 1.8, "shape": [256, 384],      "dtype": "uint8"},
+  {"op": "blur",  "ms": 3.1, "shape": [254, 382],      "dtype": "uint8"},
+  {"op": "edges", "ms": 2.4, "shape": [252, 380],      "dtype": "uint8"}]}</code></pre>
+<p><strong>Decisions on display:</strong> the shape column exposes the shrinking-edge policy stage by stage (contracts visible in output); per-stage ms is the seed of the M1 L7 ritual (a --repeats flag medianizes it in an exercise); unknown ops fail with the menu in the message. <strong>The GPU foreshadow, concretely:</strong> each stage reads and writes the whole image — 6 stages ≈ 12 full-image memory trips. Module 5 will fuse gray+blur+edges into ONE kernel with ONE read and ONE write — and now you know, from 2.5's out= measurement and M1 L3's bytes budget, exactly why that's the win.</p>
+</div>
+
+<h2>Key points</h2>
+<ul class="keypoints">
+<li>Images are (H, W, 3) uint8 arrays, y-down, indexed [row, col] — the data model that pre-answers half of all image bugs.</li>
+<li>The dtype dance — widen (int16/float32) → compute → clip → narrow (uint8) — is mandatory; uint8 arithmetic wraps exactly as M1 L1 promised.</li>
+<li>Grayscale is a batched dot product (@ LUMA); blur is a mean of shifted VIEWS; edges are finite differences; vignette is a broadcast radial mask: Module 1, operationalized.</li>
+<li>Every op declares its edge policy (shrink? crop? pad?) and shape contract — in the docstring AND in a test.</li>
+<li>The pipeline is a registry of pure ops + one impure driver with provenance JSON — 2.3's architecture, 2.4's registry, 2.7's repo, shipped.</li>
+<li>Each stage is a full read+write of the image; counting those trips (M1 L3) is the exact argument for kernel fusion in Module 5.</li>
+</ul>
+
+<h2>Quiz</h2>
+<div class="quiz">
+  <div class="q">1. Your edges output is random-looking static instead of ring outlines. The most likely one-line cause?</div>
+  <button class="opt">The image is too small for gradients</button>
+  <button class="opt" data-c="1">You differenced in uint8: 5 − 10 wrapped to 251 (M1 L1), so every gentle slope became a violent edge — cast to float32 first</button>
+  <button class="opt">sqrt doesn't work on arrays</button>
+  <button class="opt">The ring has no edges because it's one color</button>
+  <div class="expl">Unsigned subtraction wraps: anywhere the right neighbor is darker, dx explodes to ~250 instead of a small negative. The magnitude map then looks like noise. The float32 cast (or int16) before differencing is the Stage-2 dance — this quiz is the course's single most-committed image bug, pre-committed for you.</div>
+</div>
+<div class="quiz">
+  <div class="q">2. blur3 shrinks (256,384) to (254,382), and a teammate "fixes" it by padding the INPUT with zeros first so shapes match. What did the fix trade, and what's the honest menu?</div>
+  <button class="opt">Nothing — zero padding is free and correct</button>
+  <button class="opt" data-c="1">It invented black pixels: the border now blurs toward darkness (visible dark halo). The menu — shrink (honest, smaller), zero-pad (halo), edge-replicate pad (smeared border), reflect pad (usually best-looking) — is a POLICY choice to document and test, not a shape bug to hide</button>
+  <button class="opt">Padding breaks the reshape trick</button>
+  <button class="opt">It doubles memory permanently</button>
+  <div class="expl">Every convolution library (scipy, PyTorch conv2d) exposes exactly this choice as mode=/padding= — because there is no free option, only documented trade-offs. Your test should pin BOTH the shape contract AND the border behavior on a known fixture. "Make the shapes match" without choosing a policy is how dark halos ship.</div>
+</div>
+
+<h2>Exercises</h2>
+<details><summary>Exercise 1 — Write the test suite that makes this a project, not a demo: fixtures + contracts for gray/brightness/blur, including the hand-computed 4×4 pooling case from 2.5 P7 and the uint8-wrap regression test.</summary><div class="body">
+<pre><code># tests/test_ops.py
+import numpy as np, pytest
+from pixelforge.ops import to_gray, brightness, blur3, downscale2, make_test_image
+
+@pytest.fixture
+def img():  return make_test_image(64, 96)              # small = fast tests (2.6)
+
+def test_gray_shape_dtype(img):
+    g = to_gray(img)
+    assert g.shape == (64, 96) and g.dtype == np.uint8   # contract row (playbook §5)
+
+def test_gray_known_pixel():
+    px = np.array([[[200, 120, 50]]], dtype=np.uint8)    # the m2l8-gray diagram's pixel
+    assert to_gray(px)[0, 0] == 136                      # 59.8+70.44+5.7 = 135.94 → 136
+
+def test_brightness_saturates_not_wraps():               # THE regression test
+    hot = np.full((2, 2, 3), 200, np.uint8)
+    assert (brightness(hot, 100) == 255).all()           # 300 → 255, never 44
+
+def test_brightness_inverse_within_clip():
+    im = make_test_image(32, 32)
+    mid = im[(im > 60) &amp; (im &lt; 190)]                     # values clipping can't touch
+    back = brightness(brightness(im, 40), -40)
+    assert (back[(im > 60) &amp; (im &lt; 190)] == mid).all()   # property test (2.6 §3): -Δ undoes +Δ
+
+def test_blur_constant_is_fixed_point():
+    flat = np.full((10, 10), 77, np.uint8)
+    assert (blur3(flat) == 77).all()                     # mean of constants = constant (M1 L7)
+
+def test_blur_shape_contract(img):
+    assert blur3(to_gray(img)).shape == (62, 94)         # shrink-by-1 policy, pinned
+
+def test_pool_hand_case():
+    a = np.arange(24, dtype=np.uint8).reshape(4, 6, 1).repeat(3, axis=2)
+    out = downscale2(a)
+    assert out[0, 0, 0] == 4                             # mean(0,1,6,7)=3.5 → +0.5 → 4 (round)
+    assert out.shape == (2, 3, 3)
+
+def test_input_untouched(img):
+    before = img.copy(); to_gray(img); blur3(to_gray(img))
+    assert np.array_equal(img, before)                   # purity patrol (2.6 worked example)</code></pre>
+<p>Nine tests, every one traceable to a lesson scar: fixed pixels (M1's arithmetic), wrap regression (M1 L1), a property (inverse-within-clip — note how the CLIP forces the mask, an honest subtlety), fixed points (M1 L7), shape contracts, purity. This suite is the acceptance gate for the GPU versions of these same ops in Module 5 — write it once, reuse for years.</p>
+</div></details>
+<details><summary>Exercise 2 — Histogram + auto-contrast: implement hist256(gray) with np.bincount, then autocontrast(gray, clip_pct=1.0) that stretches the 1st..99th percentile to 0..255 (M1 L7's percentiles, applied). Explain why percentile-based beats min/max-based on real photos.</summary><div class="body">
+<pre><code>def hist256(gray):
+    """256-bin histogram — M1 L7's picture, computed."""
+    return np.bincount(gray.ravel(), minlength=256)      # counts per value, one pass
+
+def autocontrast(gray, clip_pct=1.0):
+    lo, hi = np.percentile(gray, [clip_pct, 100 - clip_pct])
+    if hi &lt;= lo:                                          # constant image — refuse the 0-divide
+        return gray.copy()                                # (M1 L8: 0/0 factories) — policy: no-op
+    x = (gray.astype(np.float32) - lo) * (255.0 / (hi - lo))
+    return np.clip(x + 0.5, 0, 255).astype(np.uint8)</code></pre>
+<p>Why percentiles: one hot pixel (a sensor sparkle at 255) makes min/max stretching a no-op — the range is already "full" because of ONE outlier. Percentiles ignore the extreme 1% tails (M1 L7's median-vs-mean robustness argument, applied to contrast), so the stretch works on the real mass of the histogram. Verify on the test card + one synthetic sparkle: min/max version does nothing, percentile version pops. Also note the constant-image guard — the zero-variance policy decision from 2.6 P2, recurring exactly as promised.</p>
+</div></details>
+
+<hr>
+<h1>Go deeper — polish, performance, and the bridge to Module 3</h1>
+
+<h2>1. Timing the pipeline honestly (M1 L7, mechanized)</h2>
+<pre><code>def bench_op(fn, img, warmup=2, repeats=15):
+    for _ in range(warmup): fn(img)
+    ts = []
+    for _ in range(repeats):
+        t0 = time.perf_counter(); fn(img); ts.append(time.perf_counter() - t0)
+    ts.sort()
+    return ts[len(ts)//2] * 1000, (ts[3*len(ts)//4] - ts[len(ts)//4]) * 1000  # median, IQR ms</code></pre>
+<p>Add <code>--bench</code> to the pipeline: per-op median±IQR at 3 image sizes (256², 1024², 4096²). Then the M1 L3 read: does time scale ~4× per size doubling (linear in pixels — memory-bound elementwise ops should)? blur3's 9 shifted adds should cost ~9× a single add's traffic — does it? When measurement disagrees with your model, one of them is wrong and BOTH outcomes teach (that's 5.10's profiling loop, rehearsed on a laptop).</p>
+
+<h2>2. Sepia and per-pixel matrix multiply (M1 L6 cameo)</h2>
+<pre><code>SEPIA = np.array([[0.393, 0.769, 0.189],
+                  [0.349, 0.686, 0.168],
+                  [0.272, 0.534, 0.131]], dtype=np.float32)
+def sepia(img):
+    out = img.astype(np.float32) @ SEPIA.T        # (H,W,3) @ (3,3): a 3×3 transform PER PIXEL
+    return np.clip(out, 0, 255).astype(np.uint8)</code></pre>
+<p>Color spaces are linear algebra: every pixel's RGB vector times a 3×3 matrix (why <code>.T</code>? our pixels are ROW vectors — x·Mᵀ = (M·xᵀ)ᵀ, M1 L6 §5's transpose rule, in one character). RGB→YUV, white balance, saturation — all this one line with different matrices. GPUs have dedicated silicon adjacent to this operation (Track C5's texture units).</p>
+
+<h2>3. Views, copies, and the pipeline's memory story</h2>
+<p>Audit each stage with 2.5's table: the shifted-view blur allocates ONE accumulator (the 9 views are free); every <code>astype</code> is a full copy (necessary — dtype changes bytes); every clip+astype pair is two more passes. Counting: gray = 2 passes, blur ≈ 11 view-adds + 2, edges ≈ 6... the whole default pipeline ≈ 25 image-sized memory passes. THIS is the number Module 5 attacks: the fused GPU version does ~2 (read once, write once). You can already state the theoretical speedup ceiling from bandwidth alone (M1 L3) — before ever writing CUDA. Write that number in your README; check it against reality in 5.11.</p>
+
+<h2>4. Gotchas</h2>
+<div class="gotcha"><strong>uint8 math without the dance.</strong> Wraps on add, subtract, sum, mean — every op. astype first, clip last, no exceptions (two of your tests exist to enforce it).</div>
+<div class="gotcha"><strong>img[x, y].</strong> It's img[row, col] = img[y, x]. Symptom: everything works on square test images, transposes on real ones — which is why make_test_image is deliberately non-square (256×384).</div>
+<div class="gotcha"><strong>Float images displayed dark/blown.</strong> Viewers expect uint8 0..255 or float 0..1 — a float array of 0..255 gets clipped to white by 0..1 viewers. Convert at the boundary; keep ONE convention (uint8) inside the pipeline.</div>
+<div class="gotcha"><strong>PNG vs JPEG for tests.</strong> JPEG is lossy — golden-file tests against a JPEG fail by ±3 per pixel forever. Fixtures and outputs under test: PNG or .npy only (2.7's exactness rule).</div>
+<div class="gotcha"><strong>Channel-order assumptions.</strong> PIL/NumPy are RGB; OpenCV is BGR. Mixing libraries silently swaps red and blue (faces turn avatar-colored). Assert channel semantics at load boundaries, convert once, document.</div>
+<div class="gotcha"><strong>In-place "optimization" of a stage.</strong> An op that mutates its input breaks the registry contract (previous stage's output might be aliased elsewhere — 2.5 P5's scar). Pure ops in, pure ops out; the driver owns lifetimes.</div>
+
+<h2>Scenario — shipping pixelforge</h2>
+<p>You put the repo in your group's channel with the README's three paragraphs and the stranger-test instructions. The feedback arrives as four issues, and — the point of this course — none survives contact with your training. <em>"Edges look inverted on my photo"</em>: their PNG loaded with an alpha channel, (H,W,4); your gray's <code>@ LUMA</code> silently broadcast wrong. Fix: assert-and-slice at the load boundary (<code>img[..., :3]</code> after an explicit shape check), plus a 4-channel regression fixture — boundary validation (2.6), not deep-pipeline patching. <em>"It's slow on my 6000×4000 photos"</em>: bench mode shows blur dominating; you note the 3×3 box blur is separable (two 1-D passes: 6 adds instead of 9 — and the seed of Track A5's separable-conv discussion), implement it, measure 1.4×, document. <em>"Different result than my phone's grayscale"</em>: theirs uses BT.709 weights (0.2126, 0.7152, 0.0722) vs your BT.601 — not a bug, a STANDARD choice; you expose <code>--luma 601|709</code> and put both vectors in the docstring with references. <em>"Crashes on a 1×1 image"</em>: blur3 on anything smaller than 3×3 produces an empty array and the clip chain throws downstream — the n=0/1 edge (2.2's discipline) you missed; ops now validate minimum sizes with named errors, tests pin it. Version 0.2 ships same week. That cycle — user, edge, policy, test, release — is the actual job, and you just ran it end to end on code where you understand every line down to the bits.</p>
+
+<h2>Practice — extensions (each one is a mini-project)</h2>
+<details><summary>1. Threshold + Otsu: binarize(gray, t) via boolean mask, then implement Otsu's automatic threshold (maximize between-class variance over the histogram — pure M1 L7 σ² arithmetic on hist256).</summary><div class="body">binarize: <code>(gray >= t).astype(np.uint8) * 255</code>. Otsu: for each t in 0..255, split hist256 into two classes; weights w0, w1 = class probabilities; between-class variance = w0·w1·(μ0−μ1)²; pick argmax t. Vectorize with cumulative sums (np.cumsum on counts and value·counts — no Python loop). Verify: on the test card it should land between the ramp mass and the ring's 255s. You've implemented a 1979 paper from its statistics; that's the M1 L7 dividend.</div></details>
+<details><summary>2. Gamma correction: out = 255·(in/255)^γ. Implement via a 256-entry LOOKUP TABLE applied with fancy indexing (lut[gray]) instead of pow per pixel — then explain why the LUT wins (M1 L3 §"pow" + 2.5 indexing).</summary><div class="body"><code>lut = np.clip(255*(np.arange(256)/255)**gamma + 0.5, 0, 255).astype(np.uint8); out = lut[gray]</code>. Why: pow is tens of cycles (M1 L3's gotcha); there are only 256 possible inputs, so precompute all answers once (256 pows) and turn 2M pows into 2M array lookups (fancy indexing gather — 2.5 §3). Amortization + gather = the LUT pattern, which is EVERYWHERE: tone curves, activation tables, quantization codebooks (Track A8's dequant tables are LUTs).</div></details>
+<details><summary>3. Reflect-padding for blur3 (quiz 2's best-looking option): np.pad(g, 1, mode="reflect"), blur WITHOUT shrinking, and the A/B fixture test that shows zero-pad's dark halo vs reflect's clean border.</summary><div class="body"><code>gp = np.pad(g, 1, mode="reflect"); then the 9-view sum over gp yields full (H,W)</code>. Test: an all-200 image — zero-pad blur gives corner pixels mean(4·200+5·0)/9 ≈ 89 (the halo, quantified!); reflect gives 200 everywhere (constant fixed-point restored). Now your edge-policy MENU from quiz 2 has measured numbers attached — which is how library docs should read, and how yours now do.</div></details>
+<details><summary>4. RGB↔HSV saturation boost: convert, scale S by 1.3 with clip, convert back (formulas on Wikipedia are all max/min/mod — every one an M1/2.5 primitive). What class of bug do the hue's mod-6 branches invite, and which M1 L4 tool is hue secretly using?</summary><div class="body">Hue is an ANGLE on the color wheel (0..360° in sextants) — M1 L4's angles, with the wrap-around problem included: the mod-6 branch boundaries invite off-by-one/wraparound bugs exactly like heading math (M1 L4 §4's atan2 discussion). Vectorize with np.select or masked writes rather than per-pixel ifs (2.5). Test: round-trip RGB→HSV→RGB must be identity within 1/255 (a budgeted tolerance — 2.6!) across a random uint8 fixture. Saturation itself: S scales the distance from gray — contrast's cousin, on the chroma axis.</div></details>
+<details><summary>5. Alpha compositing: over(fg, bg, alpha) = α·fg + (1−α)·bg with a per-pixel (H,W) alpha broadcast over channels — then explain why compositing in uint8 directly loses precision and where lerp (2.3's!) went.</summary><div class="body"><code>out = (alpha[...,None]*fg.astype(np.float32) + (1-alpha[...,None])*bg.astype(np.float32))</code> — this IS lerp(bg, fg, α) (2.3's function, vectorized: a + t(b−a) rearranged). uint8-direct: α quantized to 1/255 steps and each product truncates — banding in gradients (visible!); float intermediate + one final round is the dance again. Real compositors go further (premultiplied alpha, linear-light blending — Track C6's gamma-correct pipeline); your version is the honest core of it.</div></details>
+<details><summary>6. The separable blur from the scenario, generalized: box blur radius r via TWO 1-D passes (horizontal then vertical), each a cumulative-sum trick: sliding-window sum = cumsum[i+r] − cumsum[i−r−1]. Cost analysis vs the 9-view version at r=1 and r=7 (M1 L3 discipline).</summary><div class="body">2-D direct: (2r+1)² adds/pixel — r=7 → 225. Separable: 2·(2r+1) → 30 (7.5× fewer). Cumsum trick: 2 adds/pixel per pass regardless of r (plus one cumsum pass) → ~constant in r! Verify equivalence vs blur3 at r=1 with allclose (budget: fp32 cumsum over W=4096 accumulates ~ε·√n noise — set rtol accordingly, 2.6 §"budget"). The r-independence of the cumsum method is why box blurs of ANY radius run realtime — and cumsum itself (prefix sum / scan) is one of THE fundamental GPU algorithms (5.8's sibling; Thrust ships it as inclusive_scan).</div></details>
+<details><summary>7. Design: pixelforge v0.3 — plan (no code) the upgrade to a config-file-driven pipeline (2.7 §4's precedence), per-op parameters (blur radius, gamma, luma standard), golden-image regression tests, and a --compare mode that diffs two runs and reports max|Δ| per stage with an M1 L8-justified pass threshold. Deliverable: the README section describing it, written for the stranger.</summary><div class="body">Config: pipeline.json = ordered list of {op, params} objects (data, not code — 2.7 §4), CLI --ops still wins over file (precedence stack), effective config echoed into report.json (provenance). Ops registry grows a params contract: OPS[name] = (fn, schema) with validation at load (unknown param = loud error — 2.2 §6's ethic). Golden tests: tests/golden/&lt;op&gt;/&lt;fixture&gt;.npy exact for integer-deterministic ops (gray, threshold); allclose with documented budgets for float-order-sensitive ones (separable vs direct blur: rtol from cumsum analysis — M1 L8 §3). --compare: load two report dirs, per-stage max|Δ| and count of differing pixels; threshold ≤1/255 for "identical within quantization," anything above lists the top-5 differing coordinates (debuggability). README section: three paragraphs — what configs look like (one full example), how to add an op (function + registry line + test + golden), and what --compare guarantees ("bit-identical for integer ops; ≤1 ulp-of-uint8 for float ops, budget in tests/BUDGETS.md"). Write it so the stranger can extend the tool without reading the source — that sentence is the definition of an engineered project, and the standard your Module 5 kernel suite will be held to.</div></details>
+
+<div class="note"><strong>Module 2 complete.</strong> You came in never having written a program; you leave with a tested, deployable image-processing tool, a benchmarking discipline, and — hiding in plain sight — the complete conceptual toolkit for GPU work: contiguous data, vectorized thinking, views/strides, purity, dtype budgets, and the fuse-the-passes instinct. <strong>Module 3 (C & C++)</strong> takes away the safety rails so you can meet the machine; generate it with the <a href="../prompt.html">prompt</a> when you're ready.</div>
+
+<div class="pager">
+  <a href="lesson-07.html">← Files, modules & environments</a>
+  <a href="../curriculum.html">Module 2 complete → Curriculum</a>
+</div>
+<div class="footer">GPU Mastery · Module 2 · Lesson 8 — works offline · progress saved in your browser</div>
+</div>
+<script src="../assets/diagrams2.js"></script>
+<script src="../assets/app.js"></script>
+</body>
+</html>

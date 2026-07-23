@@ -1,0 +1,205 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>B8 Precision & Reproducibility — GPU Mastery</title>
+<link rel="stylesheet" href="../assets/style.css">
+</head>
+<body data-lesson="bl8">
+<nav><div class="inner">
+  <a class="logo" href="../index.html">GPU<span>Mastery</span></a>
+  <a class="item" href="../index.html">Home</a>
+  <a class="item on" href="../curriculum.html">Curriculum</a>
+  <a class="item" href="../labs.html">Labs</a>
+  <a class="item" href="../setup.html">Lab setup</a>
+  <a class="item" href="../prompt.html">Generator prompt</a>
+</div></nav>
+<div class="wrap">
+
+<div class="lesson-top">
+  <div><span class="badge">Track B · Lesson 8</span><span class="badge dim">≈ 3 h</span></div>
+  <button id="donebtn" class="donebtn">Mark lesson complete</button>
+</div>
+<h1>Precision & Reproducibility — the numerics contract science signs</h1>
+<p class="lead">In ML, a wrong last bit is noise; in science, "we couldn't reproduce it" is a retraction. This lesson turns M1 L8's float literacy into professional machinery: a summation ladder measured across four rungs, a compiler flag shown DELETING an algorithm (Kahan's error reverting to exactly naive's under -ffast-math — executed), the cross-rank determinism story, and the reproducibility ladder your methods section must name a rung on.</p>
+
+<h2>Concept</h2>
+
+<h3>The summation ladder — all four rungs measured</h3>
+<div class="diagram" data-diagram="b8-ulp" data-caption="Sequential naive grows O(n·eps); pairwise trees O(log n·eps); Kahan O(eps); fp64 brute-forces the ladder. All measured on 1e7 fp32 uniforms."></div>
+<pre><code>summing 1e7 fp32 uniforms (vs an fp64 reference — executed):
+  naive sequential    rel err 5.2e-5     O(n·eps): the running sum grows,
+                                          late terms lose bits (A6's absorption)
+  pairwise tree       rel err 9.1e-8     O(log n·eps): error grows with tree
+                                          DEPTH — numpy's default, and your
+                                          5.8 GPU reduction BY CONSTRUCTION:
+                                          parallelism accidentally bought
+                                          ~3 digits (5.11 P3's bound, measured)
+  Kahan compensated   rel err 9.1e-9     O(eps): 4 flops/element buy ~4 digits
+  fp64 accumulator    eps 2.2e-16        the cheap sledgehammer (A6's spine)
+the decision table: fp64 acc when hardware gives it freely (CPUs, fp64 GPU
+paths); pairwise when parallelism provides it anyway; Kahan when the
+accumulator MUST stay narrow (fp32-only hardware, B4's tallies); naive never
+— it's the measured 1000× worse rung with zero compensating virtue.</code></pre>
+
+<h3>The compiler can delete your algorithm — executed</h3>
+<div class="diagram" data-diagram="b8-kahan" data-caption="Kahan's c = (t−s)−y is algebraically zero and numerically everything. -ffast-math licenses the algebra; the compensation vanishes; the error returns to exactly naive's."></div>
+<pre><code>float y = x[i] - c, t = s + y;
+c = (t - s) - y;               // algebraically 0; in floats: the EXACT lost bits
+s = t;
+EXECUTED, same code, two flags:
+  gcc -O2             → kahan rel err 9.1e-9   ✓
+  gcc -O2 -ffast-math → kahan rel err 5.2e-5   — EXACTLY naive's error:
+  the compiler, licensed to pretend floats associate, simplified the
+  compensation to zero and deleted it. Pairwise SURVIVED (it's an order,
+  not an identity) — the flag's blast radius is precise and merciless.
+the law: numerics flags are part of the ALGORITHM. -ffast-math /-Ofast /
+  NVHPC's -fast bundles belong in the build contract (B7 P5's recorded
+  flags), reviewed like code — because they are.</code></pre>
+
+<h3>Parallel statistics without tears: merge formulas</h3>
+<pre><code>variance across ranks: NEVER ship Σx and Σx² (A5's measured catastrophe —
+  E[x²]−E[x]² returned literal 0.0 at mean 1e3 in fp32). Ship per-rank
+  (n, mean, M2) and MERGE (Chan's formula):
+    δ = m₂−m₁;  m = m₁ + δ·n₂/n;  M = M₁ + M₂ + δ²·n₁n₂/n
+  EXECUTED: merged variance == direct two-pass to the last digit.
+this is the general pattern (B4 P2's mergeable-summary law): design the
+  per-rank state so the MERGE is numerically benign — the distributed
+  cousin of choosing pairwise over naive.</code></pre>
+
+<h3>The reproducibility ladder — pick a rung in writing</h3>
+<div class="diagram" data-diagram="b8-repro" data-caption="Bitwise-same-config for replay/debug; bitwise-across-ranks if you pay for fixed trees; statistical-within-budget for most science; 'it looked similar' for retractions."></div>
+<pre><code>rung 1  bitwise, same config: fixed seeds (B4's three integers), fixed rank
+        count, recorded flags/env (B7 P5) — your DEBUG and CI rung: diffs
+        mean bugs, full stop (the B5 ladder lives here)
+rung 2  bitwise across rank counts: requires fixed-order reductions
+        (5.8's slot-array trees, reduction order independent of N) — real
+        cost, bought only when replay-across-scales is a requirement
+rung 3  statistical, budgeted: different N ranks → different reduction
+        orders → different bits (A7 §2's law) — LEGITIMATE, with the budget
+        derived (κ · n · eps arithmetic) and WRITTEN in the methods section
+rung 4  "it looked similar" — not a rung; the ladder's floor is where
+        retractions live
+the methods section is a CONTRACT: environment (B7's records), flags,
+seeds, rung, budgets — one paragraph that makes your result an experiment
+instead of an anecdote.</code></pre>
+
+<h2>Worked example</h2>
+<div class="card">
+<p><strong>Task:</strong> Write the numerics contract for B10's heat study — the actual paragraph, each clause traceable to a measured fact. (This paragraph ships verbatim in the capstone's report; reviewers of real papers increasingly demand its equal.)</p>
+<pre><code>"All floating-point computation is IEEE-754 fp64 with FMA permitted and
+reassociation disabled (-O2, no fast-math — flag list in env_JOBID.txt;
+we verified reassociation flags alter compensated sums by 4 orders [B8]).
+Conservation ledgers use fp64 pairwise accumulation (error O(log n·eps);
+measured ledger drift 2.2e-16/step at 128², §B3). Single-configuration
+runs are bitwise reproducible (fixed seeds, recorded environment — rung 1);
+across rank counts, reduction order varies and results are reproducible
+statistically (rung 3) within budget |Δu|/|u| ≤ 1e-12 per step, derived
+from κ(A)·eps and verified by 8-vs-64-rank twin runs (max observed 3e-13).
+RNG streams are counter-based Philox (seed, subsequence, offset recorded
+per checkpoint), making stochastic components exactly resumable [B4/B7]."
+— six sentences. Every number measured, every choice named, every knob
+recorded. A reviewer can now FALSIFY the claim — which is what makes it one.</code></pre>
+<p><strong>What to internalize:</strong> the contract is short because the WORK is elsewhere — in the measured ladder (which rung of summation), the flag discipline (recorded, reviewed), the twin-run verification (budget checked, not asserted). Teams without the contract have the same wobbles UNDOCUMENTED — and discover them during review, mid-controversy, or in someone else's failed replication. The paragraph costs an afternoon; its absence has cost careers.</p>
+</div>
+
+<h2>Key points</h2>
+<ul class="keypoints">
+<li>The summation ladder is measured, not folklore: naive 5.2e-5, pairwise 9.1e-8, Kahan 9.1e-9, fp64 2e-16 (1e7 fp32 values) — and your 5.8 GPU tree is pairwise by construction: parallelism bought three digits.</li>
+<li>-ffast-math deleted Kahan (executed: error reverted to exactly naive's) — reassociation licenses destroy compensation identities; numerics flags are part of the algorithm and the build contract.</li>
+<li>Parallel statistics use merge-safe state: (n, mean, M2) with Chan's formula (verified exact), never shipped Σx²−(Σx)² — design per-rank summaries so the merge is benign.</li>
+<li>Condition number sets the honest budget: solution error ≈ κ·input error (B2 §2) — budgets are DERIVED (κ·n·eps arithmetic) and verified by twin runs, not chosen for comfort.</li>
+<li>The reproducibility ladder: rung 1 (bitwise, same config) for CI/debug, rung 2 (bitwise across ranks) only if you pay for fixed trees, rung 3 (statistical, budgeted, documented) for most science — name your rung in the methods section.</li>
+<li>The numerics contract paragraph — environment, flags, seeds, rung, budgets, verification — converts "trust us" into a falsifiable claim; it's the cheapest insurance in publishing.</li>
+</ul>
+
+<h2>Quiz</h2>
+<div class="quiz">
+  <div class="q">1. A reviewer reruns your published simulation with your container and gets results differing at 1e-13 — and requests rejection for "irreproducibility." Your runs used 64 ranks; theirs used 96. Write the response that saves the paper, and the one thing you wish past-you had done to make this a non-event.</div>
+  <button class="opt">Concede and rerun everything at their rank count</button>
+  <button class="opt" data-c="1">The response: different rank counts partition the global reductions differently → different summation ORDERS → last-bits differences amplified through κ steps — a documented property of finite-precision parallel arithmetic (A7 §2, 5.8), not an implementation defect; both results are equally valid evaluations. Then the quantitative core: our stated budget from κ·n·eps is 1e-12/step; the observed 1e-13 sits INSIDE the contract — and here is the twin-run table (8/64/96 ranks) demonstrating the spread is stable and budget-bounded, plus the rung-1 offer: at 64 ranks with the recorded seeds/env, our results reproduce BITWISE (please verify — that's the falsifiable claim). The wish: that the ORIGINAL methods section had contained the worked example's paragraph — rung named, budget derived, twin-runs cited — so the reviewer's 1e-13 would have read as CONFIRMATION of the contract instead of a red flag. Papers with the paragraph turn this exchange into one sentence; papers without it turn it into a revision cycle or worse</button>
+  <button class="opt">1e-13 is obviously negligible — say so and move on</button>
+  <button class="opt">Blame the reviewer's cluster</button>
+  <div class="expl">"Obviously negligible" (option 3) loses because it's an assertion where the field demands a DERIVATION — the whole point of budgets is replacing taste with κ-arithmetic; reviewers accept contracts and reject vibes. The rung-1 bitwise offer is the power move: it demonstrates you know EXACTLY which reproducibility you promised and can deliver it on demand. This exchange — nearly verbatim — happens across computational science weekly; the prepared version takes a paragraph, the unprepared version has taken careers.</div>
+</div>
+<div class="quiz">
+  <div class="q">2. Migrating a fp64 ocean model to GPUs, a performance engineer proposes: fp32 fields ("bandwidth-bound — B3 says 2×!"), keep fp64 "only where it matters," and -Ofast "since we're optimizing anyway." Design the evaluation that answers this properly: the three experiments, their oracles, and the two components you already KNOW will need the fp64 spine before running anything.</div>
+  <button class="opt">Reject entirely — science is fp64, end of story</button>
+  <button class="opt" data-c="1">Known-before-running (from measured facts): (1) the LEDGERS/reductions — fp32 accumulation lost 96% of a 65k-sum's mass (A6) and naive-fp32 hit 5.2e-5 at 1e7 elements: conservation tracking dies in fp32 → fp64 (or Kahan-fp32) accumulators regardless of field precision; (2) anything downstream of large κ — the pressure/implicit solve (B2 §2: κ~1e6+ makes fp32 solutions noise) → fp64 solve or mixed-precision refinement. And -Ofast is struck IMMEDIATELY (it bundles fast-math: the executed Kahan deletion + reassociated ledgers — a numerics-flag veto, not a negotiation). The three experiments: (a) twin runs fp32-fields vs fp64 at three resolutions, oracled by B3's physics fixtures (conservation drift, spread-law, spectra) with budgets from the science team — does fp32 stay inside them and for how many simulated years?; (b) the V-floor check (B1): fine-grid Laplacians difference near-equal neighbors — measure where fp32's 7 digits start eating the stencil (resolution-dependent verdict, not global); (c) the long-horizon drift race — the error that decides climate-class runs is the TREND, only visible in extended twins. Verdict shape: likely fp32 fields + fp64 spine passes for engineering horizons and fails for climate horizons — precision is bought per-COMPONENT per-HORIZON, by experiment (A6's per-tensor-role logic, science edition)</button>
+  <button class="opt">Approve as proposed — 2× is 2×</button>
+  <button class="opt">fp16 everything with loss scaling, like ML does</button>
+  <div class="expl">The skeleton — two vetoes from measured facts, three experiments with physics oracles, per-component verdicts — is the professional template for every precision-migration debate (and they're constant now that fp64 GPU throughput carries a price premium). Option 1's absolutism forfeits real 2× wins that (a)-style experiments routinely validate for bounded horizons; option 3 skips the experiments that make the win TRUSTWORTHY. The -Ofast veto deserves its immediacy: it's the one proposal element with an executed counterexample in hand.</div>
+</div>
+
+<h2>Exercises</h2>
+<details><summary>Exercise 1 — Reproduce the entire measured spine of this lesson: (a) the four-rung summation ladder on 1e7 fp32 uniforms (C or NumPy+loop; expect 5.2e-5 / 9.1e-8 / 9.1e-9 / ~2e-16-class); (b) the -ffast-math Kahan deletion (compile twice, diff the errors — screenshot the reversion); (c) Chan's merge vs direct variance (exact); (d) the A5 one-pass catastrophe at mean 1e3 (literal 0.0). File all four in your evidence repo — they're the citations your future numerics contracts will point at.</summary><div class="body">
+<pre><code>notes: (a) numpy's sum() is ALREADY pairwise — for the naive rung write the
+sequential loop explicitly (or use math.fsum as an exactness reference);
+(b) also try -O3 alone (Kahan survives — it's -ffast-math's reassociation
+license specifically, not optimization level) and clang (same story):
+the flag, not the vendor; (d) then fix with Welford and watch 1.007e-4
+appear. The evidence-repo habit: every contract clause you'll ever write
+gets a runnable citation — reviewers and future-you both audit.</code></pre>
+</div></details>
+<details><summary>Exercise 2 — The twin-run budget verification (the worked example's evidence, self-made): run B3's stepper at 8 vs 64 simulated "ranks" (your Ex.2-of-B3 split-domain harness with different partition counts — different summation orders in the ledger by construction), measure the per-step and per-1000-step divergence, derive the budget from κ·n·eps arithmetic, and write the two-sentence contract clause with YOUR numbers. Then break it on purpose: switch the ledger to naive fp32 accumulation and watch the twin divergence blow the budget by orders.</summary><div class="body">
+<pre><code>expected: fp64 pairwise ledgers → twin divergence ~1e-14..1e-12-class
+(bounded, stable across steps — rung 3 material); the fp32-naive sabotage →
+divergence walks upward with n·eps growth, crossing any honest budget
+within thousands of steps: the difference between "documented wobble" and
+"undocumented drift" made visible in one plot. The contract clause you
+write here — with your measured spread and derived budget — is the B10
+report's §numerics, pre-drafted.</code></pre>
+</div></details>
+
+<hr>
+<h1>Go deeper — the reproducibility craft sheet</h1>
+
+<h2>1. Where bits legitimately differ (the audit checklist)</h2>
+<pre><code>reduction order: rank count, gridDim (5.8/A7) — the big one
+FMA contraction: fused vs separate mul+add round differently (5.11's
+  CPU-vs-GPU split) — pin -fmad/-ffp-contract per platform in the contract
+library algorithm selection: cuBLAS/cuFFT may pick different kernels per
+  arch/size (b9-fft's plans!) — same math, different order: record versions
+atomics: scheduler-ordered (5.8) — banish from ledgers; slot-arrays instead
+parallel RNG: NOT a source if counter-based (B4's theorem) — one wobble
+  source SOLVED at the root; cite it to show the pattern of what solving
+  looks like: make order irrelevant by construction, where possible.</code></pre>
+
+<h2>2. Mixed-precision refinement (having both, honestly)</h2>
+<pre><code>factor in fp32 (fast), then iterate in fp64:  r = b − A·x (fp64 residual);
+  solve A·δ = r with the fp32 factor; x += δ — each pass recovers digits
+  until fp64-limited: cuSOLVER ships it (B2 P3's middle path)
+the pattern generalizes: cheap-precision INNER loop + accurate-precision
+  OUTER correction = most of the speed, all of the trust — the B-track's
+  answer to A6's mixed-precision recipe, with κ deciding iteration counts.</code></pre>
+
+<h2>3. Gotchas</h2>
+<div class="gotcha"><strong>-Ofast in a "performance" PR.</strong> The executed Kahan deletion travels bundled inside innocent-looking flags (-Ofast, some -fast presets). Numerics flags get their own review line, per the contract.</div>
+<div class="gotcha"><strong>Budgets chosen for comfort.</strong> A tolerance is DERIVED (κ, n, eps, horizon) or it's decoration — quiz 1's defense works because the 1e-12 had a derivation attached.</div>
+<div class="gotcha"><strong>Testing reproducibility only at one scale.</strong> Rung-3 claims need twin runs across rank counts (Ex.2) — the wobble you didn't measure is the one the reviewer finds.</div>
+<div class="gotcha"><strong>Σ and Σ² shipped across ranks.</strong> The A5 catastrophe, distributed. Merge-safe state (Chan) or fp64-with-care — and the fixture at mean 1e3 catches regressions forever.</div>
+<div class="gotcha"><strong>fsum/exact references confused with targets.</strong> math.fsum-class exact summation is your ORACLE for measuring rung errors, not a production method (cost) — oracles and implementations live in different files (M2 L6).</div>
+<div class="gotcha"><strong>"Deterministic mode" flags trusted blind.</strong> Framework/library determinism switches cover THEIR kernels, not your atomics or your MPI orders — the audit checklist (§1) is yours to run; flags are one line of it.</div>
+
+<h2>Scenario — the replication request that took twenty minutes</h2>
+<p>Eighteen months after publication, a rival group emails: they've reimplemented the method and get "systematically different" results — and they've cc'd the editor. For most groups this begins a season of dread. This group's corresponding author opens the paper's artifact repo and runs the drill the B-track installed: the container hash and env files pin the toolchain (B7 P5); the numerics contract names rung 3 with a derived 1e-12 budget and cites twin-run evidence; the fixture suite (B3's physics oracles) runs green in the rival's own hands an hour later, confirming their reimplementation diverges from PHYSICS fixtures, not just from the paper — the discrepancy is theirs (a boundary-stencil order bug, found via the fixtures' localization within a day, cordially). Twenty minutes of author time, one day of collegial debugging, a strengthened citation instead of a controversy. The counterfactual — no recorded flags, no rung, no fixtures, "results available upon reasonable request" — plays out monthly in the literature with retractions, feuds, and years of shadow. The B-track's closing claim, now earned: <em>reproducibility is not bureaucracy; it is the difference between owning your result and renting it from luck</em> — and its entire price was habits this track made automatic: record, derive, fixture, name the rung.</p>
+
+<h2>Practice</h2>
+<details><summary>1. Assign each artifact its ladder rung and the machinery that rung requires: (a) CI regression tests; (b) a debugging session on a cluster crash; (c) the paper's headline result; (d) a regulatory audit replay; (e) comparing your GPU port against the legacy CPU code.</summary><div class="body">(a) Rung 1 — fixed seeds/env/rank-count; bitwise diffs = bugs (the B5 ladder's currency). (b) Rung 1, forensically — B7 P5's archaeology reconstructs the exact config first; debugging at rung 3 is chasing ghosts. (c) Rung 3 with derived budgets + twin evidence (the contract paragraph). (d) Rung 2-or-1 depending on the regulator's wording — fixed reduction trees priced in (5.8's deterministic architecture; A8 P4's registry logic) — and the COST estimate belongs in the compliance plan, not discovered later. (e) Rung 3 with a WIDER budget: different FMA contraction, different libm, different orders (5.11's CPU/GPU split) — bitwise CPU-vs-GPU expectations are a beginner's trap; budget-based with physics fixtures is the honest comparison. Rung assignment is requirement analysis — each rung has a price list, and most disputes are two parties assuming different rungs.</div></details>
+<details><summary>2. Derive the budget for quiz 1's defense: heat equation, κ(A) ≈ 1e4 for the implicit step, fp64 (eps 2.2e-16), pairwise ledgers over n=1e6 cells, 1e4 steps. Show the per-step and end-of-run bounds, and where the safety factor goes.</summary><div class="body">Per-step reduction wobble: O(log n · eps) ≈ 20·2.2e-16 ≈ 4e-15 relative on ledgers; through the solve, input perturbations amplify ≤ κ·eps ≈ 1e4·2.2e-16 ≈ 2e-12 per step on the field — the dominant term (B2 §2 doing the work). Across-rank order differences inject ~pairwise-depth deltas per step at the same 1e-15-class scale, amplified identically → per-step twin divergence bound ~2e-12; over 1e4 steps, random-walk-ish growth (not linear — signs vary): ~√1e4 × 2e-12 ≈ 2e-10 end-of-run, with linear 2e-8 as the paranoid ceiling. Published budget: 1e-12/step with the twin-run table showing observed 3e-13 (safety factor ~3–6× inside the derivation, stated as such). Every number traces to κ, n, eps, steps — which is precisely why the reviewer exchange ends in one paragraph.</div></details>
+<details><summary>3. Your GPU ledger uses 5.8's tree reduction (pairwise) but a colleague's "optimization" replaces the final per-block combine with atomicAdd. Predict the reproducibility regression precisely (which rung dies, what the twin runs will show), the performance reality (was it even faster?), and the slot-array fix's cost.</summary><div class="body">Rung 1 DIES within a single config: atomics order varies run-to-run on identical hardware (5.8 quiz 2) → CI bitwise diffs start flaking — the worst kind of regression, intermittent green/red that erodes trust in the whole suite. Twin runs: same-config reruns now scatter ~last-bit × κ-amplification (the Ex.2 sabotage's little sibling), while cross-rank runs look no worse than before (rung 3 already priced order variation). Performance reality: at one atomic per BLOCK (hundreds of atomics total), contention is nil — the "optimization" bought ~microseconds (5.8's worked example showed the per-block atomic was already cheap); it sold rung-1 reproducibility for pocket change. Fix: partials to a slot array (blockIdx-indexed) + one deterministic combine kernel — 5.8's deterministic architecture, costing those same microseconds back. The review comment writes itself, with citations — and it's the numerics-flag lesson in kernel form: tiny "wins" that trade away contract properties need the contract's sign-off.</div></details>
+<details><summary>4. Design the "numerics CI" tier for a simulation repo (the B-track sibling of A3/A6/A8's CIs): the four per-commit checks and the one weekly job, each with its measured-fact citation and the incident it pre-empts.</summary><div class="body">Per-commit: (1) flag audit — build logs grepped for fast-math family; failure = hard stop (the executed Kahan deletion; pre-empts the silent-PR poisoning); (2) ladder spot-check — the 1e7-element four-rung test asserting each rung's error class (catches accidental naive-summation regressions and compiler/lib changes moving rungs — B6 P3's weather); (3) mean-1e3 variance fixture (the A5 catastrophe, permanently guarded); (4) rung-1 bitwise replay of a 100-step reference run, fixed seeds/env (catches EVERY nondeterminism introduction: P3's atomic, an RNG misuse, a new library's algorithm roulette). Weekly: the twin-run budget verification (Ex.2) across 2–3 rank counts at real scale, asserting observed divergence inside the derived budget — the contract's evidence, kept perpetually fresh (pre-empts quiz 1 arriving with a STALE twin table). Numerics regressions are silent by nature; this tier is their alarm system, and every line cites something this lesson executed.</div></details>
+<details><summary>5. The mixed-precision refinement pattern (§2): for a κ=1e6 system, fp32 factor + fp64 residual iterations — estimate digits recovered per iteration and iterations to fp64-limited accuracy; then name the failure mode when κ approaches 1/eps_fp32 and what the algorithm does there.</summary><div class="body">Each refinement pass multiplies the error by ~κ·eps_fp32 ≈ 1e6·6e-8 ≈ 0.06 → gains ~1.2 digits... careful: convergence factor κ·eps₃₂ = 0.06 means error ×0.06 per pass ≈ 1.2 digits/pass → from fp32's ~1-digit start (κ ate 6 of 7) to fp64's ~10 digits: ~7–8 passes, each a cheap triangular solve + one fp64 SpMV — total ≈ 1.3× the fp32 factor cost for fp64-grade answers: the whole pattern's economics. Failure: κ → 1/eps₃₂ ≈ 1.7e7 → convergence factor → 1: refinement stalls (each pass recovers nothing) — the algorithm detects non-decreasing residuals and falls back to full fp64 factorization (cuSOLVER's IR does exactly this). κ isn't just an error bound — it's the REGIME SWITCH for the entire mixed-precision strategy: measure it first (B2's habit), and the strategy picks itself.</div></details>
+<details><summary>6. Write the one-paragraph numerics contract for YOUR B4 Monte Carlo engine (not the PDE study): rung, seeds policy, tally precision, error-bar calibration evidence, and the wobble sources named — every clause citing its executed fact.</summary><div class="body">Skeleton to fill with your Ex numbers: "Stochastic components use counter-based Philox streams (seed, subsequence, offset recorded per worker per checkpoint) — runs are bitwise resumable and stream-independent by construction (cross-stream |corr| measured &lt; 0.05; same-seed control = 1.0) [B4]. Tallies accumulate in fp64 (fp32 sequential accumulation measured losing 96% of mass at 65k terms [A6]); per-worker (n, mean, M2) merge via Chan's formula (verified exact) [B8 §3]. Point estimates carry 1.96·s/√N intervals whose calibration is verified: truth-in-bar frequency 94/100 across seed sweeps [B4 Ex.1c]. Fixed-seed configurations reproduce bitwise (rung 1); across worker counts, tally merge order varies results within &lt; 1 ulp·log(workers) (rung 3, budget trivial at fp64) [5.8/A7]." Four sentences, six executed citations — and notice the MC contract is EASIER than the PDE one (no κ amplification): contracts are per-workload, which is why templates don't replace understanding.</div></details>
+<details><summary>7. Interview closer: "How do you make large-scale simulation results trustworthy?" — 90 seconds: the measured summation ladder with the parallelism-buys-digits surprise, the flag law with its executed deletion, budgets derived from κ·n·eps, the reproducibility ladder with rung economics, twin-run evidence, and the contract paragraph as the deliverable.</summary><div class="body">Skeleton: "Trust is engineered at four layers. Arithmetic: accumulation strategy is measured, not assumed — naive fp32 summation hits 5e-5 error at 1e7 terms while pairwise hits 9e-8, and GPU tree reductions are pairwise by construction: parallelism accidentally buys three digits [ladder]. Toolchain: numerics flags are part of the algorithm — I've watched -ffast-math delete Kahan compensation exactly, error reverting to naive's to the digit — so flags live in the build contract and CI greps for them [executed]. Budgets: tolerances are derived — κ·n·eps·horizon arithmetic — then VERIFIED by twin runs across rank counts; my heat-study budget was 1e-12/step derived, 3e-13 observed [P2, Ex.2]. Reproducibility is a ladder with prices: bitwise-same-config for CI and debugging (fixed seeds, recorded env), bitwise-across-scales only if you pay for fixed reduction trees, statistical-within-budget for most science — and the methods section NAMES the rung, so a reviewer's 1e-13 difference reads as contract-confirmation, not scandal [quiz 1]. The deliverable is one paragraph: environment, flags, seeds, rung, budgets, evidence — it converts 'trust us' into a falsifiable claim, and I've seen it turn an eighteen-month-later replication challenge into a twenty-minute email [scenario]. Cost: an afternoon. The uninsured alternative bills in careers."</div></details>
+
+<div class="pager">
+  <a href="lesson-07.html">← Clusters</a>
+  <a href="lesson-09.html">Next: Thrust, CUB & cuFFT →</a>
+</div>
+<div class="footer">GPU Mastery · Track B · Lesson 8 — works offline · progress saved in your browser</div>
+</div>
+<script src="../assets/diagramsB.js"></script>
+<script src="../assets/app.js"></script>
+</body>
+</html>

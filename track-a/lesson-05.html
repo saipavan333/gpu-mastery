@@ -1,0 +1,213 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>A5 ML Kernel Patterns — Fusion, Softmax, FlashAttention — GPU Mastery</title>
+<link rel="stylesheet" href="../assets/style.css">
+</head>
+<body data-lesson="al5">
+<nav><div class="inner">
+  <a class="logo" href="../index.html">GPU<span>Mastery</span></a>
+  <a class="item" href="../index.html">Home</a>
+  <a class="item on" href="../curriculum.html">Curriculum</a>
+  <a class="item" href="../labs.html">Labs</a>
+  <a class="item" href="../setup.html">Lab setup</a>
+  <a class="item" href="../prompt.html">Generator prompt</a>
+</div></nav>
+<div class="wrap">
+
+<div class="lesson-top">
+  <div><span class="badge">Track A · Lesson 5</span><span class="badge dim">≈ 4 h</span></div>
+  <button id="donebtn" class="donebtn">Mark lesson complete</button>
+</div>
+<h1>ML Kernel Patterns — fusion is the whole game, FlashAttention is its masterpiece</h1>
+<p class="lead">Every famous ML kernel of the last decade is one idea executed well: <em>stop driving tensors to HBM between steps.</em> This lesson builds that idea from the softmax traffic ledger up to a from-scratch FlashAttention you'll verify to machine epsilon — and by the end, "we should fuse this" will be an arithmetic conclusion you compute, not a vibe you inherit.</p>
+
+<h2>Concept</h2>
+
+<h3>The traffic ledger: where a "fast" model leaks</h3>
+<div class="diagram" data-diagram="a5-unfused" data-caption="Unfused softmax: every pass reads and writes the whole tensor. The FLOPs are trivial; the round-trips are the entire bill — 4.6's ledger applied to one line of Python."></div>
+<pre><code>torch.softmax(x)  as four eager ops on a (4096, 4096) fp32 tensor (64 MB):
+  m = x.max(-1)      read 64 MB
+  e = exp(x − m)     read 64 + write 64
+  s = e.sum(-1)      read 64
+  y = e / s          read 64 + write 64        Σ ≈ 384 MB of HBM traffic
+FLOPs: ~3 per element → AI ≈ 0.2 FLOP/B — the 4.7 memory cellar, permanently.
+fused (A4's kernel): read 64 + write 64 = 128 MB → traffic ÷3, same math.
+T4 arithmetic: 384 MB ÷ 220 GB/s ≈ 1.75 ms vs 0.58 ms — the entire speedup
+was DELETED TRIPS. This ledger, drawn per operator, is Track A's daily tool:
+elementwise/normalization layers are ~free in FLOPs and expensive in trips.</code></pre>
+
+<h3>Online softmax: the identity that makes streaming legal</h3>
+<div class="diagram" data-diagram="a5-online" data-caption="Keep a running max m and running sum s; when a new chunk raises the max, rescale history by exp(m_old − m_new). Verified: chunked equals full to the last bit's neighborhood."></div>
+<pre><code>state (m, s);  new chunk c:
+  m' = max(m, max(c));   s' = s·exp(m − m')  +  Σ exp(c − m');   (m,s) ← (m',s')
+# the rescale term is the whole trick: history was accumulated against the
+# OLD max; one multiply re-expresses it against the new one (exp algebra:
+# e^(x−m) = e^(x−m')·e^(m'−m)). EXECUTED: 10 chunks vs full pass → ratio
+# 1.0 exactly (fp64). The max-shift itself is M1 L8's overflow shield
+# (fp32 exp overflows at 89 — A4's measured wall).
+# Why you care: a reduction that can be RESTARTED against new normalizers
+# can be TILED — and softmax was the one op everyone said couldn't tile.</code></pre>
+
+<h3>LayerNorm: the cancellation trap wearing a normalization costume</h3>
+<pre><code>var(x) = E[x²] − E[x]²        # the "one pass" formula every intern writes
+EXECUTED, fp32, row = 1000 + noise(σ=0.01), n=4096:
+  one-pass:  0.0               ← TOTAL cancellation (E[x²] ≈ 1e6, E[x]² ≈ 1e6:
+                                  their difference ~1e-4 is 10 decimal digits
+                                  below the operands — M1 L8's subtraction law)
+  two-pass:  1.007e-4  ✓        (subtract mean FIRST, then square)
+var=0 → rsqrt(0+ε) → normalization explodes or flatlines. Production rule:
+two-pass (or Welford's running form) + fp32 accumulation even for bf16
+tensors (A3 quiz 2's law) — layernorm is ONE kernel doing mean, var,
+normalize, scale, shift in a single trip: fusion AND numerics, one artifact.</code></pre>
+
+<h3>FlashAttention: 5.5's tiling + the online identity = O(N) traffic</h3>
+<div class="diagram" data-diagram="a5-flash" data-caption="Stream K/V tiles through SRAM; maintain running (m, l, O) per query row with the rescale identity. The N×N score matrix simply never exists in HBM."></div>
+<pre><code>naive attention, per head:  S = QKᵀ (N×N!) → P = softmax(S) → O = PV
+  N=4096 fp32: S alone = 64 MB written+read per head — and A1 P3 showed the
+  TRAINING bill: 8.6 GB of tape per layer at batch 8 × 32 heads.
+flash: for each K/V tile j:
+  Sij = Q·Kjᵀ  (in SRAM — 5.5's tile)          m' = max(m, rowmax(Sij))
+  O ← O·e^(m−m') + e^(Sij−m')·Vj               l ← l·e^(m−m') + rowsum(e^(Sij−m'))
+  (the ONLINE state grew a third member: O rescales exactly like l)
+finally O /= l.   EXECUTED (N=64, d=16, fp64): max|flash − naive| = 3.3e-16 —
+machine epsilon: not approximately attention, IS attention, reordered.
+traffic: O(N²) score tensor deleted → O(N·d) reads of Q,K,V,O. Memory-bound
+→ compute-bound (4.7's MOVE), and the tape shrinks from N² to N (A1 P3).</code></pre>
+
+<h2>Worked example</h2>
+<div class="card">
+<p><strong>Task:</strong> Implement FlashAttention forward in 15 lines of NumPy, prove exactness, and read the two ledgers (traffic + tape) that explain why this algorithm reorganized the industry. All numbers executed.</p>
+<pre><code>m = full(N, -inf); l = zeros(N); O = zeros((N, d))
+for j in range(0, N, Bc):                        # stream K/V tiles
+    S  = Q @ K[j:j+Bc].T / sqrt(d)               # tile of scores, SRAM-sized
+    m2 = maximum(m, S.max(1))
+    P  = exp(S - m2[:,None])                     # safe: shifted by tile max
+    l  = l * exp(m - m2) + P.sum(1)              # online softmax (verified §2)
+    O  = O * exp(m - m2)[:,None] + P @ V[j:j+Bc] # the SAME rescale, on O
+    m  = m2
+O /= l[:,None]
+exactness: max|flash − naive| = 3.3e-16 (fp64) — the rescale identity is
+  algebra, not approximation; fp32 lands ~1e-6 (budget compare, M1 L8).
+ledger (N=4096, d=64, fp16, per head): naive materializes S+P: 2·N²·2 B =
+  64 MB round-tripped; flash touches Q,K,V,O ≈ 4·N·d·2 B = 2 MB. Ratio: N/d
+  ≈ 32× less traffic — and the ratio GROWS with sequence length, which is
+  why long-context models are only possible in the flash regime.
+tape (training): stores O, m, l — O(N) — instead of P — O(N²): A1 P3's
+  8.6 GB/layer becomes ~17 MB/layer; backward RECOMPUTES tiles from Q,K,V
+  (checkpointing's trade, applied surgically to the one tensor that mattered).</code></pre>
+<p><strong>What to internalize:</strong> FlashAttention contains zero new mathematics — softmax algebra (M1 L8), tiling (5.5), online rescaling (§2), recompute-vs-store (A1 §3). Its genius is COMPOSITION under a hard constraint (SRAM size), which is precisely the skill this course trains. When the next "impossible to tile" op appears in your career, the question sequence is now yours: what's the running state? does an identity let me restart it against new normalizers? what does backward need saved vs recomputed?</p>
+</div>
+
+<h2>Key points</h2>
+<ul class="keypoints">
+<li>Draw the traffic ledger before optimizing anything: unfused elementwise/normalization chains cost one full tensor round-trip PER OP at ~zero FLOPs — fusion's win is deleted trips (÷3 for softmax, measured arithmetic).</li>
+<li>Online softmax's rescale identity (s·e^{m−m'}) makes the "untileable" softmax streamable — verified exact; the max-shift doubles as the fp32-overflow shield (exp dies at 89).</li>
+<li>Never compute variance as E[x²]−E[x]²: fp32 returns literally 0.0 at mean 1000, σ 0.01 (executed) — two-pass or Welford, with fp32 accumulation regardless of storage dtype.</li>
+<li>FlashAttention = K/V tiles through SRAM + the online identity extended to the output accumulator: exact to machine epsilon, O(N²)→O(N·d) traffic, and an O(N²)→O(N) tape — the training-memory win is as important as the speed.</li>
+<li>Fused kernels must decide what backward sees: save-minimum or recompute (flash recomputes tiles from Q,K,V, storing only m,l,O) — A3's save_for_backward economics at algorithm scale.</li>
+<li>Fusion couples your kernel to model structure (masks, GQA head-broadcasts, dtypes): every architecture variant gets its own golden-output fixture, or silent wrongness ships (scenario).</li>
+</ul>
+
+<h2>Quiz</h2>
+<div class="quiz">
+  <div class="q">1. A profiler shows a transformer block spending 41% of time in matmuls (already cuBLAS/TC) and 38% across ~9 small ops (bias, GELU, dropout, residual adds, layernorms). Two engineers propose: (A) hand-optimize the matmuls ("they're the biggest single item"); (B) fuse the 9 small ops into 2–3 kernels. Arbitrate with the two ledgers, and predict B's ceiling.</div>
+  <button class="opt">A — always optimize the largest line item first</button>
+  <button class="opt" data-c="1">B, decisively. The matmuls are compute-bound at their roofline (5.11 quiz 1: you don't out-tune cuBLAS); their 41% is near-irreducible. The 9 small ops are ~zero-FLOP, traffic-priced (the §1 ledger): each is a full activation round-trip, so 9 ops ≈ 9 trips where 2–3 fused kernels ≈ 2–3 trips → that 38% shrinks toward ~12% — a ~1.3–1.4× step-time win (Amdahl on the 38%: 1/(1−0.38+0.38·3/9) ≈ 1.34), for a few days of Triton (A4's velocity). B's ceiling: once glue is fused, the block is matmul-dominated and the next lever changes LEVEL — precision (A6) or architecture, not kernels</button>
+  <button class="opt">Neither — buy H100s</button>
+  <button class="opt">B, because small kernels have launch overhead only</button>
+  <div class="expl">Option 4 is the half-right trap: launch overhead (5.2's floor) is real but SECONDARY — the dominant cost is each op's full read+write of the activation tensor (the §1 ledger; a 64 MB tensor's trip is ~0.3 ms on T4 while a launch is ~5 µs). Getting the MECHANISM right matters because it predicts the fix's shape: fusion helps even for LARGE tensors where launch overhead is negligible. This quiz is A9's a9-when table derived by hand — and the exact reasoning torch.compile's authors baked into Inductor.</div>
+</div>
+<div class="quiz">
+  <div class="q">2. Your from-scratch flash kernel matches naive attention at rtol 1e-5 on random Q,K,V — but a colleague claims flash attention is "approximate attention" and demands you switch to the "exact" naive version for a compliance-sensitive model. Adjudicate with mathematical precision, including what IS different between the two outputs and the one scenario where naive is legitimately preferable.</div>
+  <button class="opt">Colleague is right — tiling approximates the softmax</button>
+  <button class="opt" data-c="1">Flash is EXACT attention: the online rescale is an algebraic identity (e^{x−m} = e^{x−m'}·e^{m'−m}) — the worked example measured max|diff| = 3.3e-16 in fp64, i.e., machine epsilon, not an approximation error. What differs: floating-point ORDER (per-tile partial sums vs full-row sums), so outputs differ in last bits at working precision — 5.8 quiz 2's nondeterminism vocabulary: both orderings are individually valid evaluations of the same exact formula; neither is "the true one" (the naive order is not privileged — M1 L8). Legitimate naive preference: when you need the full P matrix ITSELF as an artifact (attention-map audits/interpretability exports) — then materializing N² is the requirement, not a cost</button>
+  <button class="opt">Flash is exact only for short sequences</button>
+  <button class="opt">Both are approximate; the question is meaningless</button>
+  <div class="expl">"Tiled = approximate" is a surprisingly common senior-level misconception, and the refutation must be surgical: identity-based reordering (exact, flash) vs genuine approximation (sparse/linear attention variants, which DO change the math). The compliance answer mirrors 5.11 quiz 2's bitwise doctrine: fix the ORDER if you need bit-reproducibility (flash is deterministic per config!), state budgets otherwise. Knowing the one honest naive use-case (wanting P itself) turns the answer from defensive to authoritative.</div>
+</div>
+
+<h2>Exercises</h2>
+<details><summary>Exercise 1 — Fused LayerNorm in Triton (Colab): one program per row — Welford or two-pass mean/var in fp32 accumulation, then normalize+scale+shift, one trip. Fixtures: vs torch.nn.functional.layer_norm at fp32 AND bf16-storage (budgets per dtype), PLUS the adversarial row family mean∈{0, 1e3, 1e6}, σ∈{1, 1e-2} — stage the one-pass E[x²]−E[x]² variant and watch which fixture kills it. Measure the fused-vs-eager traffic win with do_bench.</summary><div class="body">
+<pre><code>expected: fused ≈ 2.5–3× over the eager 5-op chain on T4 (the §1 ledger with
+n_ops≈5); the staged one-pass variant PASSES mean=0 fixtures (cancellation
+needs a big mean to bite — that's WHY random tests miss it, A4 quiz 1's
+doctrine again) and returns var=0.0 → all-zero/inf rows at mean=1e3 (the
+executed catastrophe). Keep the adversarial-row family in your permanent
+fixture library: it's reused verbatim for RMSNorm, softmax, and every
+normalization you'll ever fuse.</code></pre>
+<p>Design note to write in your solution: eps goes INSIDE rsqrt(var + eps) — placed outside, tiny-variance rows still explode before eps rescues them (a real production bug class; your mean=1e6, σ=1e-2 row is its fixture). And accumulate in fp32 via tl.float32 even for bf16 inputs — you are now IMPLEMENTING A3 quiz 2's law rather than reciting it.</p>
+</div></details>
+<details><summary>Exercise 2 — FlashAttention forward in NumPy, then in Triton (Colab, T4-friendly since it's YOUR kernel, not the sm_80+ flash-attn package): port the worked example, verify vs naive at fp64 (expect ~1e-15) and fp32 (budget), then measure the crossover: at which N does your flash beat the naive torch composition on T4? Explain the crossover's existence with the two overheads flash carries.</summary><div class="body">
+<pre><code>expected shape: naive WINS at small N (its matmuls are few, cuBLAS-fast, and
+S fits caches — flash pays per-tile exp/rescale overhead and more kernel
+complexity); flash wins from N ≈ 512–1024 up, and the gap grows ~linearly in
+N (traffic ratio N/d). The two flash overheads: (1) rescale FLOPs per tile
+(extra exps and multiplies naive does once), (2) less matmul efficiency per
+tile (skinny tl.dot shapes vs one big GEMM — a6-tc's shape economics).
+Deliverable: the crossover plot + one paragraph: "algorithmic superiority is
+REGIME-DEPENDENT; the ledger, not the paper title, decides at your shapes"
+(5.9 P6's regime doctrine, now about algorithms).</code></pre>
+<p>This kernel is your Track A trophy piece: attention, from scratch, exact, measured — and the direct ancestor of A11's capstone. Keep it under version control with its fixture suite; interviewers ask to SEE such things.</p>
+</div></details>
+
+<hr>
+<h1>Go deeper — the fusion craft sheet</h1>
+
+<h2>1. What fuses, what can't, and why (the boundary rules)</h2>
+<pre><code>FUSES FREELY: elementwise chains (bias→GELU→dropout→residual: one loop body),
+  elementwise → reduction (softmax's exp+sum), reduction → elementwise
+  (norm's var→scale), matmul EPILOGUES (bias/activation on the C tile while
+  it's in registers — a11-fused, the capstone)
+FUSES WITH THOUGHT: two reductions over the same data (max then sum → online
+  identity required — §2's whole story); attention (three ops + softmax → the
+  running-state trick)
+RESISTS FUSION: matmul→matmul through a full hidden dim (the intermediate is
+  each program's INPUT from other programs' outputs — 5.2's block-independence
+  wall; you'd need grid-wide sync = separate kernels, 5.8's law), big
+  reshuffles (transpose-like data movement between ops wants its own 5.7
+  way-station)
+the test: can one PROGRAM compute its output tile reading only ITS input
+  tiles + O(1) running state? yes → fusible; no → kernel boundary is real.</code></pre>
+
+<h2>2. Flash backward, honestly (where the memory went)</h2>
+<pre><code>backward needs P (N²) — but P was never stored. Solution: store per-row
+(m, l) [O(N)] + recompute each tile's P from Q,K,V during backward, fusing
+the dP/dS softmax-Jacobian algebra into the same tile loop. Cost: ~1 extra
+forward's worth of FLOPs (attention recompute) — the checkpointing trade
+(A1 §3) at its best exchange rate, because attention is exactly the layer
+whose activations were quadratic. dQ/dK/dV accumulate across tiles → the
+5.8 rules apply (block-column parallelism + atomics or split accumulators —
+implementations differ; the nondeterminism registry (A2 P4) knows which).</code></pre>
+
+<h2>3. Gotchas</h2>
+<div class="gotcha"><strong>exp without the shift.</strong> Softmax on logits ≥ 89 in fp32 → inf/NaN cascade (A4's measured wall). The shift is not a nicety; any fused softmax you review without it is a bug report.</div>
+<div class="gotcha"><strong>One-pass variance.</strong> Executed: literal 0.0 at mean 1e3. Two-pass/Welford + fp32 acc, and the adversarial-row fixture forever (Ex.1).</div>
+<div class="gotcha"><strong>eps outside the rsqrt.</strong> normalize = (x−μ)·rsqrt(σ²+ε): ε inside. Outside, σ²→0 rows blow up first and get "rescued" after the inf already propagated.</div>
+<div class="gotcha"><strong>Fusing across the tape without a plan.</strong> A fused op that saves every intermediate "to be safe" un-wins the memory (A3 gotcha 3); one that saves nothing and can't recompute breaks backward. Decide per tensor: save, recompute, or derive (A3 P1's table — now for 5-op fusions).</div>
+<div class="gotcha"><strong>Assuming fusion helps compute-bound code.</strong> A fused epilogue on an already-TC-saturated GEMM buys the epilogue's traffic only — if the epilogue was 3% of time, that's the ceiling (quiz 1's arbitration, inverted). Ledger first, always.</div>
+<div class="gotcha"><strong>Silent variant drift.</strong> Causal mask, ALiBi, GQA, sliding window — each changes the fused kernel's inner logic. The library kernel "worked" on the new variant because nothing crashed (5.3's worst kind of wrong). Golden-output fixtures per variant (scenario), no exceptions.</div>
+
+<h2>Scenario — the fused kernel that was right about the wrong model</h2>
+<p>An inference team fuses their 7B model's attention + norms into a tight Triton stack (this lesson's toolkit): 2.1× end-to-end, fixtures green, deployed, celebrated. Four months later the research team ships a successor model — same dimensions, but grouped-query attention (8 query heads share each KV head) and a sliding-window mask. The serving team bumps the config, throughput looks great, quality metrics sag by "a weird 4%," and — because nothing ERRORED — three weeks go to data-drift and quantization theories. The actual bug, found when someone finally diffs against an eager-mode golden run: the fused kernel's head indexing still assumed one-KV-per-Q (it broadcast the WRONG kv head for 7 of every 8 queries — plausible outputs, wrong attention: 3.2's silent-UB flavor at the model level), and the sliding-window mask was applied post-softmax in one branch (renormalization skipped — probabilities summing over the window's complement leaked in). Two fixes, one afternoon, quality recovered. The postmortem's systemic finding is this lesson's closing law: <em>a fused kernel is a compiled COPY of the model's structure; when the model moves, the copy silently stales.</em> Their fix-forward: every fused op carries an eager-composition twin (M2 L6's reference oracle) and a per-architecture-variant golden suite that runs on every model onboarding — the same 40-line habit that would have converted three weeks into one red test on day one.</p>
+
+<h2>Practice</h2>
+<details><summary>1. Ledger drill — for a (8192, 8192) fp16 tensor on an H100 (3.35 TB/s): price the eager chain bias→GELU→residual→layernorm (reads/writes per op, total ms) vs a two-kernel fusion (bias+GELU+residual | layernorm). Then state the FLOP count's role in your answer.</summary><div class="body">Tensor = 128 MB fp16. Eager: bias (r128+w128... bias vector negligible) + GELU (r+w) + residual (r 2×128 + w 128) + LN (r + w, two internal passes if unfused: charge r×2+w) ≈ reads 5×128+ext, writes 4×128 → ~1.3 GB → ~0.39 ms. Fused pair: kernel 1 reads x+res (256), writes 128; kernel 2 reads 128 (stats in-kernel), writes 128 → 640 MB → ~0.19 ms → ~2×. FLOPs' role: NONE — they never entered the arithmetic (each op is ≤ a few FLOPs/element; at 3.35 TB/s vs ~1000 TF fp16 the ridge is ~300 FLOP/B — these ops sit at ~0.02). Being able to say "I didn't need the FLOPs" with a straight face IS the ledger literacy this lesson certifies.</div></details>
+<details><summary>2. Extend the online trick: which of these reductions can stream with O(1) running state and a restart identity, and what's the state? (a) max; (b) mean; (c) variance; (d) softmax denominator; (e) median; (f) top-k. For the streamables, name the identity; for the rest, name the obstruction.</summary><div class="body">(a) max: state m, identity trivial (max is associative — no rescale needed). (b) mean: (count, sum) — Welford's simplest case. (c) variance: (count, mean, M2) — Welford's merge formula (parallel variance combine: the B8 preview). (d) softmax denom: (m, s) with the §2 rescale — the star of the show. (e) median: NO O(1) state — order statistics need the distribution (obstruction: not decomposable into a bounded merge; approximations like t-digest exist = changing the SPEC). (f) top-k: state = the k candidates (O(k), fine for small k — 5.8 P1f's mergeable-summary). The general test: does a MERGE operation exist on bounded state with associativity? — that's the map of what can ever be fused/tiled/distributed (5.8's privatize-merge, A7's allreduce: same algebra all the way up).</div></details>
+<details><summary>3. Your fused flash kernel must add ALiBi (a per-head linear bias added to S before softmax). List every place in the worked example's loop the change touches, the one numerics interaction to re-check, and the two fixtures the variant must add (scenario's law).</summary><div class="body">Touches: S computation only — S += slope_h·(j_positions − i_positions) inside each tile (bias is position-dependent → computed per tile from offsets, M2 L4's broadcasting in index space). The rescale machinery (m, l, O) is UNTOUCHED — biases pre-softmax flow through the identity unchanged (that's why additive-bias variants are cheap in flash-world, and multiplicative/post-softmax ones are not — quiz territory). Numerics re-check: the bias grows with distance — at long N, S+bias can push fp16/bf16 score range; confirm the max-shift still bounds exp inputs (it does — shift is per-row AFTER bias; but check S's dtype BEFORE the max if computing in fp16: A6's range tables). Fixtures: (1) golden vs eager-with-ALiBi at several N incl. long; (2) slope=0 degenerate must EXACTLY match the no-ALiBi kernel (a differential fixture that isolates the diff — M2 L6's controlled-variable testing). One-afternoon change, two permanent tests: the scenario's economics, pre-paid.</div></details>
+<details><summary>4. Why does flash's advantage GROW with sequence length while its advantage over naive at N=256 may be negative (Ex.2's crossover)? Derive both ends: the traffic ratio as f(N, d), and the two fixed overheads that dominate small N. Then: does bigger d help or hurt flash's relative win?</summary><div class="body">Ratio: naive traffic ≈ 2·N²·b (S and P round-trips) + Nd terms; flash ≈ 4·N·d·b → advantage ≈ N/(2d): LINEAR in N (at N=4096, d=64: 32×; at N=64k: 512× — hence long-context's dependence on it). Small N: (1) the rescale/exp overhead per tile is FLOPs naive pays once (and small-N S fits L2 — naive's "traffic" partially never reaches HBM: 5.7 quiz 2's cache-rescue, working against flash!); (2) skinny per-tile matmuls underuse TCs vs one chunky GEMM (a6-tc shapes). Bigger d HURTS the relative win (ratio N/2d shrinks) while raising naive's absolute cost too — which is why d stays ~64–128 across the industry while N exploded: architecture co-evolved with the kernel's economics. Seeing model hyperparameters as KERNEL-ECONOMICS decisions is the track's quiet superpower.</div></details>
+<details><summary>5. A junior proposes fusing the entire transformer block — "QKV projection through FFN, one kernel." Using §1's boundary rules, write the three-sentence review comment: what breaks, what the legitimate maximal fusion units are, and what the compiler (A9) will find on its own.</summary><div class="body">"The QKV→attention→output-proj→FFN chain crosses two full matmuls whose intermediates each program would need from ALL other programs' outputs — that's the block-independence wall (5.2/§1): fusing through it requires grid-wide sync, i.e., it's not one kernel, it's kernels. Legitimate maximal units: (matmul + its epilogue) [a11-fused], (attention's three ops via flash's running state) [§flash], and (the elementwise/norm glue between them) [Ex.1] — which is, not coincidentally, exactly the partition Inductor/torch.compile converges to (a9-stack), so hand-fusing further than the compiler's partition needs an evidence bar, not enthusiasm (5.10 P5). Happy to pair on the epilogue fusion — that one's real and unclaimed." Three sentences, two citations, one redirect: the review-comment format that teaches instead of gatekeeps.</div></details>
+<details><summary>6. Fusion changes the NUMERICS spec, not just speed: enumerate the three float-order differences a fused softmax→matmul introduces vs eager, the correct comparison policy for each fixture tier (M1 L8/5.11), and the sentence you put in the PR that pre-empts the "results changed!" ticket.</summary><div class="body">Order diffs: (1) softmax's sum order (tile partials vs row-sequential — quiz 2); (2) the P·V products interleave with rescales (multiply-then-accumulate order per tile); (3) acc dtype boundaries move (fused keeps fp32 register chains where eager round-tripped through bf16 storage — fused is often MORE accurate: the direction surprises people). Policy: unit fixtures vs fp64 oracle with per-dtype rtol (never bitwise vs eager); differential fixtures (variant vs variant, P3's slope=0 trick) MAY be bitwise when the code path is genuinely shared; end-to-end model tests use metric budgets. PR sentence: "Outputs differ from eager in final bits by design (reordered accumulation, documented in NUMERICS.md §fusion; typically closer to the fp64 reference than eager was — see attached error table); comparison policy is rtol=1e-3 bf16 / 1e-6 fp32 per our M1-L8 ladder." The pre-emption line converts a week of tickets into a doc link — A3 P4's memo skill, now standard operating procedure.</div></details>
+<details><summary>7. Interview closer: "Why is attention memory-bound, and how does FlashAttention fix it?" — 90 seconds: the naive traffic ledger with the N² culprit, the roofline verdict, the online-softmax identity as the enabling algebra, the tile loop's running (m,l,O), the exactness claim with its measured number, the tape/backward story, and the regime caveat. Deliver and time it.</summary><div class="body">Skeleton: "Naive attention materializes the N×N score matrix twice over — softmax(QKᵀ) then P·V — so per head it round-trips O(N²) bytes for O(N²·d) FLOPs: arithmetic intensity ~d… but with the softmax passes it degrades to trips-dominated, and at N=4k that's 64 MB of HBM traffic per head per pass — deep under the roofline ridge [§1's ledger]. FlashAttention deletes the matrix: K/V stream through SRAM in tiles [5.5], and softmax — the op that 'couldn't tile' — tiles via the online identity: keep running max m and sum l, and when a tile raises the max, rescale history by e^{m−m'}; the insight is the OUTPUT accumulator O obeys the same rescale, so the whole computation is one streaming pass with O(1) state per row [§2, §flash]. It's exact — algebraic reordering, not approximation: I've verified max diff 3e-16 in fp64 against naive [quiz 2]. Training doubles the win: the tape stores (m,l,O) in O(N) and backward recomputes tiles — the N² activation is gone, which is what actually unlocked long context [worked ex]. Caveat I'd flag: below N≈512 the naive path can win — cache-resident S plus chunkier GEMMs [Ex.2's crossover] — so we pick per-regime, by measurement." If you can also name what breaks when someone adds GQA without new fixtures [scenario], you've cleared the senior bar.</div></details>
+
+<div class="pager">
+  <a href="lesson-04.html">← Triton kernels</a>
+  <a href="lesson-06.html">Next: Mixed precision & tensor cores →</a>
+</div>
+<div class="footer">GPU Mastery · Track A · Lesson 5 — works offline · progress saved in your browser</div>
+</div>
+<script src="../assets/diagramsA.js"></script>
+<script src="../assets/app.js"></script>
+</body>
+</html>

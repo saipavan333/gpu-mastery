@@ -1,0 +1,190 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>1.2 Algebra as Computation — GPU Mastery</title>
+<link rel="stylesheet" href="../assets/style.css">
+</head>
+<body data-lesson="m1l2">
+<nav><div class="inner">
+  <a class="logo" href="../index.html">GPU<span>Mastery</span></a>
+  <a class="item" href="../index.html">Home</a>
+  <a class="item on" href="../curriculum.html">Curriculum</a>
+  <a class="item" href="../labs.html">Labs</a>
+  <a class="item" href="../setup.html">Lab setup</a>
+  <a class="item" href="../prompt.html">Generator prompt</a>
+</div></nav>
+<div class="wrap">
+
+<div class="lesson-top">
+  <div><span class="badge">Module 1 · Lesson 2</span><span class="badge dim">≈ 2–3 h</span></div>
+  <button id="donebtn" class="donebtn">Mark lesson complete</button>
+</div>
+<h1>Algebra as Computation — variables, functions & the Σ you'll write daily</h1>
+<p class="lead">School algebra and programming are the same activity wearing different clothes. This lesson translates between them — and lands on the two formulas (index linearization and ceiling division) that appear in literally every GPU kernel.</p>
+
+<h2>Concept</h2>
+
+<h3>Variables: named boxes, with one big twist</h3>
+<p>In algebra, <em>x = 5</em> is a timeless fact. In code, <code>x = 5</code> is an <em>action</em>: put 5 in the box named x. That's why <code>x = x + 1</code> is nonsense as an equation but perfectly sensible as an instruction (take what's in the box, add 1, put it back). Every "impossible equation" confusion beginners have dissolves once you read <code>=</code> as "gets," not "equals." (C uses <code>==</code> for actual equality tests.)</p>
+
+<h3>Expressions and precedence</h3>
+<p>PEMDAS from school survives almost intact: parentheses, then <code>* / %</code>, then <code>+ −</code>, left to right within a level. Two things school didn't tell you:</p>
+<pre><code>7 / 2        → 3   in C/CUDA when both sides are integers (truncation toward 0!)
+7 % 2        → 1   the remainder — the other half of integer division
+a + b * c    → a + (b*c)   — as in school; when in doubt, add parentheses</code></pre>
+<div class="warnbox">Integer division truncates: <code>(a/b)*b + a%b == a</code> always holds, but <code>(a/b)*b ≠ a</code> whenever b doesn't divide a. GPU code exploits truncation deliberately — and is bitten by it accidentally. Watch every <code>/</code> and ask: are both sides integers?</div>
+
+<h3>Functions: machines with one job</h3>
+<p>f(x) = 3x + 2 is a machine: number in, number out. Code is the same machine with a body:</p>
+<pre><code>float f(float x) { return 3.0f * x + 2.0f; }</code></pre>
+<p>Composition f(g(x)) means "g first, then f" — in code, nested calls or a pipeline. GPU pipelines are compositions at industrial scale: <em>normalize(attention(embed(tokens)))</em>. Two properties you'll care about later: a function is <em>pure</em> if the same input always gives the same output (no hidden state) — pure functions are trivially parallelizable, which is why GPU programming loves them.</p>
+
+<h3>Solving = inverting: you still need it</h3>
+<p>School had you isolate x. Professionals invert formulas constantly — just for practical reasons: given a linear index, which (row, col) is it? Given a target occupancy, how many registers per thread can I afford? The moves are the same three you learned: do the same thing to both sides, unwrap operations in reverse order, keep track of integer-vs-real.</p>
+<pre><code>i = row·W + col   (0 ≤ col < W)     solve for row, col:
+row = i / W   (integer division — throws away col)
+col = i % W   (the remainder IS col)                     inverse pair: / and %</code></pre>
+<div class="diagram" data-diagram="m1l2-linearize" data-caption="Linearization and its inverse. Every thread you ever launch runs this."></div>
+
+<h3>Σ and Π: the loop you can already read</h3>
+<p>Sigma notation intimidates beginners and shouldn't — it's a for-loop invented before computers:</p>
+<div class="diagram" data-diagram="m1l2-sigma" data-caption="Σ dissected: bounds become loop bounds, the term becomes the body."></div>
+<pre><code>dot product:  a·b = Σᵢ aᵢbᵢ          →  for i: s += a[i]*b[i];
+mean:         μ = (1/n) Σᵢ xᵢ        →  sum then divide
+softmax denominator: Σⱼ e^{zⱼ}       →  the loop inside every LLM's output layer</code></pre>
+<p>Nested Σ = nested loops, and the order of Σs (like the order of loops) doesn't change the sum — but, as you'll learn in Lesson 8, in floating point it changes the <em>rounding</em>, which is why GPU results can differ from CPU results while both are "correct."</p>
+
+<h3>Inequalities: the language of bounds checking</h3>
+<p>Every kernel guards itself with an inequality: <code>if (i < N)</code>. Programmers use <strong>half-open intervals</strong> [0, N) — include 0, exclude N — because lengths add cleanly ([0,N) has exactly N integers) and adjacent ranges [0,k) and [k,N) never overlap. School's closed intervals [1, N] cause the off-by-one errors; half-open is the professional dialect.</p>
+
+<h2>Worked example</h2>
+<div class="card">
+<p><strong>Task:</strong> An RGB image is H=1080 rows, W=1920 cols, 3 channels, stored as one flat array, channel-last (r,g,b,r,g,b,…). Derive the formula for the address of channel c of pixel (row, col), then invert it.</p>
+<p><strong>Derive by counting strides:</strong> moving down one row skips W·3 = 5760 values; moving right one pixel skips 3; the channel adds 0, 1, or 2:</p>
+<pre><code>i = (row·W + col)·3 + c        e.g. pixel (2, 10), green (c=1):
+i = (2·1920 + 10)·3 + 1 = 3850·3 + 1 = 11551</code></pre>
+<p><strong>Invert by unwrapping in reverse</strong> (last operation applied is first undone):</p>
+<pre><code>c    = i % 3;          p = i / 3;      // undo the ·3 + c
+col  = p % W;          row = p / W;    // undo the ·W + col
+check: 11551 % 3 = 1 ✓, 11551/3 = 3850, 3850 % 1920 = 10 ✓, 3850/1920 = 2 ✓</code></pre>
+<p><strong>Decision made:</strong> we chose the formula from the memory layout, not from habit. If the image were channel-<em>first</em> (all reds, then greens…), the formula becomes <code>i = c·H·W + row·W + col</code>. Same algebra, different strides — layout drives the formula, always. (PyTorch calls these NHWC vs NCHW; entire performance guides exist about choosing one.)</p>
+</div>
+
+<h2>Key points</h2>
+<ul class="keypoints">
+<li>Code's <code>=</code> means "gets," not "equals" — <code>x = x + 1</code> is an update, and <code>==</code> is the equality test.</li>
+<li>Integer division truncates toward zero in C/CUDA; <code>/</code> and <code>%</code> form an inverse pair: <code>i = q·W + r</code> ⇔ <code>q = i/W, r = i%W</code>.</li>
+<li>Linearization <code>i = row·W + col</code> and its inverse are the most-typed formulas in GPU programming — derive them from strides, don't memorize.</li>
+<li>Σ is a for-loop: lower bound → init, upper bound → condition, term → body. Nested Σ = nested loops.</li>
+<li>Ceiling division <code>(N + B − 1)/B</code> computes "how many blocks of B cover N" using only integer ops.</li>
+<li>Half-open intervals [0, N) are the professional convention: lengths add, ranges don't overlap, and <code>if (i < N)</code> is the guard.</li>
+</ul>
+
+<h2>Quiz</h2>
+<div class="quiz">
+  <div class="q">1. In C/CUDA, with <code>int i = 11551, W = 1920;</code> what is <code>i % 3</code> and what does it recover in the RGB layout <code>i = (row·W+col)·3 + c</code>?</div>
+  <button class="opt">3850 — the pixel number</button>
+  <button class="opt" data-c="1">1 — the channel c (green)</button>
+  <button class="opt">0.333… — a fraction</button>
+  <button class="opt">2 — the row</button>
+  <div class="expl">% undoes the last operation applied (·3 + c): 11551 = 3850·3 + 1, so i % 3 = 1 = c. Inversion always unwraps in reverse order of construction.</div>
+</div>
+<div class="quiz">
+  <div class="q">2. You need enough blocks of 256 threads to cover N = 1000 elements. Which expression is correct and why?</div>
+  <button class="opt"><code>N / 256</code> — division computes it directly</button>
+  <button class="opt"><code>N / 256 + 1</code> — always add one for safety</button>
+  <button class="opt" data-c="1"><code>(N + 255) / 256</code> — rounds up exactly, including when 256 divides N</button>
+  <button class="opt"><code>ceil(N / 256)</code> — with N, 256 as ints</button>
+  <div class="expl">1000/256 = 3 (truncated) misses 232 elements; +1 gives a spurious extra block when N is an exact multiple; ceil(N/256) on ints truncates BEFORE ceil sees it — the classic trap. (N+B−1)/B is exact in all cases.</div>
+</div>
+
+<h2>Exercises</h2>
+<details><summary>Exercise 1 — A matrix is stored row-major with H=512 rows, W=768 cols. A profiler shows thread t reads element i = t·768. What is that in (row, col) terms, and why is it a performance disaster? (Preview reasoning — answer with algebra.)</summary><div class="body">
+<p>i = t·768 = t·W + 0 → row = t, col = 0: each consecutive thread reads the <em>first element of consecutive rows</em>. Consecutive threads therefore touch addresses 768·4 = 3072 bytes apart — 32 threads spread across 32 different memory segments instead of one contiguous 128-byte block. The algebra (stride W between consecutive t) predicts the disaster before you ever profile: you want consecutive threads to differ by +1 in the linear index (stride 1), i.e., <code>i = row·W + t</code>. "Stride between consecutive threads" is a number you should be able to read off any index formula on sight — that skill is half of Lesson 5.7 (coalescing).</p>
+</div></details>
+<details><summary>Exercise 2 — Invert this formula: a kernel packs a tile coordinate as <code>k = ty·17 + tx</code> where 0 ≤ tx < 17. A bug report shows k = 200. Which (ty, tx)? Then explain why the designer chose 17 when tiles are 16 wide (real CUDA trick).</summary><div class="body">
+<p>ty = 200 / 17 = 11, tx = 200 % 17 = 200 − 187 = 13 → (11, 13).</p>
+<p>The 17 with 16-wide tiles is <strong>shared-memory padding</strong>: an extra phantom column changes the stride so that threads walking a column don't all hit the same shared-memory bank (16 divides the bank count 32; 17 is coprime to it). You'll meet this properly in Lesson 5.5 — the point today: the algebraic stride you choose has hardware consequences, and "wasting" one column of storage can buy a 2–8× speedup on column accesses.</p>
+</div></details>
+
+<hr>
+<h1>Go deeper — the complete guide</h1>
+<p>This chapter finishes the translation dictionary: precedence in full, functions as first-class ideas, formula inversion as an algorithm, summation identities you'll actually use, and the grid-sizing algebra every CUDA launch needs.</p>
+
+<h2>1. The full precedence story (the part that bites)</h2>
+<pre><code>highest   ()  []  .  ->            calls, indexing, member access
+          !  ~  ++  --  unary-     negation family
+          *  /  %
+          +  -
+          <<  >>                   shifts — LOWER than + !
+          <  <=  >  >=  ==  !=
+          &   then  ^   then  |    bitwise — LOWER than comparisons !
+          &&  then  ||
+lowest    = += -= *= ...           assignment</code></pre>
+<p>The two famous traps are flagged above: <code>x << 2 + 1</code> is <code>x << 3</code>, not <code>(x<<2)+1</code>; and <code>if (flags & MASK == 0)</code> parses as <code>flags & (MASK==0)</code> — almost never what you meant. House rule used by every serious codebase: <strong>parenthesize all bitwise and shift expressions</strong>, no exceptions.</p>
+
+<h2>2. Functions, composed and curried by hand</h2>
+<p>Beyond f(g(x)): in performance work you constantly <em>fuse</em> compositions. Mathematically, h = f∘g is one machine; computationally, computing g's output to memory and reading it back for f costs a full round-trip through DRAM. Fusing means substituting algebraically before coding:</p>
+<pre><code>g(x) = x − μ         f(y) = y / σ         h(x) = f(g(x)) = (x − μ) / σ
+unfused: 2 kernel launches, 2 reads + 2 writes of the whole tensor
+fused:   1 launch, 1 read + 1 write   ← "kernel fusion", Track A's bread & butter</code></pre>
+<p>The algebra is trivial; the discipline of <em>seeing</em> compositions as fusable is what you're training. Substitution — school algebra's most boring move — is a 2× speedup generator in ML infra.</p>
+
+<h2>3. Inverting formulas: a reliable algorithm</h2>
+<p>To solve i = ((row·W) + col)·C + c for the inner variables: write the construction as a sequence of operations, then undo them last-to-first, using <code>%</code> to extract what each stage added and <code>/</code> to discard it:</p>
+<table>
+<tr><th>Build (forward)</th><th>Invert (reverse)</th><th>Requires</th></tr>
+<tr><td>t₁ = row·W + col</td><td>col = t₁ % W, row = t₁ / W</td><td>0 ≤ col < W</td></tr>
+<tr><td>i = t₁·C + c</td><td>c = i % C, t₁ = i / C</td><td>0 ≤ c < C</td></tr>
+</table>
+<p>The "requires" column is the whole trick: <code>%</code> only recovers a field if that field is strictly smaller than its modulus. This is place value again — mixed-radix place value — and it's why we could decode 11551 unambiguously in the worked example. Any N-dimensional tensor index in any framework is this table with more rows; PyTorch's <code>strides()</code> is exactly the list of multipliers.</p>
+
+<h2>4. Summation identities worth owning</h2>
+<pre><code>Σ (aᵢ + bᵢ)   = Σ aᵢ + Σ bᵢ            split — lets you fuse/unfuse loops
+Σ (c · aᵢ)    = c · Σ aᵢ               constants hoist out of loops
+Σᵢ Σⱼ aᵢⱼ     = Σⱼ Σᵢ aᵢⱼ              loop interchange (exact in ℝ, reordered rounding in float)
+Σᵢ₌₀ⁿ⁻¹ 1     = n                       counting
+Σᵢ₌₀ⁿ⁻¹ i     = n(n−1)/2                Gauss — cost of triangular loops
+Σᵢ₌₀ⁿ⁻¹ rⁱ    = (1−rⁿ)/(1−r)            geometric — series, amortized costs</code></pre>
+<p>Gauss's formula prices every "compare all pairs" loop: n=10⁵ pairs → ~5×10⁹ operations. The geometric sum with r=½ says the total work of repeatedly halving (1 + ½ + ¼ + …) never exceeds 2× the first term — the reason multi-pass reductions cost barely more than one pass. You'll invoke both when estimating kernel cost in your head, which Lesson 3 turns into a habit.</p>
+
+<h2>5. Launch-geometry algebra (the CUDA sizing kit)</h2>
+<p>Everything a kernel launch computes, derived once, used forever:</p>
+<pre><code>global id:      i = blockIdx.x * blockDim.x + threadIdx.x
+blocks needed:  G = (N + B − 1) / B                 // ceil(N/B) in ints
+guard:          if (i < N) { ... }                  // last block is ragged
+grid-stride:    for (i = i0; i < N; i += gridDim.x * blockDim.x)</code></pre>
+<div class="diagram" data-diagram="m1l2-ceil" data-caption="Why (N+B−1)/B: the +B−1 pushes any partial block over the boundary; exact multiples don't move."></div>
+<p><strong>Why (N+B−1)/B works:</strong> write N = qB + r with 0 ≤ r < B (division with remainder — school again). If r = 0, (N+B−1)/B = q + (B−1)/B → truncates to q. If r > 0, N+B−1 = (q+1)B + (r−1) → truncates to q+1. Exactly ceil, no branches, no floats. The <strong>grid-stride loop</strong> decouples grid size from N: each thread handles elements i, i+stride, i+2·stride… — an arithmetic sequence (school again) — letting one launch size serve any N and improving hardware reuse; it's the recommended default pattern in NVIDIA's own guidance.</p>
+
+<h2>6. Gotchas</h2>
+<div class="gotcha"><strong><code>ceil(N/B)</code> with integers.</strong> N/B truncates before ceil runs — you get floor, sometimes one block short, corrupting the array tail only when N isn't a multiple of B (i.e., rarely in tests, often in prod).</div>
+<div class="gotcha"><strong>Off-by-one from closed intervals.</strong> <code>for (i = 0; i <= N-1; ...)</code> "works" but invites edits that break it; <code>i <= N</code> overruns by one. Half-open <code>i < N</code> is the convention every reviewer expects.</div>
+<div class="gotcha"><strong>Negative operands of / and %.</strong> C truncates toward zero: −7/4 = −1, −7%4 = −3. Python floors: −7//4 = −2, −7%4 = 1. Porting index math between them silently changes results for negative values.</div>
+<div class="gotcha"><strong>Precedence of shifts and bitwise ops.</strong> <code>1 << n - 1</code> is <code>1 << (n-1)</code>. <code>a & b == c</code> is <code>a & (b==c)</code>. Parenthesize.</div>
+<div class="gotcha"><strong>Reusing a variable inside its own update, out of order.</strong> <code>col = i % W; row = i / W;</code> is safe, but the "optimized" <code>i /= W</code> before extracting col has already destroyed the remainder. Extract with % before you divide.</div>
+<div class="gotcha"><strong>Formula drift between layout and index math.</strong> Someone flips storage to channel-first but only half the formulas get updated. Defense: one <code>idx()</code> helper function, used everywhere — never inline hand-copied index arithmetic twice.</div>
+
+<h2>Scenario — the resize that corrupted the dataset</h2>
+<p>A vision team preprocesses 40 M images on GPU. After a "small refactor," 0.4% of images come out with a diagonal smear. The refactor changed tile width from 32 to 24 "to save shared memory," and one line still said <code>row = i >> 5</code> (divide by 32, as a shift) while the new code wrote <code>i = row*24 + col</code>. Two formulas, two moduli, one array. Because 24 divides into 32-based decoding cleanly every 3 rows, only images whose width hit the misalignment window corrupted — rare enough to pass spot checks, common enough to poison training. The fix: replace the shift with <code>i / TILE_W</code> using the <em>named constant</em>, and delete the duplicated index math in favor of one inline helper. Lessons: shifts are divisions only for powers of two; and index formulas are load-bearing — one source of truth, named constants, asserts on ranges. The bug cost a week of retraining; the algebra to prevent it is in this lesson.</p>
+
+<h2>Practice</h2>
+<details><summary>1. Evaluate in C: <code>17 / 5</code>, <code>17 % 5</code>, <code>-17 / 5</code>, <code>-17 % 5</code>, and the Python <code>-17 // 5</code>, <code>-17 % 5</code>.</summary><div class="body">C: 3, 2, −3, −2 (truncate toward 0; remainder takes dividend's sign). Python: −4, 3 (floor; remainder takes divisor's sign). Identity a == (a/b)*b + a%b holds in both — with their own division.</div></details>
+<details><summary>2. Write the linear index for a 4-D tensor [N, C, H, W] (NCHW), element (n, c, h, w), then give the stride between elements adjacent in w, in h, and in c.</summary><div class="body"><code>i = ((n·C + c)·H + h)·W + w</code>. Strides: w-neighbors differ by 1; h-neighbors by W; c-neighbors by H·W. (This stride list [C·H·W, H·W, W, 1] is literally what <code>tensor.stride()</code> prints in PyTorch.)</div></details>
+<details><summary>3. How many blocks of 128 threads for N = 1 000 000? How many threads are idle in the last block?</summary><div class="body">G = (10⁶ + 127)/128 = 7813 (7812·128 = 999 936; remainder 64 → one more). Last block: 10⁶ − 7812·128 = 64 active, 64 idle. The guard <code>if (i < N)</code> is what keeps those 64 harmless.</div></details>
+<details><summary>4. Fuse algebraically: g(x) = 2x, f(y) = y + 3, k(z) = z². Give k(f(g(x))) as one expression and count memory round-trips saved vs three separate passes over a 1-GB tensor.</summary><div class="body">k(f(g(x))) = (2x + 3)². Three passes: 3 reads + 3 writes = 6 GB of traffic; fused: 1 read + 1 write = 2 GB → 3× less memory traffic, which on a bandwidth-bound GPU is ≈ 3× faster. Substitution is a performance tool.</div></details>
+<details><summary>5. Solve for B: you want G ≤ 65535 blocks (a real grid-dimension limit on one axis) with N = 50 000 000. What block sizes B satisfy it?</summary><div class="body">Need (N+B−1)/B ≤ 65535 → roughly B ≥ N/65535 = 762.9 → B ≥ 763. Practical choices: 768 or 1024 (multiples of 32 — warp size — for reasons you'll learn in 5.6). Or use a grid-stride loop and stop worrying about N entirely.</div></details>
+<details><summary>6. A colleague claims Σᵢ(xᵢ − μ) = 0 always, so centering data is pointless to verify. Prove the identity and say why a float implementation may still print non-zero.</summary><div class="body">Σ(xᵢ−μ) = Σxᵢ − nμ = Σxᵢ − n·(Σxᵢ/n) = 0. In floats, μ is rounded, and the subtractions/additions round too, so the sum lands near 0 (like 1e−6), not at it. Exact-in-ℝ, approximate-in-float is a distinction you'll formalize in Lesson 8 — and it's why tests use tolerances, not ==.</div></details>
+<details><summary>7. Design: a kernel processes a lower-triangular matrix (only elements with col ≤ row) of an n×n matrix, packed densely. Derive the packed index for (row, col), the total element count, and the inverse (packed → row) using school algebra. (Hard — use Gauss.)</summary><div class="body">Row r contributes r+1 elements; rows 0..r−1 contribute Σ(i+1) = r(r+1)/2 elements (Gauss). So <code>k = r(r+1)/2 + c</code>, total n(n+1)/2. Inverse: find largest r with r(r+1)/2 ≤ k → solve r² + r − 2k = 0 → r = floor((−1 + √(1+8k))/2), then c = k − r(r+1)/2. The quadratic formula — school's crown jewel — indexing a packed triangular matrix; this exact pair appears in GPU implementations of pairwise-distance and attention-mask kernels.</div></details>
+
+<div class="pager">
+  <a href="lesson-01.html">← Numbers & binary</a>
+  <a href="lesson-03.html">Next: Exponents & logarithms →</a>
+</div>
+<div class="footer">GPU Mastery · Module 1 · Lesson 2 — works offline · progress saved in your browser</div>
+</div>
+<script src="../assets/diagrams.js"></script>
+<script src="../assets/app.js"></script>
+</body>
+</html>

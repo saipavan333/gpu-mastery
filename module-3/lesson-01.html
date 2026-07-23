@@ -1,0 +1,221 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>3.1 Why C — Source to Binary — GPU Mastery</title>
+<link rel="stylesheet" href="../assets/style.css">
+</head>
+<body data-lesson="m3l1">
+<nav><div class="inner">
+  <a class="logo" href="../index.html">GPU<span>Mastery</span></a>
+  <a class="item" href="../index.html">Home</a>
+  <a class="item on" href="../curriculum.html">Curriculum</a>
+  <a class="item" href="../labs.html">Labs</a>
+  <a class="item" href="../setup.html">Lab setup</a>
+  <a class="item" href="../prompt.html">Generator prompt</a>
+</div></nav>
+<div class="wrap">
+
+<div class="lesson-top">
+  <div><span class="badge">Module 3 · Lesson 1</span><span class="badge dim">≈ 2–3 h</span></div>
+  <button id="donebtn" class="donebtn">Mark lesson complete</button>
+</div>
+<h1>Why C — and what really happens between source and binary</h1>
+<p class="lead">CUDA is a C++ dialect; drivers, runtimes, and every kernel you'll ever ship live on this side of the fence. Module 2 made you productive; Module 3 makes you <em>close to the machine</em>. First step: watch your text become a program, stage by stage — because when builds break (and they will), this pipeline is the map.</p>
+
+<div class="note"><strong>Set up in 60 seconds:</strong> Colab works for C too — <code>%%writefile hello.c</code> in one cell, <code>!gcc -Wall -Wextra -O2 hello.c -o hello && ./hello</code> in the next. Locally: WSL2/Linux has gcc via <code>sudo apt install build-essential</code>. Details: <a href="../setup.html">Lab setup</a>.</div>
+
+<h2>Concept</h2>
+
+<h3>Why a Python person learns C (the honest pitch)</h3>
+<p>Three reasons, in ascending importance. <strong>(1)</strong> Performance floor: M2 L5 measured the ~100× interpreter tax; C code IS the compiled side you were calling. <strong>(2)</strong> The GPU speaks it: a CUDA kernel is C/C++ with three extra keywords — there is no "CUDA for Python people" that skips this. <strong>(3)</strong> Mechanical sympathy: pointers, memory layout, and lifetime — invisible in Python, decisive for performance everywhere — are C's <em>surface syntax</em>. You already own the concepts (M1's addresses, M2's tags and buffers); C just removes the padding between you and them.</p>
+
+<h3>hello.c, honestly annotated</h3>
+<pre><code>#include &lt;stdio.h&gt;                    /* preprocessor: paste in printf's declaration */
+
+int main(void) {                      /* the OS calls main; int = exit status type  */
+    int n = 4096;                     /* declare THEN use — types are compile-time  */
+    printf("matmul(%d) = %.2f ms\n",  /* %d int, %.2f double, \n newline            */
+           n, 2.0 * n * n * n / 50e12 * 1000);
+    return 0;                         /* 0 = success; nonzero = error (shell checks) */
+}</code></pre>
+<pre><code>$ gcc -Wall -Wextra -O2 -g hello.c -o hello && ./hello
+matmul(4096) = 2.75 ms</code></pre>
+<p>Everything is declared before use; statements end in <code>;</code>; blocks live in <code>{ }</code> (indentation is for humans now — the compiler ignores it, the exact opposite of Python's rule, and a classic source of misread code: braces are the truth, indentation is a claim).</p>
+
+<h3>The pipeline: four machines in a trench coat</h3>
+<div class="diagram" data-diagram="m3l1-pipeline" data-caption="gcc runs all four stages; -E/-S/-c let you stop and inspect any artifact."></div>
+<pre><code>gcc -E hello.c | tail -20     # 1 PREPROCESS: #include/#define are TEXT PASTE — see main()
+                              #   at the bottom of ~800 pasted lines of stdio declarations
+gcc -S -O2 hello.c            # 2 COMPILE: C → hello.s (assembly — readable! try it)
+gcc -c hello.c                # 3 ASSEMBLE: → hello.o (machine code, not yet runnable)
+gcc hello.o -o hello          # 4 LINK: stitch your .o with libc → executable</code></pre>
+<p>Two stages generate most real-world confusion, so meet them now: the <strong>preprocessor</strong> is dumb text substitution (powerful, dangerous — deep dive §2), and the <strong>linker</strong> is a matchmaker pairing every "I call this function" with exactly one "here is its body":</p>
+<div class="diagram" data-diagram="m3l1-symbols" data-caption="Compile errors are per-file; linker errors happen when the .o files meet."></div>
+
+<h3>Static typing: errors move left</h3>
+<div class="diagram" data-diagram="m3l1-static" data-caption="The compiler finds a whole bug class before the program ever runs."></div>
+<pre><code>int n = "4096";               /* error: initialization of 'int' from 'char *'      */
+float f = flops(n, 50e12)     /* error: expected ';'                                */
+undeclared_var + 1;           /* error: 'undeclared_var' undeclared                 */</code></pre>
+<p>Python raised these at runtime — possibly in production, possibly never on the path you tested (M2 L6). C refuses to build. The cost: you declare types everywhere. The payoff: <code>-Wall -Wextra</code> is a free, instant test suite, and reading its output is a professional skill exactly like reading tracebacks was. From today, warnings are bugs: fix them or consciously silence them, never scroll past.</p>
+
+<h3>printf: formatted output with a loaded gun</h3>
+<table>
+<tr><th>Specifier</th><th>Type it expects</th><th>Mismatch consequence</th></tr>
+<tr><td><code>%d</code></td><td>int</td><td rowspan="4">Undefined behavior — printf trusts you and reads raw argument bytes as told. Garbage numbers on YOUR machine, crashes on another (a real portability bug class). gcc's -Wformat (in -Wall) catches most — another reason warnings are law.</td></tr>
+<tr><td><code>%ld / %lld / %zu</code></td><td>long / long long / size_t</td></tr>
+<tr><td><code>%f / %e / %g</code></td><td>double (floats auto-promote here)</td></tr>
+<tr><td><code>%p / %s / %c</code></td><td>pointer / char* string / char</td></tr>
+</table>
+
+<h2>Worked example</h2>
+<div class="card">
+<p><strong>Task:</strong> Port M2 L1's kernel-time estimator to C, then look at what -O2 actually did to it — your first read of compiler output as evidence rather than mystery.</p>
+<pre><code>/* estimate.c — the M2 L1 estimator, compiled edition */
+#include &lt;stdio.h&gt;
+
+double flops_matmul(double n)        { return 2.0 * n * n * n; }
+double time_ms(double work, double peak) { return work / peak * 1000.0; }
+
+int main(void) {
+    double n = 4096, peak = 50e12, bw = 1.0e12;
+    double t_compute = time_ms(flops_matmul(n), peak);
+    double t_memory  = time_ms(3.0 * n * n * 4.0, bw);
+    printf("compute floor: %.2f ms   memory floor: %.2f ms\n", t_compute, t_memory);
+    printf("bound by: %s\n", t_compute > t_memory ? "COMPUTE" : "MEMORY");
+    return 0;
+}</code></pre>
+<pre><code>$ gcc -Wall -Wextra -O2 estimate.c -o estimate && ./estimate
+compute floor: 2.75 ms   memory floor: 0.20 ms
+bound by: COMPUTE</code></pre>
+<p><strong>Now the interesting part.</strong> <code>gcc -S -O2 estimate.c</code> and open estimate.s: the functions <code>flops_matmul</code> and <code>time_ms</code> exist… but main doesn't <em>call</em> them. With every input known at compile time, -O2 computed the whole program and embedded the answers as constants (you'll find <code>2.75</code>'s bit pattern in the data section). This is <strong>constant folding + inlining</strong> — and it's your first direct evidence of the compiler as an aggressive collaborator: it will fold, inline, reorder, and delete <em>anything the language rules permit</em>. Most of the time that's your 10× for free. The exception — when YOUR code breaks the rules (UB) and the optimizer's assumptions turn surgical — is Lesson 3.2's cliffhanger. <strong>Decision made:</strong> we compiled with -O2 <em>and</em> -Wall from the very first program: optimization and hygiene are defaults, not upgrades.</p>
+</div>
+
+<h2>Key points</h2>
+<ul class="keypoints">
+<li>C is the language of the compiled layer you've been calling all through Module 2 — and CUDA is C++ with extensions; there is no route around it.</li>
+<li>Build = preprocess (text paste) → compile (→ assembly) → assemble (→ .o) → link (match needs with provides); -E/-S/-c stop after each stage.</li>
+<li>Braces are the block structure; indentation is now merely a claim about it. Semicolons end statements; declarations precede use.</li>
+<li>Static typing moves a whole bug class from runtime (Python, 3am) to compile time (now); -Wall -Wextra makes the compiler your first test suite.</li>
+<li>printf format specifiers are typed promises; a mismatch is UB, not a formatting quirk — -Wformat catches most, so warnings are law.</li>
+<li>"Undefined reference" is a LINKER error: a call with no body provided (missing .o or -l library) — different stage, different fix than "undeclared".</li>
+</ul>
+
+<h2>Quiz</h2>
+<div class="quiz">
+  <div class="q">1. <code>gcc main.c -o prog</code> fails with <code>undefined reference to 'sqrt'</code> — yet <code>#include &lt;math.h&gt;</code> is right there at the top. What's actually wrong?</div>
+  <button class="opt">The include path is broken — reinstall gcc</button>
+  <button class="opt" data-c="1">math.h only DECLARES sqrt (satisfies the compiler); the linker still needs the BODY — add -lm to link libm</button>
+  <button class="opt">sqrt needs C++ — rename the file to .cpp</button>
+  <button class="opt">You must define sqrt yourself in C</button>
+  <div class="expl">Headers are promises, libraries are deliveries (the m3l1-symbols picture). The compiler was satisfied by the declaration; the matchmaker found no body. On Linux, libm is separate: gcc main.c -o prog -lm. Distinguishing compile-stage from link-stage errors by MESSAGE alone is a skill interviewers actively probe.</div>
+</div>
+<div class="quiz">
+  <div class="q">2. <code>printf("%d\n", 2.75);</code> compiles (with a warning) and prints garbage like <code>536870912</code>. Why garbage and not 2 or an error?</div>
+  <button class="opt">printf rounds toward zero incorrectly</button>
+  <button class="opt">2.75 overflows int</button>
+  <button class="opt" data-c="1">%d makes printf reinterpret the double's raw IEEE-754 bytes (M1 L8!) as an int — undefined behavior, garbage by luck</button>
+  <button class="opt">The comma operator discarded the value</button>
+  <div class="expl">No conversion happens: printf reads the argument bytes AS an int because you promised int. A double's bit pattern (sign/exponent/mantissa — M1 L8) read as int32 is meaningless. It "works" differently across machines and optimization levels — the definition of UB. The warning you scrolled past named this exactly.</div>
+</div>
+
+<h2>Exercises</h2>
+<details><summary>Exercise 1 — Port M2 L1's VRAM calculator to C: params = 7e9, bytes_per_param = 2; print weights in GiB (2 decimals) and the 3 TB/s tokens/sec ceiling. Then break it on purpose three ways (wrong specifier, missing semicolon, missing declaration) and file the three error/warning messages in your notes — you're building an error-message phrasebook.</summary><div class="body">
+<pre><code>#include &lt;stdio.h&gt;
+int main(void) {
+    double params = 7e9, bytes_per = 2.0, bw = 3e12;
+    double weight_bytes = params * bytes_per;
+    printf("weights: %.2f GiB\n", weight_bytes / (1024.0*1024.0*1024.0));  /* 13.04 */
+    printf("ceiling: %.2f tok/s\n", bw / weight_bytes);                     /* 214.29 */
+    return 0;
+}</code></pre>
+<p>The three breaks teach the phrasebook: <code>%d</code> for weight_bytes → <em>warning: format '%d' expects 'int' but argument has type 'double'</em> (compile-time, thanks to -Wall); dropped semicolon → <em>error: expected ';' before</em> — reported on the NEXT line (the compiler noticed too late; look one line UP from syntax errors, always); using <code>Params</code> → <em>error: 'Params' undeclared</em> (C is case-sensitive like Python, but tells you at build time). Note 2**30 doesn't exist in C — no exponent operator; write the multiplication or use <code>(double)(1u &lt;&lt; 30)</code> (M1 L1 shifts, careful with width — 3.2 territory).</p>
+</div></details>
+<details><summary>Exercise 2 — Pipeline forensics: run all four stages on estimate.c yourself. Report (a) how many lines -E produces vs your source, (b) one recognizable line of assembly from -S and what it does, (c) what <code>nm estimate.o</code> shows as U (needed) vs T (provided), and (d) which single stage fails if you misspell printf as pintf — and HOW the message differs from a misspelled variable.</summary><div class="body">
+<p>(a) ~800–1000 lines from ~15 (stdio.h pasted — and stdio includes other headers transitively). (b) In main you'll find e.g. <code>movsd .LC1(%rip), %xmm0</code> — "load a double constant into floating-point register xmm0"; with -O2 those constants ARE your precomputed answers (the worked example's evidence). (c) U: printf (needed from libc); T: main, flops_matmul, time_ms (provided). (d) The cruel one: <code>pintf(...)</code> — older C assumed implicit declarations; modern gcc errors at COMPILE time ('pintf' undeclared... did you mean 'printf'?) — but if a stray declaration existed, it would sail through to a LINKER error "undefined reference to pintf". A misspelled variable always dies at compile. The lesson: the same typo class can surface at two different stages, and the stage tells you where to look.</p>
+</div></details>
+
+<hr>
+<h1>Go deeper — the complete guide</h1>
+<p>The preprocessor's true nature, optimization levels as a dial, reading enough assembly to be dangerous, why C is fast (it's the memory model), and the flags that make up a professional default.</p>
+
+<h2>1. Optimization levels: what the dial does</h2>
+<table>
+<tr><th>Flag</th><th>Meaning</th><th>When</th></tr>
+<tr><td><code>-O0</code></td><td>no optimization; code matches source line-by-line</td><td>debugging sessions (gdb steps sanely — 3.8)</td></tr>
+<tr><td><code>-O2</code></td><td>inlining, folding, vectorization-lite, loop transforms</td><td>the production default, and this course's default</td></tr>
+<tr><td><code>-O3</code></td><td>-O2 plus aggressive vectorization/unrolling</td><td>numeric hot loops — measure, don't assume (3.9 does)</td></tr>
+<tr><td><code>-Og / -g</code></td><td>optimize-for-debugging / embed symbol info</td><td>-g ALWAYS (costs nothing at runtime; enables 3.8's tools)</td></tr>
+<tr><td><code>-ffast-math</code></td><td>let the compiler break IEEE rules (reassociate, assume no NaN)</td><td>M1 L8 §5's trade, CPU edition: speed for reproducibility — opt-in per file, never globally by habit</td></tr>
+</table>
+<p>The mental model from the worked example generalizes: <strong>the optimizer rewrites your program into any equivalent-under-the-rules program.</strong> "Equivalent" is defined by the language standard, not your intent — which is why float non-associativity (M1 L8) blocks reorderings unless -ffast-math grants them, and why UB (3.2) voids the contract entirely.</p>
+
+<h2>2. The preprocessor: powerful, dumb, everywhere</h2>
+<pre><code>#define BLOCK 256                      /* textual constant — no type, no scope     */
+#define SQR(x) ((x) * (x))             /* macro "function" — parenthesize EVERYTHING */
+SQR(a + 1)   /* → ((a + 1) * (a + 1)) ✓  without inner parens: a + 1 * a + 1 ✗   */
+SQR(i++)     /* → ((i++) * (i++)) — i incremented TWICE. UB. Macros aren't calls! */
+
+#ifdef __CUDACC__                      /* conditional compilation — one source,     */
+  #define WHERE __host__ __device__    /* different builds. CUDA headers do exactly */
+#else                                  /* this to share code between CPU and GPU    */
+  #define WHERE
+#endif</code></pre>
+<p>It's find-and-replace running before the compiler: no types, no scoping, arguments evaluated per appearance. Modern C prefers <code>const double PEAK = 50e12;</code> and real functions (the compiler inlines them anyway — you watched it). But you must READ macros fluently: CUDA's own headers are macro-dense (<code>__global__</code> and friends are #defines), and <code>#ifdef</code> blocks are how one codebase serves Linux/Windows/GPU/CPU. Rule for writing your own: constants and include guards yes, clever function-macros no.</p>
+
+<h2>3. Assembly literacy: the 20-minute version</h2>
+<pre><code>double axpy(double a, double x, double y) { return a * x + y; }
+# gcc -S -O2 -mfma:                    # x86-64; args arrive in xmm0..2 (floats)
+axpy:                                  # (-mfma or -march=native enables FMA;
+    vfmadd132sd %xmm1, %xmm2, %xmm0    #  plain -O2 emits separate mul+add)
+    ret                                # ONE instruction: xmm0 = xmm0*xmm1 + xmm2</code></pre>
+<p>You don't write assembly in this course — you <em>glance</em> at it to answer specific questions, and you already know enough to decode this one: <code>vfmadd</code> is the fused multiply-add from M1 L3/L8 — one rounding, one cycle-ish, the exact instruction your FLOP estimates count. Three glances you'll actually use: is my arithmetic using FMA/SIMD (<code>v...pd</code> = packed doubles = vectorized)? did the call get inlined (no <code>call</code> instruction)? did my "optimization" change anything at all (diff the .s files)? Compiler Explorer (godbolt.org) does this interactively with color-matching to source lines — bookmark it; it's the community's shared microscope, and it speaks CUDA too.</p>
+
+<h2>4. Why C is fast: the memory model IS the answer</h2>
+<p>Fold together what M2 already proved and this module makes explicit: a Python <code>float</code> is a heap-boxed object behind a pointer (M2 L4 §4: ~24 bytes + indirection + refcount churn); a C <code>double</code> is 8 naked bytes wherever you declared it — in a register, on the stack, in a contiguous array (M2 L5's ndarray buffer is literally a C array). No boxes, no tags at runtime (types were compile-time), no interpreter loop between statements. Consequences: arithmetic compiles to single instructions (§3); arrays walk at cache speed (M1 L3's ladder); and NOTHING stands between you and every mistake the runtime used to absorb — the trade this entire module teaches you to win. When people say "C is fast," they mean: <em>C's data is laid out the way hardware wants, and its operations are the hardware's operations.</em> You will make the identical argument about CUDA vs framework overhead in Track A.</p>
+
+<h2>5. The professional default (copy this into your Makefile)</h2>
+<pre><code>CFLAGS = -Wall -Wextra -O2 -g          # warnings, warnings, speed, debuggability
+# per-situation additions:
+#   -Werror            warnings ARE errors (CI builds — keep local builds friendlier)
+#   -fsanitize=address,undefined       dev/test builds (3.8 — the safety net)
+#   -std=c17           pin the language version explicitly (avoid dialect drift)
+#   -lm                link libm when you use sqrt/sinf/pow (quiz 1)</code></pre>
+
+<h2>6. Gotchas</h2>
+<div class="gotcha"><strong>The stale binary.</strong> Edit hello.c, rerun ./hello, "my change did nothing" — you ran the OLD build. Compile-then-run every time (shell: <code>gcc ... && ./hello</code> — the && runs only on build success), or use make (3.6), which exists because humans forget.</div>
+<div class="gotcha"><strong><code>if (x = 5)</code> compiles.</strong> Python refused (M2 L1); C assigns 5, evaluates truthy, and proceeds — silently. -Wall warns (parentheses suggestion); some teams write <code>5 == x</code> ("Yoda conditions") so the typo can't compile. Either way: this is warning-as-law example #1.</div>
+<div class="gotcha"><strong>Reading indentation instead of braces.</strong> <code>if (err)\n    log();\n    cleanup();</code> — cleanup runs ALWAYS (no braces = one-statement body). Apple shipped a famous TLS vulnerability on exactly this shape ("goto fail"). House rule: braces on every if/for, no exceptions.</div>
+<div class="gotcha"><strong>Integer division still truncates.</strong> <code>2/3 * n</code> is 0, always; <code>n * 2/3</code> "works" by luck of left-to-right evaluation. Write doubles (<code>2.0/3.0</code>) or restructure — M1 L2/M2 L1's rule, now without a REPL to catch you experimenting.</div>
+<div class="gotcha"><strong>Missing -lm (and library ORDER).</strong> Undefined reference to sqrt/sinf → add -lm — AFTER your files on the command line (the linker resolves left to right; libraries listed before the .o that needs them can be skipped). Order-sensitivity bites everyone once.</div>
+<div class="gotcha"><strong>Trusting a clean compile as correctness.</strong> The compiler checks types and syntax, not logic or memory safety. "It compiles" is where C debugging BEGINS — Python's runtime guardrails are gone, and 3.8's tools take their place.</div>
+
+<h2>Scenario — the build that broke three ways before lunch</h2>
+<p>First week of a research assistantship: you inherit a 9-file C project ("just make it run") and hit the full pipeline in one morning — which, with this lesson, is a guided tour instead of a hazing. <em>Error 1:</em> <code>fatal error: tensor.h: No such file</code> — a preprocess-stage failure; the header lives in include/, so the paste-machine needs the path: <code>-Iinclude</code>. <em>Error 2:</em> ten screens of <code>undefined reference to blas_sgemm</code> — link-stage; nothing wrong with any source file, the Makefile simply lost <code>-lopenblas</code> (and it must come after the .o files — the order rule). <em>Error 3</em>, the subtle one: the program builds but prints impossible timings on YOUR machine while working on the professor's — a <code>printf("%ld", some_int64)</code>... no wait, the code says <code>%d</code>, and on your platform the mismatched read grabs half a 64-bit value (UB "working" elsewhere by accident — quiz 2 at production scale). You fix the specifier, add <code>-Wall -Wextra</code> to the Makefile, and 41 warnings appear — including two more latent format bugs and one <code>if (x = threshold)</code>. An afternoon of warning-cleanup later, the project builds silently on both machines and you've met every character in this lesson: paste-machine, matchmaker, and the compiler that only checks what you let it. Your report to the professor is one line long: "warnings are now errors in CI."</p>
+
+<h2>Practice</h2>
+<details><summary>1. Which STAGE fails (preprocess / compile / link / run), and what's the one-line fix: (a) #include &lt;stdoi.h&gt;; (b) printf("%f\n", "hello"); (c) calling my_kernel() that exists only in another .c you forgot to list; (d) a program that builds clean but prints nonsense timings.</summary><div class="body">(a) Preprocess: 'stdoi.h: No such file' — fix the typo. (b) Compile-time WARNING (with -Wall) + runtime garbage — UB; fix specifier to %s. (c) Link: undefined reference — add the .c/.o to the command. (d) Run(-time logic or UB): builds prove nothing; reach for 3.8's tools + suspicious-specifier audit. Stage identification from symptoms alone = half of build debugging.</div></details>
+<details><summary>2. Predict each printf's output, then verify: <code>printf("%d %d\n", 7/2, 7%2);</code> · <code>printf("%.3f\n", 1.0f/3.0f);</code> · <code>printf("%zu\n", sizeof(double));</code> · <code>printf("%d\n", 2.99);</code> (last one: what does -Wall say?)</summary><div class="body">3 1 (truncation + remainder — M1 L2); 0.333 (float promoted to double in varargs; %.3f rounds the display, M2 L1's format codes); 8 (%zu is THE specifier for sizeof's size_t — %d here is a portability bug); garbage + warning "format '%d' expects int, argument has type 'double'". If any surprised you, run them — the compile-run loop is 3 seconds.</div></details>
+<details><summary>3. Write square.c with double sq(double x) { return x*x; } and a main that prints sq(1e154)*0 == 0. Compile -O0 and -O2, diff the .s files, and answer: at which level does sq still exist as a called function? What happened to the arithmetic? (1e154² = 1e308 ≈ fp64 max — deliberate.)</summary><div class="body">-O0: real call instruction, real multiplication at runtime. -O2: no call — inlined and folded; and here's the M1 L8 easter egg: 1e154*1e154 ≈ 1e308 flirts with DBL_MAX; the compiler folds it to the same IEEE result the runtime would produce (compilers implement IEEE semantics at compile time — folding must not change observable results). ×0 → 0.0 either way (but note inf*0 would be NaN — if you push to 1e155, the fold produces inf, then NaN, faithfully). The optimizer is thorough precisely because it's bound by the rules — foreshadowing what happens when UB voids them (3.2).</div></details>
+<details><summary>4. The preprocessor trap, live: #define DOUBLE(x) x + x — evaluate 3 * DOUBLE(4) by hand, then fix the macro two ways (parens; then "don't use a macro"). What does the fixed-by-function version cost at -O2?</summary><div class="body">3 * DOUBLE(4) → 3 * 4 + 4 = 16, not 24 — the paste has no precedence armor. Fix 1: #define DOUBLE(x) ((x) + (x)) — full parens, still double-evaluates arguments (DOUBLE(i++) remains a bug). Fix 2: static inline double dbl(double x){ return x + x; } — type-checked, single evaluation. Cost at -O2: zero — inlined to the identical add (verify with -S). "Real function, zero cost" is why modern C reserves macros for conditional compilation and constants.</div></details>
+<details><summary>5. nm forensics: compile two files where a.c defines int shared_counter; and b.c declares extern int shared_counter; run nm on both .o files and identify the symbol's letter in each (D/B vs U). What breaks if BOTH files define it — and at which stage?</summary><div class="body">a.o: shared_counter as D or B (defined, data/bss — provides); b.o: U (undefined — needs). Both defining: the LINKER refuses (multiple definition) — two bodies for one name breaks matchmaking. (Historic gcc allowed duplicate tentative definitions; modern gcc ≥10 errors, which occasionally "breaks" ancient codebases at upgrade time — a real-world migration story you can now explain.) The extern keyword is the header-file machinery of 3.6 in miniature: declare everywhere, define once.</div></details>
+<details><summary>6. Flags experiment worth 10 minutes: take Exercise 1's program, add a loop summing i*i for i in 0..99,999,999 (int64), print the sum. Time -O0 vs -O2 vs -O2 with the print REMOVED. Explain the third result with §1's mental model.</summary><div class="body">-O0: ~0.2–0.5 s (real loop). -O2: often ~0 s — the compiler applies Gauss-like closed forms or vectorizes; with the sum printed it must still COMPUTE it. Print removed: -O2 deletes the entire loop — an unobserved result is dead code, and "equivalent program" includes "no program". Benchmark moral (critical for 3.9): unused results make benchmarks measure nothing; always consume outputs (print a checksum, or write to a volatile sink). You just discovered why benchmark harnesses look paranoid.</div></details>
+<details><summary>7. Design: your team's compile-and-run wrapper script crun (bash, ~6 lines): takes file.c, builds with the professional default flags into /tmp, runs on success only, forwards program arguments, and prints the build command it used. State which gotcha each design choice kills.</summary><div class="body"><code>#!/usr/bin/env bash
+set -e
+src=$1; shift
+bin=/tmp/$(basename "${src%.c}")
+echo "gcc -Wall -Wextra -O2 -g -std=c17 $src -o $bin -lm"
+gcc -Wall -Wextra -O2 -g -std=c17 "$src" -o "$bin" -lm && "$bin" "$@"</code>
+Choices → gotchas killed: && chain → stale-binary (never runs old build); flags baked in → the "forgot -Wall" drift; -lm at the END → library-order; echo of the command → the "what flags did I even use" archaeology; /tmp binary → no clutter, no accidental committing of binaries. Six lines of bash encoding five scars — that ratio is what automation is for. (make replaces this properly in 3.6.)</div></details>
+
+<div class="pager">
+  <a href="../curriculum.html">← Curriculum</a>
+  <a href="lesson-02.html">Next: Types, sizes & undefined behavior →</a>
+</div>
+<div class="footer">GPU Mastery · Module 3 · Lesson 1 — works offline · progress saved in your browser</div>
+</div>
+<script src="../assets/diagrams3.js"></script>
+<script src="../assets/app.js"></script>
+</body>
+</html>

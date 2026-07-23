@@ -1,0 +1,208 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>5.4 Errors & compute-sanitizer — GPU Mastery</title>
+<link rel="stylesheet" href="../assets/style.css">
+</head>
+<body data-lesson="m5l4">
+<nav><div class="inner">
+  <a class="logo" href="../index.html">GPU<span>Mastery</span></a>
+  <a class="item" href="../index.html">Home</a>
+  <a class="item on" href="../curriculum.html">Curriculum</a>
+  <a class="item" href="../labs.html">Labs</a>
+  <a class="item" href="../setup.html">Lab setup</a>
+  <a class="item" href="../prompt.html">Generator prompt</a>
+</div></nav>
+<div class="wrap">
+
+<div class="lesson-top">
+  <div><span class="badge">Module 5 · Lesson 4</span><span class="badge dim">≈ 3 h</span></div>
+  <button id="donebtn" class="donebtn">Mark lesson complete</button>
+</div>
+<h1>Error Handling & compute-sanitizer — alarms for a machine that fails later</h1>
+<p class="lead">3.8 armed your CPU code with gdb, ASan, UBSan. The GPU needs its own alarm panel, because 5.3's asynchrony adds a twist C never had: <em>the crash happens lines after the crime.</em> Today you learn where errors actually surface, which ones kill the context, and the sanitizer that names the guilty thread.</p>
+
+<h2>Concept</h2>
+
+<h3>Two channels, two moments</h3>
+<div class="diagram" data-diagram="m5l4-check" data-caption="API calls return errors NOW. Kernels report errors LATER — at the next sync. Two checks, two different bugs caught."></div>
+<pre><code>cudaError_t err = cudaMalloc(&amp;d_x, bytes);   // channel 1: return value, NOW
+saxpy&lt;&lt;&lt;grid, block&gt;&gt;&gt;(n, a, d_x, d_y);      // returns void. No error channel!
+err = cudaGetLastError();        // channel 1b: LAUNCH errors (bad config) — now
+err = cudaDeviceSynchronize();   // channel 2: EXECUTION errors (OOB, assert) — later
+// The kernel ran between those two lines. An illegal access inside it is
+// invisible until a sync-ish call — 5.3's queue diagram, now with sirens.</code></pre>
+<p>Why the split: a launch can fail immediately (block too big for the SM — 4.4's limits; grid dim 0; too much shared memory), and cudaGetLastError catches those before the kernel even runs. But an out-of-bounds read at thread 31,999 doesn't exist until the kernel EXECUTES, which (5.3) is after the CPU has moved on. So execution errors ride back on the next synchronizing call — which might be a cudaMemcpy twenty lines and three launches away. The error report names the WRONG line unless you force locality.</p>
+
+<h3>Sticky vs non-sticky: which errors kill the patient</h3>
+<div class="diagram" data-diagram="m5l4-sticky" data-caption="Non-sticky: the call fails, life goes on. Sticky: the context is dead — every later call returns the same corpse."></div>
+<pre><code>cudaMalloc(&amp;d_x, (size_t)1 &lt;&lt; 60);   // cudaErrorMemoryAllocation — NON-sticky:
+                                      // this call failed; the context is fine; free
+                                      // something and retry (3.5's malloc-can-fail).
+// vs
+kernel&lt;&lt;&lt;g,b&gt;&gt;&gt;(...)  → thread derefs a host pointer (5.3's world-crossing)
+                      → cudaErrorIllegalAddress — STICKY: the context is
+                        CORRUPTED. cudaMemcpy? Same error. cudaMalloc? Same
+                        error. cudaFree? Same. The only cure is process restart.</code></pre>
+<p>This is 3.2's undefined-behavior contract, enforced harder: on the CPU, UB might limp along corrupted; on the GPU, memory violations poison the entire CUDA context — every subsequent API call returns the original error, forever. The diagnostic signature is unmistakable once you know it: <em>"suddenly EVERYTHING fails with the same error"</em> means scroll UP — the first failure is the real one, everything after is echo. (This is also why 5.3's harness syncs before teardown: surface the sticky error where it happened, not in some destructor.)</p>
+
+<h3>The discipline: CHECK everything, bracket launches</h3>
+<pre><code>#define CUDA_CHECK(call) do {                                          \
+    cudaError_t err_ = (call);                                         \
+    if (err_ != cudaSuccess) {                                         \
+        fprintf(stderr, "CUDA error %s at %s:%d — %s\n",               \
+                cudaGetErrorName(err_), __FILE__, __LINE__,            \
+                cudaGetErrorString(err_));                             \
+        exit(1);                                                       \
+    }                                                                  \
+} while (0)                    // 3.6's macro hygiene: do/while, no stray ;
+
+// the launch bracket — this pair goes after EVERY kernel launch:
+saxpy&lt;&lt;&lt;grid, block&gt;&gt;&gt;(n, a, d_x, d_y);
+CUDA_CHECK(cudaGetLastError());          // launch-config errors, immediately
+#ifdef DEBUG
+CUDA_CHECK(cudaDeviceSynchronize());     // execution errors, LOCALIZED — debug only
+#endif                                    // (release: syncing every launch kills 5.9's overlap)</code></pre>
+<p>One subtlety worth knowing before an interview asks: <code>cudaGetLastError</code> returns AND CLEARS the error state; <code>cudaPeekAtLastError</code> reads without clearing. The bracket uses Get so a handled non-sticky error doesn't haunt the next check. And the <code>#ifdef DEBUG</code> line is a real engineering tradeoff, not laziness — the sync that localizes errors also serializes the pipeline (5.3's async is a feature you're turning off to debug). <code>CUDA_LAUNCH_BLOCKING=1</code> in the environment does the same globally without recompiling — Colab's quickest "where did it actually crash" switch.</p>
+
+<h3>compute-sanitizer: 3.8's alarm panel, GPU edition</h3>
+<div class="diagram" data-diagram="m5l4-sanitizer" data-caption="Four tools, four bug classes. memcheck is your default; racecheck earns its keep the day 5.5 introduces shared memory."></div>
+<pre><code>compute-sanitizer --tool memcheck  ./app   # OOB + misaligned access + leaks
+                                           #   = ASan's GPU twin (3.8)
+compute-sanitizer --tool initcheck ./app   # reads of uninitialized device memory
+                                           #   = 3.2's ghosts, caught in the act
+compute-sanitizer --tool racecheck ./app   # shared-memory data races (5.5's beat)
+compute-sanitizer --tool synccheck ./app   # invalid __syncthreads usage (5.6's beat)
+
+# compile with -lineinfo and reports name FILE:LINE, the exact thread,
+# the exact address, and which array it belongs to:
+#   Invalid __global__ read of size 4 bytes
+#   at saxpy(int, float, const float*, float*)+0x90  saxpy.cu:12
+#   by thread (64,0,0) in block (1953,0,0)
+#   Address 0x7f... is out of bounds, 4 bytes after alloc of size 4000000</code></pre>
+<p>Read that report like the machine log it is: <em>thread (64,0,0) in block (1953,0,0)</em> with blockDim 512 → global index i = 1953·512 + 64 = 1,000,000 — the 5.2 identity, inverted from the report. Cross-check with the other clue: "4 bytes after alloc of size 4,000,000" on a float array = element 1,000,000 of a 1,000,000-element array. Both clues name the same culprit: the first thread past n — the guard is missing or wrong. The sanitizer doesn't just say "bug" — it names the thread, the thread names the element, and the element names the fix. That's 3.8's "alarms turn symptoms into addresses" promise, kept on 100,000 threads at once.</p>
+
+<h2>Worked example</h2>
+<div class="card">
+<p><strong>Task:</strong> A staged crime, solved four ways — saxpy with the guard deleted, hunted up the localization ladder. This is the debug drill you'll run for real within the week.</p>
+<pre><code>__global__ void saxpy_bad(int n, float a, const float *x, float *y) {
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    y[i] = a * x[i] + y[i];                      // guard deleted. n=1,000,000,
+}                                                 // grid rounds up to 1,000,448 threads
+                                                  // → 448 threads trespass (5.2's math)
+
+RUNG 0 — no checks: prints "PASSED" some runs, garbage others, crashes rarely.
+         (The trespass lands in the SAME allocation's slack or a neighbor —
+          3.4's overflow physics: damage depends on the neighborhood.)
+RUNG 1 — CUDA_CHECK on the next memcpy: "illegal address at memcpy line 47".
+         True error, WRONG address — line 47 is innocent (async, 5.3).
+RUNG 2 — CUDA_LAUNCH_BLOCKING=1: error now reported at the launch line. Kernel
+         identified. But WHICH thread, WHICH access? Still guessing.
+RUNG 3 — compute-sanitizer memcheck (-lineinfo build): saxpy.cu:3, thread/block
+         named, "4 bytes after alloc of 4,000,000" → element 1,000,000 →
+         tail thread → THE GUARD. Fix is one line, found in one run.</code></pre>
+<p><strong>The lesson inside the lesson:</strong> each rung costs more runtime and buys more precision — checks are free-ish (always on), LAUNCH_BLOCKING is a debug session, sanitizer runs ~10–50× slow (3.8's ASan tax, same shape). The professional habit is entering at the RIGHT rung: "everything fails with one error" → sticky, scroll up (no tools needed); "wrong line blamed" → rung 2; "which of 100k threads" → rung 3. Diagnosis before instrumentation — M1 L7's measure-then-conclude, wearing a tool belt.</p>
+</div>
+
+<h2>Key points</h2>
+<ul class="keypoints">
+<li>Every CUDA API call returns cudaError_t; kernel launches return nothing — bracket them with cudaGetLastError (config, now) + sync (execution, later, debug builds).</li>
+<li>Execution errors surface at the NEXT synchronizing call — the reported line is often innocent. CUDA_LAUNCH_BLOCKING=1 or debug-syncs restore locality.</li>
+<li>Sticky errors (illegal address, asserts) corrupt the context: every later call echoes the same error; only a process restart recovers. First failure = real failure.</li>
+<li>cudaGetLastError clears the error; cudaPeekAtLastError doesn't — the bracket uses Get so handled errors don't haunt the next check.</li>
+<li>compute-sanitizer memcheck/initcheck/racecheck/synccheck = ASan-family for GPU; with -lineinfo it names file:line, thread, block, and the offending address's owner.</li>
+<li>The sanitizer report + the 5.2 index identity = the failing INPUT: thread coordinates invert to the element, the element names the bug. Reports are machine logs, not vibes.</li>
+</ul>
+
+<h2>Quiz</h2>
+<div class="quiz">
+  <div class="q">1. Mid-service, every CUDA call in your inference server starts returning cudaErrorIllegalAddress — including plain cudaMalloc calls that "can't" be wrong. The on-call engineer proposes adding retry loops around the mallocs. Verdict and correct playbook?</div>
+  <button class="opt">Good idea — transient GPU errors deserve retries</button>
+  <button class="opt" data-c="1">Useless: the error is STICKY — some earlier kernel corrupted the context, and every subsequent call echoes it. Retrying re-asks a corpse. Playbook: log + restart the process (the only cure), then reproduce offline under compute-sanitizer to find the original illegal access; in production, a watchdog that restarts on sticky errors is standard</button>
+  <button class="opt">Call cudaGetLastError to clear it and continue</button>
+  <button class="opt">Increase the GPU memory limit</button>
+  <div class="expl">The "everything fails identically" signature IS the diagnosis (sticky diagram). GetLastError clears the RECORD, not the corruption — the context stays dead (a classic interview trap). Real inference servers (Triton et al.) implement exactly this watchdog-restart pattern because one bad request's OOB must not brick the server for the next thousand requests — 5.3's scenario logic at service scale.</div>
+</div>
+<div class="quiz">
+  <div class="q">2. Your debug build (sync after every launch) shows the error at kernel K3's launch line. Your release build blames a cudaMemcpy 200 lines later. A teammate concludes "the release compiler miscompiles K3". Better hypothesis, and the 30-second test that settles it?</div>
+  <button class="opt">Agree — file a compiler bug</button>
+  <button class="opt">The memcpy really is broken in release</button>
+  <button class="opt" data-c="1">Nothing miscompiled: both builds crash in K3; they differ only in WHERE the async error SURFACES (debug syncs at the launch = local report; release's next sync is that memcpy = distant report). Test: run the RELEASE binary with CUDA_LAUNCH_BLOCKING=1 — if the error moves to K3's launch line, it's pure surfacing, case closed</button>
+  <button class="opt">Race condition that only debug timing hides</button>
+  <div class="expl">The reported line is where the error was NOTICED, not where it happened (channel-2 diagram). Moving error lines between build modes is the asynchrony signature, not a compiler one. LAUNCH_BLOCKING changes surfacing without changing compilation — a controlled experiment isolating one variable (M1 L7's method, debugging edition). Miscompilation exists but is the LAST hypothesis, after your own async model — 3.2's humility rule.</div>
+</div>
+
+<h2>Exercises</h2>
+<details><summary>Exercise 1 — Run the worked example's four-rung ladder yourself: delete saxpy's guard, then climb rung 0→3 on Colab, capturing each rung's actual output. Decode the sanitizer's thread/block coordinates back to the global index by hand (5.2's identity), and state which element it names.</summary><div class="body">
+<pre><code>nvcc -O2 -lineinfo bad.cu -o bad          # -lineinfo: sanitizer gets file:line
+./bad                                      # rung 0: note YOUR symptom (varies!)
+CUDA_LAUNCH_BLOCKING=1 ./bad               # rung 2
+compute-sanitizer --tool memcheck ./bad    # rung 3</code></pre>
+<p>With n=1,000,000 and block=256: grid=3907, total threads 1,000,192, trespassers 192. Sanitizer names e.g. thread (t,0,0) block (3906,0,0) → i = 3906·256+t; the FIRST reported access typically lands at i=1,000,000 — one past the end, textbook off-by-the-tail. Deliverable: a table of rung → what it told you → what it cost (wall time). Keep it; it's the interview answer to "walk me through debugging an illegal memory access" — which is asked, verbatim, constantly.</p>
+</div></details>
+<details><summary>Exercise 2 — Build the course repo's error infrastructure (ships in every project from here to 5.11): cuda_check.h with CUDA_CHECK, CUDA_CHECK_LAST (the launch bracket), debug-gated sync, and a Makefile with debug (-G -lineinfo, sync-on) / release (-O2 -lineinfo, sync-off) targets. Then prove each piece works by staging one error it catches.</summary><div class="body">
+<pre><code># Makefile targets — note -lineinfo in BOTH (it's free at runtime; -G is not):
+debug:   nvcc -G -lineinfo -DDEBUG bad.cu   # -G: device debug syms for cuda-gdb,
+release: nvcc -O2 -lineinfo bad.cu          #     disables optimization (SLOW — debug only)</code></pre>
+<p>Proofs: CUDA_CHECK → stage cudaMalloc of 2⁶⁰ bytes (non-sticky, named at the right line); CUDA_CHECK_LAST → launch with block=(2048,1,1), exceeding the 1024/block limit (4.4's ceiling — caught by getLastError BEFORE execution, proving the config channel); debug-sync → the guardless kernel (error at launch line in debug, distant in release — quiz 2 reproduced on purpose). The -lineinfo/-G distinction is a real gotcha: -lineinfo is metadata (keep it always, even production — profilers use it too, 5.10); -G changes codegen (never benchmark it: M1 L7's rule about measuring what you'll ship, 3.6's -O0 lesson).</p>
+</div></details>
+
+<hr>
+<h1>Go deeper — the rest of the alarm panel</h1>
+
+<h2>1. The error taxonomy you'll actually meet</h2>
+<pre><code>cudaErrorMemoryAllocation      non-sticky   OOM: free/retry/shrink batch (3.5's law)
+cudaErrorInvalidValue          non-sticky   bad arg (n=0 memcpy is FINE; null dst isn't)
+cudaErrorInvalidConfiguration  non-sticky   block too big / too much smem (4.4 limits)
+cudaErrorIllegalAddress        STICKY       OOB / world-crossing deref — restart
+cudaErrorAssert                STICKY       device-side assert(x) fired — restart
+cudaErrorLaunchTimeout         STICKY       display-GPU watchdog killed a long kernel
+                                            (Colab/headless: no watchdog; laptops: yes)
+cudaErrorMisalignedAddress     STICKY       float4 loads off 16-B alignment (5.7's beat)</code></pre>
+
+<h2>2. printf and assert inside kernels</h2>
+<pre><code>__global__ void k(...) {
+    if (blockIdx.x == 0 &amp;&amp; threadIdx.x == 0)   // gate it! 100k threads × printf
+        printf("n=%d x[0]=%f\n", n, x[0]);      // = 100k lines of soup
+    assert(i &lt; n);                               // fires → cudaErrorAssert (sticky)
+}
+// printf writes to a device-side ring buffer (default 1 MB), flushed at sync
+// points — no sync, no output (5.3's asynchrony biting printf-debugging!).
+// Ungated printf from many threads: interleaved, truncated-at-1MB soup.
+// Rule: printf for exploring ONE thread's view; sanitizer for finding WHICH
+// thread; assert for contracts (3.3) you want enforced on-device in debug.</code></pre>
+
+<h2>3. cuda-gdb, in one honest paragraph</h2>
+<p>It exists, it's gdb (3.8's muscle memory transfers: break/run/print/backtrace), compiled with <code>-G</code>, plus GPU verbs: <code>cuda thread (31,0,0)</code> switches focus to a thread, <code>info cuda kernels</code> lists what's resident. Honesty: on 100,000 threads, single-stepping is a microscope when you usually need the sanitizer's smoke detector — pros reach for cuda-gdb AFTER memcheck names the thread, to watch that one thread's variables evolve. It also can't attach usefully inside Colab notebooks (no TTY); it shines on local boxes. Know it exists, know the -G flag, don't feel guilty for using it monthly, not daily.</p>
+
+<h2>4. Gotchas</h2>
+<div class="gotcha"><strong>Checking the launch but not syncing — then blaming the next call.</strong> The bracket's two lines catch DIFFERENT errors (config vs execution). Teams that only check getLastError ship quiz 2's confusion into production logs.</div>
+<div class="gotcha"><strong>cudaGetLastError as a cleaner for sticky errors.</strong> It clears the flag, not the corruption (quiz 1's trap). The context is still dead; you've just deleted the evidence.</div>
+<div class="gotcha"><strong>Benchmarking -G builds.</strong> -G disables device optimization — numbers are fiction (3.6's -O0 lesson, GPU edition). -lineinfo is the always-on flag; -G is the debug-session flag.</div>
+<div class="gotcha"><strong>Sanitizer clean ≠ correct.</strong> memcheck proves no ILLEGAL access — quiz-5.3's aliasing bug (wrong-but-legal reads) sails through. Sanitizers catch crimes, fixtures catch lies (M2 L6's layers: both, always).</div>
+<div class="gotcha"><strong>printf-debugging without a sync.</strong> Kernel crashed before the flush point → your printf "never ran" (it ran; the buffer died with the context). Sync early when printf-hunting, or the absence of output misleads.</div>
+<div class="gotcha"><strong>The laptop watchdog.</strong> A 10-second kernel on a DISPLAY GPU gets killed (LaunchTimeout, sticky) — students conclude "my kernel has a bug" when the bug is running on the GPU that draws the desktop. Colab/cluster GPUs have no watchdog. Know which machine you're on (5.1's machine model, line 1).</div>
+
+<h2>Scenario — the 40-minute production fire, replayed with this lesson</h2>
+<p>An ML platform team's overnight batch job dies at 3 a.m.: logs show <code>illegal address at allreduce_kernel</code> — so the on-call pages the distributed-training owner, who spends 40 minutes proving allreduce innocent. The real bug: a data-loader kernel two stages EARLIER read past a ragged batch's end (an OOB born from an unpadded final batch — 5.2's tail, in disguise); its sticky error surfaced at the next sync, which happened to live inside allreduce. The fix took five minutes once someone ran the failing shard under compute-sanitizer. Post-mortem actions — the ones this lesson already gave you: (1) launch brackets everywhere, so surfacing distance shrinks from "two stages" to "one launch"; (2) a CI job running the sanitizer on every kernel's fixture suite weekly (crimes caught before 3 a.m.); (3) the runbook's first line for illegal-address pages: <em>"the blamed kernel is the witness, not the suspect — find the first error, or sanitize the repro."</em> Cost of the pattern-knowledge you now have: one lesson. Cost of learning it at 3 a.m.: 40 minutes, one wrong page, and a very tired allreduce owner.</p>
+
+<h2>Practice</h2>
+<details><summary>1. Classify: (a) cudaMemcpy with byte count 0, (b) launch with grid=(0,1,1), (c) kernel derefs nullptr, (d) cudaMalloc returns OOM, (e) device assert fires. Sticky or not, which channel reports it, and the one-line response to each.</summary><div class="body">(a) Success — zero-byte copies are legal no-ops (5.3 P7's n=0 contract). (b) cudaErrorInvalidConfiguration, channel 1b (getLastError), non-sticky: fix the grid math (5.2's ceiling formula outputs ≥1 for n≥1 — grid 0 means n was 0 or the formula is wrong upstream). (c) IllegalAddress, channel 2 (next sync), STICKY: restart + sanitizer on the repro. (d) Non-sticky, channel 1 return value: shrink the ask or free (3.5). (e) cudaErrorAssert, channel 2, STICKY: the contract told you exactly what failed — read the assert's message, fix the caller (3.3's contract philosophy: the assert did its job).</div></details>
+<details><summary>2. Why does the launch bracket use cudaGetLastError (clearing) rather than cudaPeekAtLastError — and construct the specific two-error scenario where using Peek in the bracket causes a FALSE positive on an innocent kernel.</summary><div class="body">Scenario: kernel A's launch fails (InvalidConfiguration, non-sticky, recorded). Your code handles it (shrinks the block, relaunches fine). Later, innocent kernel B's bracket calls Peek — which reads the STILL-UNCLEARED record from A's original failure and convicts B. Get clears on read: each bracket consumes its own kernel's verdict, leaving a clean slate. The general principle is 3.5's ownership, applied to error state: whoever CHECKS the error OWNS clearing it — dangling error records mislead exactly like dangling pointers. (Peek's legitimate niche: checking without consuming when a later handler also needs to see it — rare, deliberate.)</div></details>
+<details><summary>3. A kernel produces correct results every run, but compute-sanitizer initcheck flags "read of uninitialized global memory" in it. Teammate: "false positive, results are right — ship it." Give the 3.2-grounded rebuttal and the two most likely innocent-LOOKING causes worth finding.</summary><div class="body">Rebuttal: "correct today" + uninitialized read = 3.2's UB contract — the read returns SOMETHING (currently harmless: maybe multiplied by zero, maybe overwritten later), but its value depends on allocator history (5.3 P3's session-dependent ghosts); a driver update, allocation-order change, or bigger batch reshuffles the heap and the answer changes silently. Likely causes: (1) padded/rounded-up allocation where the kernel reads the full padded width but only the valid region is initialized (M2 L5's shapes vs storage); (2) a first-iteration read of an accumulator buffer initialized only from iteration 2 onward (works because ×0 or overwritten — until someone changes the loop). Both are one-line cudaMemset fixes. "Sanitizer findings are load-bearing even when outputs pass" — that's the fixture+alarm two-layer doctrine (M2 L6) in one sentence.</div></details>
+<details><summary>4. Your service must survive a bad request that triggers an illegal access, with &lt;2 s recovery budget. Sticky errors kill the process. Design the architecture in four lines (hint: 3.5's process isolation + this lesson's stickiness).</summary><div class="body">(1) CUDA work lives in a WORKER process (or pool), not the serving process — stickiness dies at the process boundary (the OS reclaims everything: 3.5 §1's "process exit is the ultimate free"). (2) Serving process watchdogs workers: sticky error → SIGKILL + respawn (~1 s including context re-init; keep a warm spare to hit the budget). (3) The poisoned REQUEST is quarantined + logged for offline sanitizer replay (the scenario's runbook). (4) Health check = a tiny known-answer kernel (round-trip fixture!) after respawn. This is genuinely how production inference servers handle it — your 3.5/5.3/5.4 vocabulary just designed one.</div></details>
+<details><summary>5. Rank these four builds for (i) daily development, (ii) benchmark runs, (iii) sanitizer runs, (iv) cuda-gdb sessions — and name the single flag that belongs in ALL four: -O2; -O2 -lineinfo; -G -lineinfo; -O0.</summary><div class="body">(i) -O2 -lineinfo + DEBUG sync-brackets: real codegen, named lines, localized errors. (ii) -O2 -lineinfo, syncs OFF: measure what ships (-lineinfo costs nothing at runtime — it's metadata). (iii) -O2 -lineinfo under compute-sanitizer: sanitize OPTIMIZED code (bugs can vanish at -G like 3.6's -O0 heisenbugs; catch what production runs). (iv) -G -lineinfo: only here does -G belong — real device debugging needs unoptimized, symbol-rich code. The universal flag: -lineinfo (sanitizer lines, profiler lines in 5.10, zero runtime cost). Plain -O2 and -O0 appear nowhere: one is blind, the other is fiction.</div></details>
+<details><summary>6. compute-sanitizer memcheck reports "Invalid __global__ write of size 4, address is 16 bytes BEFORE alloc of size 4000000". Before opening the code: what bug class writes BEFORE an array, which two arithmetic bugs from this module produce it, and what does "size 4" narrow down?</summary><div class="body">Negative indexing (writes AFTER = tail/guard bugs; writes BEFORE = the index went below the base). Producers: (1) signed underflow/reversed arithmetic in the index — e.g., <code>i - offset</code> where offset &gt; i (halo/stencil patterns, 5.5's territory: element i-1 at i=0 → address −4... but −16 means i−4, a radius-4 stencil's left edge with no clamp); (2) a 5.2-style identity typo like blockIdx−1 sneaking into the formula. "Size 4" = a 4-byte element (float/int — consistent with the float array). "16 bytes before" ÷ 4 = index −4 EXACTLY: the report literally hands you the offending offset. Address arithmetic on sanitizer output is a skill (M1 L2 + 3.4's pointer math) — the fix (clamp or skip the halo edge, 5.5) is usually visible before the editor opens.</div></details>
+<details><summary>7. Write the module's debugging decision tree as an 8-line runbook: symptom → first move, covering: everything-fails-identically; wrong-line blamed; works-debug-fails-release; garbage-but-no-error; sanitizer-clean-but-wrong; hangs-forever; correct-but-slow; works-Colab-fails-laptop. Each line cites its lesson.</summary><div class="body">(1) Everything fails identically → sticky: scroll to FIRST error, restart, sanitize the repro (5.4). (2) Wrong line blamed → LAUNCH_BLOCKING=1 or debug syncs: surfacing ≠ scene (5.4 quiz 2). (3) Debug-passes/release-fails → usually surfacing distance or a race debug-timing hides; LAUNCH_BLOCKING on release first (5.4), racecheck second (5.5). (4) Garbage, no error → wrong-but-legal: fixtures + the plumbing suite localize the layer (5.3 P7, M2 L6). (5) Sanitizer-clean-but-wrong → logic bug: shrink n until traceable, print ONE thread's view (5.4 §printf), diff against the CPU oracle (M2 L6's reference-implementation layer). (6) Hangs → watchdogless infinite loop or a __syncthreads divergence deadlock (5.6): synccheck + inspect loop bounds. (7) Correct-but-slow → not a bug: profiler first, guesses never (5.10, M1 L7). (8) Colab-yes/laptop-no → machine model diff: arch flags (5.1), watchdog (5.4 gotcha), or memory size — diff the two machine-model files (5.1's generator earning rent). The tree's meta-rule: every branch starts by NAMING the symptom class, and each class has a cheapest-first move — diagnosis is a search problem, and you now hold the heuristic (3.8's closing promise, delivered).</div></details>
+
+<div class="pager">
+  <a href="lesson-03.html">← Memory management</a>
+  <a href="lesson-05.html">Next: Shared memory & tiling →</a>
+</div>
+<div class="footer">GPU Mastery · Module 5 · Lesson 4 — works offline · progress saved in your browser</div>
+</div>
+<script src="../assets/diagrams5.js"></script>
+<script src="../assets/app.js"></script>
+</body>
+</html>

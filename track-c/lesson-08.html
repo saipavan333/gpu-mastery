@@ -1,0 +1,169 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>C8 Vulkan Sync — Command Buffers &amp; Barriers — GPU Mastery</title>
+<link rel="stylesheet" href="../assets/style.css">
+</head>
+<body data-lesson="cl8">
+<nav><div class="inner">
+  <a class="logo" href="../index.html">GPU<span>Mastery</span></a>
+  <a class="item" href="../index.html">Home</a>
+  <a class="item on" href="../curriculum.html">Curriculum</a>
+  <a class="item" href="../labs.html">Labs</a>
+  <a class="item" href="../setup.html">Lab setup</a>
+  <a class="item" href="../prompt.html">Generator prompt</a>
+</div></nav>
+<div class="wrap">
+
+<div class="lesson-top">
+  <div><span class="badge">Track C · Lesson 8</span><span class="badge dim">≈ 4 h</span></div>
+  <button id="donebtn" class="donebtn">Mark lesson complete</button>
+</div>
+<h1>Vulkan Sync — the explicit machine, and why it's just 5.9 renamed</h1>
+<p class="lead">Vulkan's synchronization is the chapter that breaks people — and it's the one you're most prepared for, because it's 5.9's events-and-streams model with new names. Command buffers are recorded launches, semaphores and fences are events, barriers make writes visible before reads, and frames-in-flight is 5.9's depth-3 ring verbatim. Today: the translation table that makes Vulkan sync tractable, and the validation layers that are 5.4's sanitizer for it.</p>
+
+<p class="small dim">Lab note: sync is where Vulkan bugs live, and they're invisible without the validation layers on (your 5.4 sanitizer). Build on any GPU with the LunarG SDK; the mental model below is the whole lesson. Vulkan 1.4 makes synchronization2 and timeline semaphores core — verified against the docs.</p>
+
+<h2>Concept</h2>
+
+<h3>Record, submit, reuse: command buffers</h3>
+<p>Vulkan work is <em>recorded</em> into command buffers and <em>submitted</em> to queues (C3). This is 5.2's recorded-launches made central: you record a sequence of commands (bind pipeline, bind descriptors, draw/dispatch) once, and submit it to a <code>VkQueue</code> (a stream, 5.9) to execute. The payoff over OpenGL is that recording is thread-safe per command buffer — many CPU cores record in parallel, then one thread submits (C3's scenario). Command buffers can be re-recorded each frame (the common case) or recorded once and replayed (static geometry). The key mental shift: submitting a command buffer doesn't run it immediately — it's asynchronous (5.3/5.9), queued on the GPU's timeline, which is exactly why you need synchronization to know when it's safe to read results or reuse resources.</p>
+
+<h3>The sync chapter: barriers, semaphores, fences, timeline semaphores</h3>
+<div class="diagram" data-diagram="c8-sync" data-caption="Vulkan sync is 5.9's event graph renamed: VkQueue is a stream, semaphores are GPU→GPU events, fences are GPU→CPU events, pipeline barriers order work within a queue, timeline semaphores are counter events."></div>
+<p>Here is the translation table that dissolves the fear. A <strong>VkQueue</strong> is a CUDA stream (5.9) — the ordered timeline you submit to. A <strong>VkSemaphore</strong> is a GPU→GPU event (5.9): it orders work between queues or between a submit and a present (e.g., "don't start rendering until the swapchain image is acquired"). A <strong>VkFence</strong> is a GPU→CPU event: the CPU waits on it to know a submission finished ("is this frame's command buffer done so I can reuse it?"). A <strong>pipeline barrier</strong> orders work <em>within</em> a queue and — crucially — makes one stage's memory writes visible to a later stage's reads (the memory-visibility part, next). A <strong>timeline semaphore</strong> (core in Vulkan 1.4) is a monotonically increasing counter you can wait for a value on — a more flexible event that subsumes many fence/semaphore uses. Every one of these is a concept from 5.9's async model; provide this table in your notes and Vulkan's scariest chapter becomes "5.9 with a dictionary." The reason it feels hard is the same reason C3 felt hard: it's all explicit and presented at once, but the underlying ideas — order this after that, make writes visible before reads, tell the CPU when the GPU is done — you already own.</p>
+
+<h3>The barrier: make WHOSE writes visible to WHOM, WHEN</h3>
+<div class="diagram" data-diagram="c8-barrier" data-caption="A pipeline barrier specifies a source stage+access and a destination stage+access — make the source's writes available and visible before the destination's reads — plus an optional image layout transition."></div>
+<p>The pipeline barrier is where people actually get stuck, so pin down what it answers: <em>make whose writes visible to whom, and when</em>. It takes a source stage + access (e.g., "color attachment writes finish") and a destination stage + access (e.g., "before shader reads"), and it inserts the ordering and the memory-visibility guarantee between them. Miss it and you get 5.4's race in graphics dress: the reader sees stale or partial data — a flickering texture, a black frame, a garbage buffer. Barriers also carry <strong>image layout transitions</strong>: a GPU may physically re-tile an image for its next use (a color attachment laid out for rendering vs. a texture laid out for sampling), and the barrier is where that transition happens. Vulkan 1.4's <strong>synchronization2</strong> streamlines the API (cleaner stage/access masks) but the model is unchanged. The discipline is the same as 5.9's: every hazard — write-then-read, read-then-write, layout change — is yours to declare, and the safety net that catches the ones you miss is the validation layers.</p>
+
+<h3>Frames-in-flight: 5.9's ring, and the swapchain dance</h3>
+<div class="diagram" data-diagram="c8-frames" data-caption="Frames-in-flight is a depth-3 ring: the CPU records frame N+2 while the GPU renders N+1 while N presents — 5.9's pipeline ring, so neither processor idles. Each frame needs its own command buffer and sync objects."></div>
+<p>To keep the CPU and GPU both busy, you pipeline frames: while the GPU renders frame N+1, the CPU records frame N+2, and frame N is presented — a depth-2-or-3 ring, which is 5.9's frames-in-flight pattern verbatim. Each in-flight frame needs its <em>own</em> command buffer and synchronization objects (you can't reuse a command buffer the GPU is still executing — a fence tells you when it's free). Wrapped around this is the <strong>swapchain dance</strong>: acquire an image (a semaphore signals when it's ready), render into it (waiting on that semaphore), submit, then present (a semaphore signals when rendering is done so the display can show it). Get the frame ring or the swapchain sync wrong and you get tearing, stutter, or a validation storm. This is the single most 5.9-shaped part of graphics — the same "keep the pipeline full without hazards" reasoning, now with swapchain images as the resource being cycled.</p>
+
+<h2>Worked example</h2>
+<div class="card">
+<p><strong>Task:</strong> Diagnose a classic Vulkan bug — a post-process compute pass reads a texture the render pass wrote, and the output flickers between correct and garbage. Prediction first: what's missing, and why is the bug intermittent rather than consistent?</p>
+<pre><code>the pipeline: render pass writes sceneColor (COLOR_ATTACHMENT_WRITE)
+              → compute pass reads sceneColor (SHADER_READ) for tone-mapping
+symptom: output flickers correct/garbage frame to frame.
+Prediction: a missing pipeline barrier between the write and the read. The compute
+  pass sometimes starts reading before the render pass's writes are visible (and
+  before the image layout transitions to SHADER_READ_ONLY) — a race (5.4).
+why intermittent: it's a RACE — whether the reader sees the writes depends on GPU
+  timing, which varies frame to frame and machine to machine, so it "works on my
+  GPU" and fails on another (D2's lesson: a test certifies the machine it ran on).
+fix: insert a barrier: srcStage=COLOR_ATTACHMENT_OUTPUT, srcAccess=COLOR_WRITE →
+  dstStage=COMPUTE_SHADER, dstAccess=SHADER_READ, + layout COLOR_ATTACHMENT →
+  SHADER_READ_ONLY. Now the compute read waits for the writes to be visible.</code></pre>
+<p><strong>What to internalize:</strong> the intermittency is the diagnostic fingerprint. A missing barrier is a data race (5.4), and races are timing-dependent — the reader wins or loses against the writer depending on GPU scheduling, so the bug appears and vanishes and, worst of all, may work perfectly on your development GPU and fail on a customer's. This is D2's "a test certifies the machine it ran on" in graphics: green on your hardware proves nothing about the timing on another. The fix is to make the ordering explicit — a pipeline barrier declaring "the color writes must be available and visible, and the image transitioned to shader-read layout, before the compute pass reads" — which is exactly 5.9's hazard declaration, now with an image layout attached. And the reason you'd have caught this instantly is the validation layers: with synchronization validation on, Vulkan reports the missing barrier as a hazard the moment it happens, turning an intermittent field bug into a deterministic development-time error. Never develop Vulkan without them — they are 5.4's sanitizer, and this class of bug is precisely what they exist to catch.</p>
+</div>
+
+<h2>Key points</h2>
+<ul class="keypoints">
+<li>Work is recorded into command buffers (5.2's recorded launches) and submitted to queues (5.9 streams) asynchronously — submission doesn't run immediately, which is why synchronization is needed.</li>
+<li>The sync translation table: VkQueue = stream (5.9), VkSemaphore = GPU→GPU event, VkFence = GPU→CPU event, pipeline barrier = in-queue ordering + memory visibility, timeline semaphore = counter event (core in 1.4).</li>
+<li>A pipeline barrier makes a source stage's writes visible to a destination stage's reads (src/dst stage+access) and carries image layout transitions — miss it and it's 5.4's race (stale/garbage data).</li>
+<li>Frames-in-flight is 5.9's depth-2/3 ring (CPU records N+2 while GPU renders N+1 while N presents); each in-flight frame needs its own command buffer and sync objects, cycled by a fence.</li>
+<li>The swapchain dance uses semaphores: acquire (signal when ready) → render (wait) → present (signal when done) — get it wrong and you get tearing, stutter, or validation errors.</li>
+<li>Validation layers (synchronization validation on) are 5.4's sanitizer for Vulkan — they turn intermittent missing-barrier races into deterministic development-time errors. Never develop without them.</li>
+</ul>
+
+<h2>Quiz</h2>
+<div class="quiz">
+  <div class="q">1. A compute post-process reads an image the render pass produced, and the result flickers between correct and corrupt — and it's fine on the dev machine but corrupt on a tester's different GPU. What's the bug class, and why the machine-dependence?</div>
+  <button class="opt">A driver bug on the tester's GPU; file it with the vendor</button>
+  <button class="opt" data-c="1">A missing pipeline barrier between the render pass's writes and the compute read — a data race (5.4). The compute pass sometimes starts before the color writes are visible and before the image is transitioned to a shader-read layout. It's intermittent and machine-dependent because races depend on GPU scheduling, which varies by hardware and frame — so it can pass on the dev GPU and fail on another (a test certifies the machine it ran on, D2). Fix: add the barrier (COLOR_WRITE → SHADER_READ + layout transition), and turn on synchronization validation, which flags the missing barrier deterministically at dev time</button>
+  <button class="opt">The compute shader math is wrong; it only looks like corruption</button>
+  <button class="opt">The image resolution differs between machines</button>
+  <div class="expl">Option 1 blames the driver for the app's missing synchronization (a common wrong reflex). Options 3/4 don't explain the intermittency or machine-dependence. The correct answer identifies the bug class (missing barrier = data race, 5.4) and explains the fingerprint: races are timing-dependent, so they vary by GPU and frame, which is why "works on my machine" is worthless for synchronization — the same lesson as D2's wavefront bug (a test certifies only the machine it ran on). The fix is the explicit barrier plus synchronization validation to make the race a deterministic dev-time error. Intermittent + machine-dependent = race, until proven otherwise.</div>
+</div>
+<div class="quiz">
+  <div class="q">2. A newcomer is overwhelmed by Vulkan's synchronization — semaphores, fences, barriers, timeline semaphores, layouts. What's the reframing that makes it learnable, and which core lesson is it?</div>
+  <button class="opt">There's no reframing; Vulkan sync is genuinely a new and separate discipline</button>
+  <button class="opt" data-c="1">It's 5.9's async/events model with new names: a queue is a stream, a semaphore is a GPU→GPU event, a fence is a GPU→CPU event, a pipeline barrier orders work and makes writes visible within a queue, and a timeline semaphore is a counter event. The underlying questions — order this after that, make writes visible before reads, tell the CPU when the GPU is done, keep frames pipelined without hazards — are exactly 5.9's. Write the translation table down and the scary chapter becomes 5.9 with a dictionary; the only genuinely new bit is image layout transitions riding along on barriers</button>
+  <button class="opt">Just use a high-level engine so you never touch sync</button>
+  <button class="opt">Copy a sync setup from a tutorial and never change it</button>
+  <div class="expl">Options 3/4 avoid understanding rather than build it (and copied sync breaks the moment your pipeline differs). The correct answer is the lesson's thesis: Vulkan sync is 5.9's events-and-streams model renamed, so a person who learned the core async lesson already owns the concepts — queue/stream, semaphore/fence as events, barrier as hazard-ordering-plus-visibility. The translation table converts overwhelm into recognition, with image layouts as the one new wrinkle. This is the same move as C3 (Vulkan objects = Module 5 concepts): the physics transfers; only the vocabulary and the ownership burden are new.</div>
+</div>
+
+<h2>Exercises</h2>
+<details><summary>Exercise 1 — Write out the full sync translation table from memory (CUDA/5.9 concept ↔ Vulkan object), then annotate a real triangle-with-a-compute-post-process frame: mark every place a semaphore, fence, or barrier is needed and say which hazard each one prevents.</summary><div class="body">
+<p>Expected table: stream ↔ VkQueue; GPU→GPU event ↔ VkSemaphore; GPU→CPU event ↔ VkFence; in-queue ordering + visibility ↔ pipeline barrier; counter event ↔ timeline semaphore. Annotated frame: a semaphore between swapchain-acquire and render-start (don't render into an image not yet ready); a barrier between the render pass write and the compute read (visibility + layout, the worked example); a semaphore between render-done and present (don't show a half-rendered image); a fence per in-flight frame so the CPU knows the command buffer is free to re-record. Deliverable: the table plus the annotated frame with each sync object labeled by the hazard it prevents. This is the artifact that makes Vulkan sync a lookup, not a mystery — keep it next to your code.</p>
+</div></details>
+<details><summary>Exercise 2 — Deliberately remove a barrier (with validation layers ON) and read the error. Then remove it with validation OFF and observe the intermittent visual corruption. Compare the two experiences and write the one-sentence rule about developing Vulkan.</summary><div class="body">
+<p>Expected: with synchronization validation ON, removing the barrier produces an immediate, specific error naming the missing hazard and the resources involved — a deterministic, actionable message. With validation OFF, you get intermittent visual corruption that varies by frame and is nearly impossible to diagnose by looking, and may not even reproduce on your GPU. The contrast is the whole point: validation turns a timing-dependent race into a deterministic error, exactly as 5.4's sanitizer did for memory bugs. The one-sentence rule: "never develop Vulkan with the validation layers off — they are the sanitizer, and sync bugs are invisible without them." Deliverable: the validation error text, a description of the corruption without it, and the rule. You'll never turn them off again.</p>
+</div></details>
+
+<hr>
+<h1>Go deeper — the explicit sync model in full</h1>
+
+<h2>1. The four sync primitives, and when to reach for each</h2>
+<pre><code>primitive           scope              answers                          5.9 concept
+──────────────────  ─────────────────  ───────────────────────────────  ────────────
+pipeline barrier    within one queue   order stage A before stage B +   in-stream
+                                       make A's writes visible to B      ordering
+VkSemaphore         between queues /   don't start X until Y signals    GPU→GPU event
+  (binary)          submit↔present     (e.g. acquire → render)
+VkFence             GPU → CPU          has this submission finished?    GPU→CPU event
+                                       (is the command buffer free?)
+VkSemaphore         flexible, value-   wait until the counter reaches N  counter event
+  (timeline, 1.4)   based              (subsumes many fence/sema uses)
+rule: barrier for in-queue hazards; binary semaphore for queue/present ordering;
+fence (or timeline) for CPU↔GPU. Timeline semaphores (core in 1.4) simplify a lot —
+prefer them for new code.</code></pre>
+
+<h2>2. Image layouts: the graphics-only wrinkle</h2>
+<pre><code>the same image is used in different layouts for different jobs (perf reasons):
+  COLOR_ATTACHMENT_OPTIMAL   — while being rendered into
+  SHADER_READ_ONLY_OPTIMAL   — while being sampled as a texture
+  PRESENT_SRC                 — while being shown by the display
+  TRANSFER_DST / GENERAL      — while being copied to / read-written by compute
+transitions happen INSIDE barriers (you specify oldLayout → newLayout). The GPU may
+physically re-tile the memory. Forget a transition → validation error or garbage/black.
+this is the one genuinely new concept beyond 5.9 — memory VISIBILITY you already knew;
+memory LAYOUT (how the image is physically arranged for its current use) is new to graphics.</code></pre>
+
+<h2>3. Frames-in-flight and the swapchain, step by step</h2>
+<pre><code>per frame (ring of 2–3, each with its own command buffer + sync objects):
+  1. wait on this frame-slot's FENCE (last use of these objects is done) — CPU↔GPU
+  2. acquire a swapchain image (SEMAPHORE A signals when it's ready)
+  3. record + submit rendering: WAIT on semaphore A, SIGNAL semaphore B + the fence
+  4. present: WAIT on semaphore B (don't show a half-drawn image)
+  5. advance to the next frame slot
+get the fence wrong → you stomp a command buffer the GPU is using (corruption).
+get the semaphores wrong → tearing or showing an unfinished frame.
+this is 5.9's depth-3 ring with swapchain images as the cycled resource — the same
+"keep both processors busy without hazards" reasoning, one more time.</code></pre>
+
+<h2>Gotchas</h2>
+<div class="gotcha"><strong>Developing with validation layers off.</strong> Sync bugs are races — intermittent, timing-dependent, often invisible on your GPU. Synchronization validation makes them deterministic dev-time errors (5.4's sanitizer). Always on while developing; off only for shipping.</div>
+<div class="gotcha"><strong>Missing a barrier between a writer and a reader.</strong> A compute/render pass whose output another pass reads needs a barrier (visibility + layout). Miss it → stale/garbage data, intermittently (the worked example). Every cross-pass dependency is a barrier.</div>
+<div class="gotcha"><strong>Forgetting an image layout transition.</strong> An image sampled as a texture must be in SHADER_READ_ONLY; presented must be in PRESENT_SRC. Wrong layout → validation error or black/garbage. Layouts are the graphics-only sync wrinkle (Go-deeper §2).</div>
+<div class="gotcha"><strong>Reusing a command buffer the GPU is still executing.</strong> You must wait on the frame's fence before re-recording its command buffer, or you corrupt in-flight work. Each in-flight frame needs its own objects, cycled by a fence.</div>
+<div class="gotcha"><strong>Over-synchronizing (a full barrier everywhere).</strong> A pipeline barrier that waits for ALL stages/access serializes the GPU and kills overlap (5.9's whole point). Use the narrowest stage/access masks that prevent the actual hazard — precise barriers, not sledgehammers.</div>
+<div class="gotcha"><strong>Trusting "works on my GPU" for sync.</strong> Races pass or fail by timing, which varies per hardware (D2). Sync correctness must be validated (layers) and ideally tested across vendors, not confirmed by "it looked fine here."</div>
+
+<h2>Scenario — the flicker that only some players saw</h2>
+<p>A game ships with a new tone-mapping post-process — a compute pass that reads the rendered scene color and remaps it — and it looks flawless throughout development and QA on the studio's NVIDIA workstations. After launch, a subset of players on certain AMD and Intel GPUs report intermittent flickering: every few seconds the screen flashes garbage for a frame. The bug never reproduces in the office, which makes it maddening, and the first theories blame the players' drivers. A graphics engineer who understands the sync model recognizes the fingerprint immediately: intermittent, timing-dependent, and machine-dependent is the signature of a data race, and the likely culprit is a missing pipeline barrier between the render pass that writes the scene color and the compute pass that reads it. Sure enough, the barrier — which should make the color writes visible and transition the image to a shader-read layout before the compute pass reads — was omitted, and on the studio's GPUs the timing happened to always let the writes complete first, so it never flickered there. On other hardware with different scheduling, the compute pass sometimes won the race and read stale or partially-written data — a garbage frame. The fix is a single correct barrier (color-write → shader-read, with the layout transition), and the deeper fix is process: they turn on synchronization validation, which flags the missing barrier deterministically, and add it to CI so the next missing barrier fails the build instead of shipping. The morals are the sync lesson's spine and a callback to D2. First, "works on my machine" is worthless for synchronization, because a missing barrier is a race and races are decided by hardware timing — the exact same lesson as the wavefront-64 bug, that a test certifies only the machine it ran on. Second, Vulkan's explicitness is a double-edged gift: it hands you control, which means it hands you the responsibility for every hazard, and the validation layers are the non-negotiable safety net that turns invisible timing bugs into visible, fixable errors — the sanitizer discipline from 5.4, now guarding the frame. The engineers who develop with validation on ship this correctly; the ones who turned it off "for speed" ship the flicker to the players whose GPUs schedule differently.</p>
+
+<h2>Practice</h2>
+<details><summary>1. Give the Vulkan primitive for each synchronization job and its 5.9 concept: (a) don't start rendering until the swapchain image is ready; (b) tell the CPU the frame's command buffer is free to reuse; (c) make a render pass's writes visible to a later sampling read.</summary><div class="body">(a) A binary VkSemaphore — a GPU→GPU (here, acquire→render) event: the acquire signals it, the render submission waits on it. (b) A VkFence — a GPU→CPU event: the submission signals it, the CPU waits on it before re-recording that command buffer. (c) A pipeline barrier — in-queue ordering plus memory visibility (and the image layout transition to SHADER_READ_ONLY): src = COLOR_ATTACHMENT_OUTPUT/COLOR_WRITE, dst = FRAGMENT or COMPUTE/SHADER_READ. In 5.9 terms: semaphore and fence are events (GPU→GPU and GPU→CPU), the barrier is in-stream hazard ordering plus visibility. All three are 5.9's async model with Vulkan names.</div></details>
+<details><summary>2. Why is a missing barrier bug intermittent and machine-dependent, and what does that imply about how you must test sync?</summary><div class="body">A missing barrier is a data race between a writer and a reader: whether the reader sees the writes depends on the GPU's scheduling of the two, which varies frame to frame and, more importantly, across GPU hardware and drivers. So the bug appears intermittently and may never reproduce on your particular GPU even though it's always latent. The implication: you cannot validate synchronization correctness by running it and observing that it "looks fine" — that only certifies the timing on the machine you ran on (D2's lesson). You must use the synchronization validation layers, which detect the missing barrier deterministically regardless of timing, and ideally test across vendors. Sync is proven by validation, not by observation.</div></details>
+<details><summary>3. What is an image layout transition, why does it exist, and where does it happen?</summary><div class="body">An image layout describes how an image's memory is physically arranged for a particular use — e.g., COLOR_ATTACHMENT_OPTIMAL for rendering into, SHADER_READ_ONLY_OPTIMAL for sampling as a texture, PRESENT_SRC for display. It exists because different uses have different optimal memory arrangements (tiling, compression), and letting the GPU re-arrange the image for its current job improves performance. Transitions happen inside pipeline barriers: you specify oldLayout → newLayout as part of the barrier, and the GPU performs the (possibly physical) re-tiling then. It's the one genuinely new synchronization concept beyond 5.9's model — 5.9 taught memory VISIBILITY (make writes seen), and layouts add memory LAYOUT (how the image is physically arranged for its current use). Forgetting a transition gives a validation error or garbage/black output.</div></details>
+<details><summary>4. Describe the frames-in-flight ring and what each sync object protects.</summary><div class="body">Frames-in-flight pipelines the CPU and GPU: with a ring of 2–3 frame slots, while the GPU renders frame N+1 the CPU records frame N+2, and frame N presents — so neither idles (5.9's ring). Each slot has its OWN command buffer and sync objects. The protections: a per-slot FENCE ensures the CPU waits until the GPU is done with that slot's command buffer before re-recording it (protecting against stomping in-flight work); a SEMAPHORE between swapchain-acquire and render ensures rendering doesn't start on an image that isn't ready; a SEMAPHORE between render and present ensures the display doesn't show a half-rendered image (protecting against tearing/garbage). Get the fence wrong → command-buffer corruption; get the semaphores wrong → tearing or showing unfinished frames. It's 5.9's depth-3 ring with swapchain images as the cycled resource.</div></details>
+<details><summary>5. What do the validation layers do for synchronization, and what CUDA tool are they analogous to?</summary><div class="body">The synchronization validation layers track resource accesses across your command stream and detect hazards — a missing barrier between a write and a read, a wrong or missing image layout transition, a read of data not yet made visible — reporting them as immediate, specific errors naming the resources and stages involved, deterministically, regardless of the GPU timing that would otherwise make the bug intermittent. They're analogous to 5.4's compute-sanitizer/memcheck (and racecheck) in CUDA: a development-time correctness net that turns timing-dependent, hard-to-reproduce bugs into deterministic, actionable errors. You run them always while developing and disable only for shipping (they're slow). Developing Vulkan sync without them is like developing CUDA with racecheck off — you're blind to exactly the class of bugs the explicit model introduces.</div></details>
+<details><summary>6. Why does over-synchronizing (using broad barriers everywhere) defeat the purpose of Vulkan?</summary><div class="body">Because the whole reason for Vulkan's explicit control is to keep the GPU's stages and passes overlapping (5.9's max-lane law — hide latency by having independent work in flight). A pipeline barrier that waits for ALL stages and ALL memory access (a "full" barrier) forces the GPU to drain everything before proceeding, serializing work that could have overlapped — you get correctness but throw away the parallelism that justified writing explicit Vulkan in the first place. The discipline is to use the narrowest source/destination stage and access masks that prevent the ACTUAL hazard (e.g., only COLOR_WRITE → SHADER_READ, not everything → everything), so the GPU serializes exactly what must serialize and overlaps the rest. Precise barriers preserve overlap; sledgehammer barriers turn your explicit renderer into a slow serial one. It's 5.9's "declare only the real dependencies" applied to graphics.</div></details>
+<details><summary>7. The interview closer: "Vulkan synchronization is famously hard. How do you think about it and avoid its bugs?" Deliver the spoken skeleton.</summary><div class="body">"I think about it as the same async model I learned for GPU compute — CUDA streams and events — just with new names, because that reframing is what makes it tractable. A VkQueue is a stream, a semaphore is a GPU-to-GPU event that orders work between queues or between rendering and presenting, a fence is a GPU-to-CPU event that tells the CPU when a submission is done so it can reuse a command buffer, and a pipeline barrier orders work within a queue and makes one stage's writes visible to a later stage's reads. Timeline semaphores, which are core in 1.4, are a flexible counter-based event I'd prefer for new code. The one genuinely new concept beyond the compute model is image layout transitions, which ride along on barriers because an image is physically arranged differently when it's a render target versus a sampled texture versus a present source. To avoid the bugs: first, I recognize that a missing barrier is a data race, so it's intermittent and machine-dependent — it can pass on my GPU and fail on a customer's, exactly like the wavefront bug, because a test certifies only the machine it ran on. That means I never trust 'it looked fine here' for synchronization. Second, I develop with the synchronization validation layers on, always — they're the sanitizer for this, turning an invisible timing race into a deterministic error that names the missing barrier, and I'd put that in CI. Third, I use precise barriers with the narrowest stage and access masks that prevent the actual hazard, because a sledgehammer full-barrier serializes the GPU and throws away the overlap that's the whole reason to use Vulkan. So my mental model is 5.9's events-and-streams plus image layouts, and my safety net is validation layers plus cross-vendor testing — the explicit control is a gift that comes with owning every hazard.' Framing sync as the compute async model renamed, and naming validation layers as non-negotiable, is the answer that shows I've actually debugged a Vulkan frame."</div></details>
+
+<div class="pager">
+  <a href="lesson-07.html">← Compute Shaders</a>
+  <a href="lesson-09.html">Next: Ray Tracing →</a>
+</div>
+<div class="footer">GPU Mastery · Track C · Lesson 8 — works offline · progress saved in your browser</div>
+</div>
+<script src="../assets/diagramsC.js"></script>
+<script src="../assets/app.js"></script>
+</body>
+</html>

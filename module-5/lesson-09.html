@@ -1,0 +1,203 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>5.9 Streams, Events & Async — GPU Mastery</title>
+<link rel="stylesheet" href="../assets/style.css">
+</head>
+<body data-lesson="m5l9">
+<nav><div class="inner">
+  <a class="logo" href="../index.html">GPU<span>Mastery</span></a>
+  <a class="item" href="../index.html">Home</a>
+  <a class="item on" href="../curriculum.html">Curriculum</a>
+  <a class="item" href="../labs.html">Labs</a>
+  <a class="item" href="../setup.html">Lab setup</a>
+  <a class="item" href="../prompt.html">Generator prompt</a>
+</div></nav>
+<div class="wrap">
+
+<div class="lesson-top">
+  <div><span class="badge">Module 5 · Lesson 9</span><span class="badge dim">≈ 3.5 h</span></div>
+  <button id="donebtn" class="donebtn">Mark lesson complete</button>
+</div>
+<h1>Streams, Events & Async — three engines, and the timeline you now command</h1>
+<p class="lead">Your GPU has been idling through this whole module: while a kernel computed, the copy engines sat parked; while data crossed the bridge, the SMs did nothing. 4.1's pipeline lesson said overlap is how hardware earns its keep — today you get the steering wheel: streams to order work, events to time and chain it, pinned memory to unlock the DMA engines.</p>
+
+<h2>Concept</h2>
+
+<h3>Streams: ordered lanes, independent lanes</h3>
+<div class="diagram" data-diagram="m5l9-streams" data-caption="Serial: copy→compute→copy, engines idle in turn. Two streams: chunk k+1 uploads WHILE chunk k computes WHILE chunk k−1 downloads — three engines, all busy."></div>
+<pre><code>cudaStream_t s1, s2;
+cudaStreamCreate(&amp;s1); cudaStreamCreate(&amp;s2);
+cudaMemcpyAsync(d_a, h_a, bytes, cudaMemcpyHostToDevice, s1);   // lane s1
+kernel&lt;&lt;&lt;grid, block, 0, s1&gt;&gt;&gt;(d_a);                            // 4th launch param!
+cudaMemcpyAsync(d_b, h_b, bytes, cudaMemcpyHostToDevice, s2);   // lane s2 —
+                                                                 // FREE to overlap s1's kernel
+// THE two rules (5.3's quiz 1, now the full law):
+//   WITHIN a stream: strict FIFO order — dependency by sequence
+//   ACROSS streams:  NO ordering at all — unless you build it (events, below)
+// The hardware executing your lanes: 1+ compute engine, and (most cards)
+// TWO copy engines — one per direction. Three-way overlap is a HARDWARE
+// fact; streams are how your code stops wasting it.</code></pre>
+
+<h3>Pinned memory: the price of admission</h3>
+<div class="diagram" data-diagram="m5l9-pinned" data-caption="Pageable: driver stages through a locked bounce buffer — and cudaMemcpyAsync quietly degrades toward synchronous. Pinned: DMA reads your buffer directly, CPU fully out of the loop."></div>
+<pre><code>float *h = (float*)malloc(bytes);          // pageable: OS may move/swap it (3.5)
+cudaMemcpyAsync(d, h, bytes, H2D, s1);     // COMPILES, RUNS… and may be
+                                            // SILENTLY SYNCHRONOUS: DMA can't
+                                            // target movable pages, driver staffs
+                                            // a staging copy — overlap gone,
+                                            // no warning, no error. THE trap.
+cudaMallocHost(&amp;h, bytes);                  // pinned: page-locked (5.3 §1) —
+                                            // DMA-able, truly async, 2× raw
+                                            // speed (5.3 Ex.2's table, explained
+                                            // at last: the staging hop was the tax)
+// Pinning is a system-wide resource (locked RAM starves the OS — 4.6's
+// gotcha): pin transfer BUFFERS (the 5.3 P6 pool), not your whole dataset.</code></pre>
+
+<h3>Events: timestamps and cross-lane dependencies</h3>
+<div class="diagram" data-diagram="m5l9-events" data-caption="An event is a marker dropped into ONE stream's FIFO: bracket work with two markers for GPU-clock timing, or make another lane wait at one — both uses, one primitive."></div>
+<pre><code>// USE 1 — the correct GPU stopwatch (every "measure" since 5.5, formalized):
+cudaEvent_t t0, t1;  cudaEventCreate(&amp;t0);  cudaEventCreate(&amp;t1);
+cudaEventRecord(t0, s);      // a marker dropped INTO stream s's order
+kernel&lt;&lt;&lt;g, b, 0, s&gt;&gt;&gt;(...);
+cudaEventRecord(t1, s);
+cudaEventSynchronize(t1);    // CPU waits for the marker to be reached
+cudaEventElapsedTime(&amp;ms, t0, t1);   // GPU-clock ms between markers —
+                                      // immune to 5.3's CPU-runs-ahead trap
+// USE 2 — ordering ACROSS lanes without stalling the CPU:
+cudaEventRecord(uploaded, copyStream);
+cudaStreamWaitEvent(computeStream, uploaded);   // computeStream pauses at this
+kernel&lt;&lt;&lt;g, b, 0, computeStream&gt;&gt;&gt;(...);        // point until 'uploaded' fires —
+                                                 // a DAG edge between lanes,
+                                                 // executed entirely on-device</code></pre>
+
+<h3>The pipeline: 5.3's pool + streams + a ring</h3>
+<pre><code>const int DEPTH = 3;                        // 5.3 P6's sizing, employed
+for (int c = 0; c &lt; nChunks; ++c) {
+    int lane = c % DEPTH;                   // ring of DEPTH stream+buffer pairs
+    cudaStreamSynchronize(s[lane]);         // recycle: lane's PREVIOUS chunk done?
+    fill(h_pin[lane], c);                   // CPU stages chunk c (pinned slot)
+    cudaMemcpyAsync(d_in[lane],  h_pin[lane], CB, H2D, s[lane]);
+    process&lt;&lt;&lt;g, b, 0, s[lane]&gt;&gt;&gt;(d_in[lane], d_out[lane]);
+    cudaMemcpyAsync(h_out[lane], d_out[lane], CB, D2H, s[lane]);
+}   // steady state: lane k uploading, lane k-1 computing, lane k-2 downloading
+for (int l = 0; l &lt; DEPTH; ++l) cudaStreamSynchronize(s[l]);   // drain</code></pre>
+
+<h2>Worked example</h2>
+<div class="card">
+<p><strong>Task:</strong> Pipeline a 256 MB elementwise workload (T4 Colab, PCIe gen3 ≈ 11 GB/s pinned each way — 5.3 Ex.2's YOUR-numbers). Predict the ceiling BEFORE coding — 4.1's pipeline law does all the work.</p>
+<pre><code>serial:   H2D 23 ms + kernel 3 ms + D2H 23 ms          = 49 ms
+pipeline law (4.1): steady-state total ≈ MAX lane, not SUM:
+  one copy engine:  H2D and D2H share → copy lane 46 ms → total ≈ 46 + fill ≈ 47
+                    (barely better! shared engine = shared queue)
+  two copy engines: lanes 23 / 3 / 23 → total ≈ 23 + fill ≈ 25 ms  → 1.96×
+measured (4 chunks, DEPTH 3, T4 = 2 copy engines): 26.1 ms  ✓ model holds
+  speedup ceiling = 49/23 = 2.1× — and NOTHING in this lesson can beat it:
+  the pipe is copy-bound; the only real fixes live OUTSIDE streams:
+  send less (dtype, compression — M1 L8), keep data resident (4.6's ledger),
+  or stop crossing per-batch (the architecture question, always asked first)</code></pre>
+<p><strong>What to internalize:</strong> the prediction took four lines of arithmetic and named the ceiling, the engine count dependency, and the futility boundary — before any code. Overlap is NOT free speed; it's recovering idle engines, capped hard at max-lane. When someone says "we'll hide the transfer with streams", your first question is now automatic: <em>what's the max lane, and is the thing you're hiding actually smaller than it?</em> (A 23 ms copy cannot hide behind a 3 ms kernel; the kernel hides behind the COPY.)</p>
+</div>
+
+<h2>Key points</h2>
+<ul class="keypoints">
+<li>Within a stream: FIFO; across streams: no order unless you build it — dependency is something you DECLARE (sequence or events), never something the driver infers from pointers (5.3 quiz 1's law, completed).</li>
+<li>cudaMemcpyAsync with pageable memory silently degrades toward synchronous — the pipeline "works" and overlaps nothing; pinned buffers (pooled, 5.3 P6) are the admission ticket.</li>
+<li>Events are stream-order markers: the only honest GPU stopwatch (ElapsedTime), and the cross-stream dependency edge (StreamWaitEvent) that builds DAGs without CPU stalls.</li>
+<li>Pipeline total ≈ max lane + fill (4.1's law): compute the lanes FIRST — copy-bound pipes need traffic fixes (M1 L8 dtypes, 4.6 residency), not more streams.</li>
+<li>The legacy default stream synchronizes with everything — one stream-less launch or plain cudaMemcpy in a hot loop is a full-pipeline barrier wearing camouflage (gotcha 1).</li>
+<li>Syncs are architecture, not statements: every cudaDeviceSynchronize/plain-memcpy in steady-state code is a pipeline bubble — audit them like you audit mallocs in loops (3.5).</li>
+</ul>
+
+<h2>Quiz</h2>
+<div class="quiz">
+  <div class="q">1. Your pipeline shows ZERO overlap in the profiler: chunks run perfectly serially despite 3 streams and correct Async calls everywhere. The buffers came from a teammate's "fast allocator" that wraps malloc with alignment. Diagnose, and name the 30-second experiment that convicts it without reading any allocator code.</div>
+  <button class="opt">Too few streams — raise DEPTH to 8</button>
+  <button class="opt" data-c="1">Pageable memory: DMA can't target movable pages, so each cudaMemcpyAsync silently staged/serialized (the trap in §pinned — no error, no warning, just no overlap). Experiment: swap ONE buffer to cudaMallocHost and rerun the profile — if that lane alone starts overlapping, verdict delivered. Fix: route the transfer pool through cudaMallocHost (or cudaHostRegister the allocator's pages), keeping the pool pattern of 5.3 P6</button>
+  <button class="opt">T4 doesn't support concurrent copy+compute</button>
+  <button class="opt">Missing cudaStreamWaitEvent between chunks</button>
+  <div class="expl">Silent degradation is what makes this THE classic streams bug: every call succeeds, cudaSuccess everywhere, timeline flat (contrast option 4: MISSING dependencies cause wrong ANSWERS or races, not serialization). The one-buffer A/B swap is the controlled experiment habit (M1 L7) — five minutes, no code archaeology. T4 has 2 copy engines; option 3 is checkable in one line: deviceProp.asyncEngineCount (5.1's generator already printed it).</div>
+</div>
+<div class="quiz">
+  <div class="q">2. To time a kernel in stream s2, an engineer records start/stop events on the DEFAULT stream around the launch, gets 0.003 ms for a kernel that nsys shows takes 4.1 ms, and concludes "events are unreliable on this driver." What actually got measured, and what are the two correct placements?</div>
+  <button class="opt">Driver bug — use CPU timers instead</button>
+  <button class="opt" data-c="1">The events entered the DEFAULT stream's queue, not s2's: they measured the gap between two markers in a lane the kernel never ran in — i.e., ~nothing (the launch returned in µs, 5.3's enqueue trap in event clothing). Correct: (a) record BOTH events on s2 (markers bracket the kernel in ITS lane's order), or (b) for multi-stream totals, record after a join point (event after StreamWaitEvent convergence, or bracket a full drain). Events are exact; they answer exactly the question their PLACEMENT asks</button>
+  <button class="opt">The kernel really is that fast — nsys adds overhead</button>
+  <button class="opt">Events can't time kernels, only copies</button>
+  <div class="expl">Same instrument, wrong probe point — the oscilloscope was on the wrong wire. Event semantics are strictly "a marker in ONE stream's FIFO"; cross-stream timing without a declared join measures scheduler coincidence. The habit that prevents it: before reading any timing, say aloud WHICH lane's order both markers live in (the 5.3 async model, now your reflex). "Instrument unreliable" conclusions get expensive (M1 L7's scenario); "probe misplaced" is almost always the truth.</div>
+</div>
+
+<h2>Exercises</h2>
+<details><summary>Exercise 1 — Build the worked example's pipeline on Colab: 256 MB, DEPTH 3, pinned pool from 5.3 P6. Measure serial vs pipelined; compute your speedup vs the max-lane prediction from YOUR 5.3 Ex.2 bandwidths. Then run the two saboteurs: (a) swap pinned→malloc (quiz 1 live), (b) insert one plain cudaMemcpy mid-loop (gotcha 1 live). Profile all three with nsys (5.10 preview: <code>nsys profile -o pipe ./app</code>) and keep the three timelines.</summary><div class="body">
+<p>Expected: pipelined ≈ your max lane + 10–20% fill/jitter; saboteur (a) → timeline flattens to serial (zero overlap, zero errors — see it once, never forget it); saboteur (b) → periodic full-width barriers slicing the overlap into islands (the legacy-default-stream sync in its natural habitat). The three-timeline set is the real deliverable: you now recognize healthy, pageable-poisoned, and sync-poisoned pipelines ON SIGHT — which is 80% of stream debugging in the wild. File the PNGs in your machine-model repo next to the bandwidth table.</p>
+</div></details>
+<details><summary>Exercise 2 — Build <code>gpu_timer.h</code>, the course's official stopwatch (used by 5.10's audits and 5.11's ladder): RAII event pair (3.7 — create in ctor, destroy in dtor), <code>time(stream, fn)</code> returning median-of-K with W warmups (M1 L7's ritual, encoded), plus a self-test that catches quiz 2's misuse by construction. Validate against nsys on one kernel (±5%).</summary><div class="body">
+<pre><code>struct GpuTimer {                       // sketch — yours gets the full contract
+    cudaEvent_t a, b;                   // ctor: create; dtor: destroy (RAII, 3.7)
+    float time_ms(cudaStream_t s, int warm, int reps, std::function&lt;void()&gt; fn);
+    // API design choice that PREVENTS quiz 2: the stream is a REQUIRED
+    // parameter, and record() uses it for both markers — the misuse
+    // (markers in a different lane than the work) becomes unrepresentable.
+    // 5.3's up/down lesson again: centralize the pattern, retire the typo.
+};</code></pre>
+<p>Self-test: time a known ~4 ms kernel launched in s2 while a decoy stream idles — assert result &gt; 1 ms (would fail under quiz 2's misplacement). Median-of-K with warmup: M1 L7's boot-cache/clock-boost wobble, now automated so 5.11's ladder numbers are honest by default. Validation vs nsys within ±5% closes the loop: two independent instruments agreeing is what "measured" means (M1 L7's corroboration rule). This ~60-line header is the last piece of the harness — 5.11 ships it.</p>
+</div></details>
+
+<hr>
+<h1>Go deeper — the async fine print that pages people</h1>
+
+<h2>1. The default stream's two personalities</h2>
+<pre><code>LEGACY default (the default!): stream 0 synchronizes with ALL other streams —
+  one bare kernel&lt;&lt;&lt;g,b&gt;&gt;&gt;() or plain cudaMemcpy in your loop = full barrier
+  (Ex.1's saboteur b). Third-party code that launches stream-less does this TO you.
+per-thread default (nvcc --default-stream per-thread): stream 0 becomes an
+  ordinary lane — old code stops poisoning pipelines, but code that RELIED on
+  the implicit barrier now races (both directions of surprise are real!).
+Course rule: in pipeline code, EVERY launch and copy names its stream
+explicitly — then neither personality can ambush you. (Libraries: pass the
+stream in; every serious API — cuBLAS, cuDNN, NCCL — accepts one.)</code></pre>
+
+<h2>2. Callbacks, graphs, and what comes after (honest previews)</h2>
+<pre><code>cudaLaunchHostFunc(s, fn, arg)   // run CPU code when lane s reaches this point
+                                  // (logging, notifying a request thread) — the
+                                  // fn runs on a DRIVER thread: no CUDA calls
+                                  // inside, keep it tiny (µs), or you've built
+                                  // a stealth pipeline stall
+CUDA Graphs: record a whole chunk-DAG once, replay with ONE launch — amortizes
+  5.2's per-launch µs when steady-state work is thousands of tiny nodes
+  (Track A's inference-serving bread and butter; know the name today)
+cudaMallocAsync(ptr, bytes, s)   // 5.3 §1's pool allocator, stream-ordered:
+  alloc/free become lane events — no device-wide sync per allocation. The
+  modern default for anything allocating in steady state.</code></pre>
+
+<h2>3. Gotchas</h2>
+<div class="gotcha"><strong>One plain call in a hot loop.</strong> cudaMemcpy (no Async), cudaFree, cudaDeviceSynchronize, or a legacy-default launch — each is a full pipeline barrier (5.3's implicit-sync roster, now read as a THREAT list). Steady-state code uses only Async + events; syncs live at drain points, by design review.</div>
+<div class="gotcha"><strong>Reusing a pinned slot before its lane drained.</strong> The ring's StreamSynchronize(lane) is load-bearing: skip it and the CPU overwrites h_pin[lane] mid-DMA — corrupted uploads, intermittent (5.3's async model biting the HOST side). DEPTH buffers, DEPTH fences, no exceptions.</div>
+<div class="gotcha"><strong>Timing with events but forgetting they're async too.</strong> ElapsedTime before EventSynchronize(t1) = cudaErrorNotReady (polite) — or reading a STALE previous value if you recycled events without care (impolite). The GpuTimer wrapper exists so this class of bug has one home (5.3's up/down philosophy).</div>
+<div class="gotcha"><strong>Overlap theater.</strong> Chunking a workload whose kernel is 100× smaller than its copies (the worked example's 3 ms vs 46 ms) buys ~6% and complexity forever. Run the max-lane arithmetic FIRST; sometimes the honest answer is "don't pipeline — fix the traffic" (4.6) or "don't cross at all" (residency).</div>
+<div class="gotcha"><strong>Pinning the world.</strong> cudaMallocHost on multi-GB datasets locks RAM the OS needed — host-wide slowdowns, OOM-killer visits (4.6's warning, now with a mechanism). Pin the POOL (MBs), stream the dataset through it.</div>
+<div class="gotcha"><strong>Depth superstition.</strong> DEPTH=8 when 3 suffices costs pinned memory and debuggability for zero throughput (the max lane didn't change!). Little's law sizes it: depth ≈ ceil(total latency / max-lane time) + 1 — usually 2–4. More is not safer; it's just more.</div>
+
+<h2>Scenario — the one-line log that doubled p99</h2>
+<p>An inference service hums at p50 = 8 ms, p99 = 14 ms: a clean DEPTH-3 pipeline (upload batch, run model, download logits). A well-meaning PR adds latency logging to the hot path: <code>cudaDeviceSynchronize(); log(now() - t_start);</code> — "just one sync so the timestamp is accurate." Code review approves it in thirty seconds; it's one line. A week later, p99 has doubled to 29 ms and p50 crept to 11: the sync drains ALL lanes every request (a device-wide barrier — 5.3's roster), so the pipeline never reaches steady state; every request pays fill cost anew, and the tail — where requests queue behind drained pipes — pays worst (4.6's toll arithmetic on latency percentiles). The diagnosis took one nsys capture: beautiful overlap for 200 ms, then a picket fence of barriers marching through the timeline (Ex.1's saboteur b, in production). The fix is this lesson's toolbox: cudaLaunchHostFunc on the REQUEST's stream captures the completion timestamp lane-locally (§2 — the callback runs when THAT lane finishes, no global drain), or cheaper still, an event per request and ElapsedTime read by the metrics thread later. The engineering moral outlives CUDA: <em>in pipelined systems, synchronization is an architectural decision that must survive design review — it cannot enter through a logging PR.</em> The team's new lint rule, copied verbatim into this course's ship checklist (5.11): every cudaDeviceSynchronize outside a drain point carries a comment justifying its existence, signed by a reviewer who saw the timeline.</p>
+
+<h2>Practice</h2>
+<details><summary>1. Classify each as pipeline-safe or barrier (steady-state hot loop): (a) cudaMemcpyAsync pinned, named stream; (b) kernel&lt;&lt;&lt;g,b&gt;&gt;&gt;() bare; (c) cudaEventRecord + later ElapsedTime on drained events; (d) cudaFree of a scratch buffer; (e) cudaMallocAsync in the request's stream; (f) cudaLaunchHostFunc doing a 30 ms database write.</summary><div class="body">(a) Safe — the designed path. (b) BARRIER: bare = legacy default stream = syncs all lanes (§1; the stealthiest one because it looks identical to every launch you wrote before this lesson). (c) Safe if events already drained (read at metrics time, scenario's fix); NotReady-polling otherwise — design for reading late. (d) BARRIER: cudaFree device-syncs (5.3's roster) — scratch buffers in hot loops use the pool/MallocAsync. (e) Safe — stream-ordered by design (§2), this is exactly its use case. (f) Safe from the GPU's view but a 30 ms squat on the driver's callback thread — OTHER lanes' callbacks queue behind it (§2's "keep it tiny"): enqueue the work to your own thread pool, return in µs. Score: (b) and (d) are the two that ship to production weekly.</div></details>
+<details><summary>2. Your pipeline's lanes: H2D 6 ms, kernel 14 ms, D2H 6 ms per chunk, 10 chunks, 2 copy engines. Compute: serial total, pipelined total (law + fill), speedup, and the ceiling if you then float4+fuse the kernel down to 7 ms. At what kernel time does further kernel optimization become pointless for THROUGHPUT — and what changes about that answer if the metric is per-request LATENCY?</summary><div class="body">Serial: 10×26 = 260 ms. Pipelined: max lane = kernel 14 → 10×14 + fill (6+6... first chunk's copies ≈ 12) ≈ 152 ms → 1.7×. Kernel→7 ms: max lane becomes... H2D 6 vs kernel 7 vs D2H 6 → still kernel: 10×7+12 ≈ 82 ms. Pointless below 6 ms: the copy lanes take over as max (further kernel gains vanish into engine idle time — the roofline logic of 4.7 applied to PIPELINES: optimize the binding lane only). Latency flips it: per-request time = SUM of that request's stages (6+7+6 = 19 ms) regardless of overlap — kernel work below 6 ms still shortens each request's journey even though throughput froze. Throughput obeys max-lane; latency obeys sum-of-stages; systems serve one master per SLA, and confusing them is how the scenario's PR got approved.</div></details>
+<details><summary>3. Draw (in text) the event DAG for: upload weights ONCE, then per request r: upload input (stream Ur) → compute (stream C, shared, in arrival order) → download (stream Dr) — with the constraint that C must never start request r before its upload completes, and downloads must not block C. Name each edge's mechanism.</summary><div class="body">Init: W-upload in stream S_w; event E_w recorded; C does StreamWaitEvent(E_w) once (weights fence — all requests inherit it by FIFO within C). Per request: Ur: MemcpyAsync(input_r) → record E_up[r]. C: StreamWaitEvent(C, E_up[r]) → kernel_r → record E_done[r]. Dr: StreamWaitEvent(Dr, E_done[r]) → MemcpyAsync(logits_r) → (optional) HostFunc for the response callback. Edges: within-stream FIFO (C's request order — a free serializer, chosen deliberately for the shared model), cross-stream WaitEvent ×3 (upload→compute, compute→download, weights→everything). Downloads never touch C (they wait on E_done in THEIR lane), so a slow PCIe day delays responses, not compute. This diagram — five streams, four event types — is a real inference server's data path; you just designed it with two primitives.</div></details>
+<details><summary>4. Little's-law the ring depth: chunk = 32 MB, H2D 11 GB/s, kernel processes at 40 GB/s effective, D2H 11 GB/s, two copy engines. Compute each stage time, the max lane, end-to-end latency per chunk, and the minimum DEPTH that keeps the max-lane engine never-idle. Why does DEPTH beyond that number buy nothing?</summary><div class="body">Stages: H2D 32/11 ≈ 2.9 ms, kernel 32/40 = 0.8 ms, D2H ≈ 2.9 ms; max lane = 2.9 (copy-bound). Per-chunk latency = 2.9+0.8+2.9 = 6.6 ms. Depth ≥ latency/max-lane = 6.6/2.9 = 2.3 → DEPTH 3 (the ring must hold every chunk "in flight" across all stages so the H2D engine always has a next chunk whose buffer is free). Beyond 3: the H2D engine is already never-idle — extra lanes just park chunks in queues (throughput = max-lane engine's rate, saturated; 4.6's Little's law: more inventory past the bottleneck's need = warehouse, not speed). Same arithmetic sized the pinned pool in 5.3 P6 — one law, third appearance, and now you've derived the "+1" too (integer ceiling).</div></details>
+<details><summary>5. Ex.1(a) showed pageable async silently serializing. Write the four-line runtime GUARD that makes this bug impossible to ship: how do you detect at startup that a buffer intended for the pipeline isn't pinned, and what should the failure mode be (crash / warn / fallback)? Cite the course principle that decides.</summary><div class="body"><code>cudaPointerAttributes attr; cudaPointerGetAttributes(&amp;attr, h_buf);</code> → attr.type == cudaMemoryTypeHost means REGISTERED/pinned; unregistered malloc memory returns type unregistered (on modern CUDA, the call succeeds with type = cudaMemoryTypeUnregistered). Guard: at pool construction, assert every slot reports pinned — CRASH, loudly, at startup. Not warn (nobody reads warnings — the bug's whole danger is silence), not fallback (a silent 2× regression is exactly what we're preventing; graceful degradation of PERFORMANCE contracts is how quiz 1 happens). Principle: fail at the boundary, at startup, at full volume — 3.3's contract-assert philosophy applied to a performance contract. Performance properties that matter get ASSERTED like correctness properties; that one sentence is a senior review comment you'll type fifty times.</div></details>
+<details><summary>6. A teammate benchmarks kernels by launching each 1000× back-to-back in one stream and dividing total event time by 1000. For which kernel class does this OVERSTATE steady-state cost, for which does it UNDERSTATE production latency, and what harness change reports both honestly? (Hints: 5.2's floor; caches between iterations; the scenario's percentiles.)</summary><div class="body">Overstates per-kernel cost for tiny kernels ONLY IF gaps counted... actually back-to-back FIFO launches amortize launch overhead → UNDERSTATES production cost for small kernels that in real life launch sparsely (each real launch pays the 5.2 µs-floor alone, plus cold caches: iteration 999 enjoys L2 warmth iteration 1 never had — M1 L7's warmup now a distortion instead of a ritual!). It understates LATENCY generally: production requests arrive into pipelines with queues and fills (percentile behavior — scenario), not into a hot loop. Honest harness: report BOTH the amortized number (median of K, warm — "kernel cost when streaming") AND the cold-ish single-shot number (fresh stream, L2 flushed via a scrubbing kernel or cudaCtxResetPersistingL2Cache — "kernel cost as a lone request"), labeled as such. GpuTimer (Ex.2) grows a mode flag; 5.11's ladder table reports the warm number and SAYS so. Benchmarks don't lie; unlabeled regimes do (M1 L7's oldest lesson, final form).</div></details>
+<details><summary>7. Interview closer: "Your training job's GPU utilization is 55%. Walk me through finding and fixing it with streams." Deliver the decision path: the instrument, the three timeline shapes you might see, each shape's fix, and the one shape where streams are the WRONG answer.</summary><div class="body">Instrument: nsys timeline first (WHERE, not why — 5.10's division of labor). Shape 1 — gaps between kernels, copies filling them serially: classic unpipelined loader → DEPTH-3 ring + pinned pool (this lesson's core), expect utilization → max-lane bound. Shape 2 — overlap present but picket-fenced by barriers: hunt the plain-call/legacy-default offenders (Ex.1b, scenario) — a grep and a lint rule, not a rewrite. Shape 3 — kernels dense but each SM-starved (many tiny launches, 5.2's floor): streams DON'T help serial dependencies — fuse kernels or CUDA Graphs (§2); this is the wrong-answer shape, and naming it unprompted is the senior signal. Then the closing move: "if the timeline shows copies are the max lane even fully overlapped, streams have done all they can — the fix moves up a level: smaller dtypes (M1 L8), data residency (4.6), or accepting the input pipeline as the product's real bottleneck (prefetch from disk, which is ANOTHER pipeline one level up — same law, 4.1's, all the way down)."</div></details>
+
+<div class="pager">
+  <a href="lesson-08.html">← Reductions & atomics</a>
+  <a href="lesson-10.html">Next: Nsight profiling →</a>
+</div>
+<div class="footer">GPU Mastery · Module 5 · Lesson 9 — works offline · progress saved in your browser</div>
+</div>
+<script src="../assets/diagrams5.js"></script>
+<script src="../assets/app.js"></script>
+</body>
+</html>

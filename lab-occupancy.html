@@ -1,0 +1,119 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Occupancy Calculator — GPU Mastery Labs</title>
+<link rel="stylesheet" href="assets/style.css">
+<style>
+  .tool{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:18px 20px;margin:16px 0}
+  .row{display:flex;flex-wrap:wrap;gap:16px;align-items:flex-end;margin:10px 0}
+  .row label{font-size:13px;color:var(--dim);display:flex;flex-direction:column;gap:4px}
+  .row input{background:#10141d;color:var(--tx);border:1px solid var(--line);border-radius:6px;padding:7px 8px;font-size:14px;width:120px;font-family:var(--mono)}
+  .chip{background:var(--card2);color:var(--dim);border:1px solid var(--line);border-radius:999px;padding:5px 12px;font-size:13px;cursor:pointer}
+  .chip:hover{border-color:var(--acc);color:var(--tx)} .chip.on{background:var(--accBg);color:var(--accT);border-color:var(--acc)}
+  .big{font-size:40px;font-weight:800;font-variant-numeric:tabular-nums}
+  .bar{height:22px;background:#10141d;border:1px solid var(--line);border-radius:6px;overflow:hidden;position:relative}
+  .bar>span{display:block;height:100%}
+  .limtable{width:100%;border-collapse:collapse;margin-top:8px;font-size:13.5px}
+  .limtable td{border:1px solid var(--line);padding:7px 10px}
+  .limtable td:first-child{color:var(--dim)} .limtable tr.bind td{background:var(--warnBg);color:var(--warn);font-weight:600}
+  .muted{color:var(--dim);font-size:13px}
+</style>
+</head>
+<body data-lesson="lab-occupancy">
+<nav><div class="inner">
+  <a class="logo" href="index.html">GPU<span>Mastery</span></a>
+  <a class="item" href="index.html">Home</a>
+  <a class="item" href="curriculum.html">Curriculum</a>
+  <a class="item on" href="labs.html">Labs</a>
+  <a class="item" href="setup.html">Lab setup</a>
+</div></nav>
+<div class="wrap">
+
+<div class="lesson-top">
+  <div><span class="badge">Interactive Lab</span><span class="badge dim">5.6 · the occupancy dial</span></div>
+  <a class="badge good" href="labs.html">← all labs</a>
+</div>
+<h1>Occupancy Calculator</h1>
+<p class="lead">Occupancy is how many warps are resident per SM versus the max — the dial from 5.6. It's set by three budgets competing for the SM: registers, shared memory, and thread/block slots. Turn each knob and watch which resource binds and what occupancy you actually get.</p>
+
+<div class="tool">
+  <div class="muted">Device preset (SM limits — edit freely):</div>
+  <div class="row" id="devchips"></div>
+  <div class="row">
+    <label>registers / thread<input type="number" id="rpt" value="32" min="1" max="255"></label>
+    <label>shared mem / block (bytes)<input type="number" id="spb" value="0" min="0" step="1024"></label>
+    <label>threads / block<input type="number" id="tpb" value="256" min="32" max="1024" step="32"></label>
+  </div>
+  <div class="row" style="gap:24px">
+    <div><div class="muted">achieved occupancy</div><div class="big" id="occpct" style="color:var(--good)">—</div></div>
+    <div style="flex:1;min-width:220px">
+      <div class="muted">active warps / SM (<span id="maxw">32</span> max)</div>
+      <div class="bar"><span id="occbar" style="background:var(--good);width:0%"></span></div>
+      <div class="muted" id="occdetail" style="margin-top:6px"></div>
+    </div>
+  </div>
+  <table class="limtable" id="limtab"></table>
+  <div class="muted" id="advice" style="margin-top:10px"></div>
+</div>
+
+<h2>What it teaches</h2>
+<p>Each SM has a fixed budget of registers, shared memory, and warp/block slots. A block consumes some of each; the SM fits as many blocks as the <em>tightest</em> budget allows, and that's your occupancy. High register usage (a complex kernel) or a big shared-memory tile can throttle occupancy — the classic 5.6 trade. But occupancy is a means, not an end: past "enough" warps to hide memory latency (Little's law), more occupancy doesn't help, and sometimes fewer-but-fatter threads (more registers, ILP, float4) beat more warps. Use this to find the <em>limiting resource</em> — then decide whether raising occupancy is even the right move (4.7's roofline tells you if you're latency-starved or already bound).</p>
+<p class="muted">Try it: T4 preset, 256 threads, 0 smem. Step registers/thread 32 → 64 → 96 and watch occupancy fall from 100% to 50% as registers become the binding budget. That's the register-pressure story from 5.6, quantified.</p>
+
+<div class="footer">GPU Mastery · Labs · Occupancy Calculator — works offline</div>
+</div>
+
+<script>
+// [maxThreadsPerSM, maxWarpsPerSM, maxBlocksPerSM, regsPerSM, smemPerSM(bytes), regWarpGranularity, smemGranularity]
+const DEV = {
+  'Colab T4 (sm_75)':[1024,32,16,65536,65536,256,256],
+  'A100 (sm_80)':[2048,64,32,65536,167936,256,128],
+  'H100 (sm_90)':[2048,64,32,65536,233472,256,128],
+  'RTX 4090 (sm_89)':[1536,48,24,65536,102400,256,128],
+};
+let L = DEV['Colab T4 (sm_75)'];
+const $=id=>document.getElementById(id);
+function chips(){ const d=$('devchips'); d.innerHTML='';
+  for(const k of Object.keys(DEV)){ const b=document.createElement('span'); b.className='chip'; b.textContent=k;
+    b.onclick=()=>{ L=DEV[k]; [...d.children].forEach(c=>c.classList.remove('on')); b.classList.add('on'); render(); }; d.appendChild(b);} d.firstChild.classList.add('on'); }
+const ceilTo=(x,u)=>Math.ceil(x/u)*u;
+function render(){
+  const [maxT,maxW,maxB,regsSM,smemSM,rGran,sGran]=L;
+  const rpt=Math.max(1,+$('rpt').value||1), spb=Math.max(0,+$('spb').value||0), tpb=Math.max(32,+$('tpb').value||32);
+  const warpsPerBlock=Math.ceil(tpb/32);
+  const regsPerWarp=ceilTo(rpt*32, rGran);
+  const regsPerBlock=regsPerWarp*warpsPerBlock;
+  const smemPerBlock=spb>0?ceilTo(spb,sGran):0;
+  const byRegs=Math.floor(regsSM/regsPerBlock);
+  const bySmem=smemPerBlock>0?Math.floor(smemSM/smemPerBlock):Infinity;
+  const byThreads=Math.floor(maxT/tpb);
+  const byWarps=Math.floor(maxW/warpsPerBlock);
+  const byBlocks=maxB;
+  const lims=[['registers',byRegs],['shared memory',bySmem],['thread slots',byThreads],['warp slots',byWarps],['block slots',byBlocks]];
+  const activeBlocks=Math.min(byRegs,bySmem,byThreads,byWarps,byBlocks);
+  const activeWarps=activeBlocks*warpsPerBlock;
+  const occ=Math.min(1, activeWarps/maxW);
+  const bind=lims.reduce((a,b)=> b[1]<a[1]?b:a);
+  $('maxw').textContent=maxW;
+  $('occpct').textContent=(occ*100).toFixed(0)+'%';
+  $('occpct').style.color = occ>=0.75?'var(--good)':occ>=0.4?'var(--warn)':'var(--bad)';
+  $('occbar').style.width=(occ*100)+'%';
+  $('occbar').style.background = occ>=0.75?'var(--good)':occ>=0.4?'var(--warn)':'var(--bad)';
+  $('occdetail').textContent=activeBlocks+' blocks × '+warpsPerBlock+' warps = '+activeWarps+' active warps';
+  let rows='<tr><td>resource</td><td>blocks it allows</td><td>per-block cost</td></tr>';
+  const costs={ 'registers':regsPerBlock+' regs','shared memory':(smemPerBlock||0)+' B','thread slots':tpb+' thr','warp slots':warpsPerBlock+' warps','block slots':'—'};
+  for(const [name,v] of lims){ const bindrow=(name===bind[0])?' class="bind"':''; rows+='<tr'+bindrow+'><td>'+name+'</td><td>'+(v===Infinity?'∞':v)+'</td><td>'+costs[name]+'</td></tr>'; }
+  $('limtab').innerHTML=rows;
+  let adv='<b>Binding resource: '+bind[0]+'</b> — it caps you at '+activeBlocks+' block'+(activeBlocks===1?'':'s')+'/SM. ';
+  if(bind[0]==='registers') adv+='Lower registers/thread (simplify the kernel, or cap with __launch_bounds__/maxrregcount) to fit more blocks — the 5.6 register trade.';
+  else if(bind[0]==='shared memory') adv+='Shrink the shared tile or use less smem/block to fit more blocks (5.5).';
+  else adv+='You are limited by thread/warp/block slots — occupancy is already near the structural max for this block size; changing block size shifts the trade.';
+  if(occ>=0.75) adv+=' Occupancy is high — but remember (4.7/5.6): past enough warps to hide latency, more occupancy may not help. Profile before chasing it.';
+  $('advice').innerHTML=adv;
+}
+['rpt','spb','tpb'].forEach(id=>$(id).addEventListener('input',render));
+chips(); render();
+</script>
+</body>
+</html>

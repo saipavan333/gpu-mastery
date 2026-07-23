@@ -1,0 +1,141 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Roofline Explorer — GPU Mastery Labs</title>
+<link rel="stylesheet" href="assets/style.css">
+<style>
+  .tool{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:18px 20px;margin:16px 0}
+  .row{display:flex;flex-wrap:wrap;gap:16px;align-items:flex-end;margin:10px 0}
+  .row label{font-size:13px;color:var(--dim);display:flex;flex-direction:column;gap:4px}
+  .row input[type=number]{background:#10141d;color:var(--tx);border:1px solid var(--line);border-radius:6px;padding:7px 8px;font-size:14px;width:120px;font-family:var(--mono)}
+  .row input[type=range]{width:260px}
+  .chip{background:var(--card2);color:var(--dim);border:1px solid var(--line);border-radius:999px;padding:5px 12px;font-size:13px;cursor:pointer}
+  .chip:hover{border-color:var(--acc);color:var(--tx)}
+  .chip.on{background:var(--accBg);color:var(--accT);border-color:var(--acc)}
+  canvas{width:100%;max-width:660px;height:auto;background:#10141d;border:1px solid var(--line);border-radius:10px;display:block;margin:8px 0}
+  .verdict{font-size:15px;border-radius:10px;padding:12px 14px;margin-top:10px}
+  .verdict b{font-size:16px}
+  .mem{background:var(--warnBg);border:1px solid #5a4a1e}
+  .comp{background:var(--goodBg);border:1px solid #2c5a3e}
+  .kv{font-variant-numeric:tabular-nums;color:var(--tx)}
+  .muted{color:var(--dim);font-size:13px}
+</style>
+</head>
+<body data-lesson="lab-roofline">
+<nav><div class="inner">
+  <a class="logo" href="index.html">GPU<span>Mastery</span></a>
+  <a class="item" href="index.html">Home</a>
+  <a class="item" href="curriculum.html">Curriculum</a>
+  <a class="item on" href="labs.html">Labs</a>
+  <a class="item" href="setup.html">Lab setup</a>
+</div></nav>
+<div class="wrap">
+
+<div class="lesson-top">
+  <div><span class="badge">Interactive Lab</span><span class="badge dim">4.7 · the roofline</span></div>
+  <a class="badge good" href="labs.html">← all labs</a>
+</div>
+<h1>Roofline Explorer</h1>
+<p class="lead">The single most important performance mental model (4.7), made live. Set a machine's compute and bandwidth ceilings, dial a kernel's arithmetic intensity, and watch where it lands — memory-bound or compute-bound, and how far below its ceiling. "The gap is your to-do list."</p>
+
+<div class="tool">
+  <div class="muted">Machine preset (representative fp32 peaks — edit freely):</div>
+  <div class="row" id="devchips"></div>
+  <div class="row">
+    <label>peak compute (GFLOP/s)<input type="number" id="P" value="8100" step="100"></label>
+    <label>peak bandwidth (GB/s)<input type="number" id="B" value="220" step="10"></label>
+  </div>
+  <div class="muted" style="margin-top:6px">Kernel arithmetic intensity (FLOP per byte):</div>
+  <div class="row" id="kernchips"></div>
+  <div class="row">
+    <label style="flex:1">intensity = <span class="kv" id="aival">0.083</span> FLOP/byte
+      <input type="range" id="AI" min="-2.3" max="3" step="0.02" value="-1.08"></label>
+    <label>achieved (optional, GFLOP/s)<input type="number" id="ach" placeholder="e.g. 40" step="10"></label>
+  </div>
+  <canvas id="cv" width="660" height="380"></canvas>
+  <div class="verdict" id="verdict"></div>
+</div>
+
+<h2>How to read it</h2>
+<p>The diagonal is the <strong>memory roof</strong> — performance you can reach is limited to (arithmetic intensity × bandwidth), because you can only compute as fast as you can feed the ALUs. The flat line is the <strong>compute roof</strong> — the chip's peak FLOP/s. They meet at the <strong>ridge point</strong> (intensity = peak_compute / peak_bandwidth): kernels to its left are <em>memory-bound</em> (add intensity — fuse, cache, reuse), kernels to its right are <em>compute-bound</em> (you're near the FLOP ceiling; only faster math or a bigger chip helps). If you enter an achieved number below the roof, the gap between it and the ceiling is exactly the performance you haven't captured yet — the to-do list (4.7).</p>
+<p class="muted">Landmarks from the core: on Colab's T4 (8.1 TF, ~220 GB/s achievable) the ridge sits at ~37 FLOP/byte, so SAXPY (~0.08) and reductions (~0.25) are deeply memory-bound, while a well-tiled matmul climbs toward the compute roof — exactly the 5.11 ladder. Try it: pick T4, then step through the kernel presets.</p>
+
+<div class="footer">GPU Mastery · Labs · Roofline Explorer — works offline</div>
+</div>
+
+<script>
+const DEV = { 'Colab T4':[8100,220], 'A100':[19500,1555], 'H100':[67000,3350], 'MI300X':[163000,5300], 'RTX 4090':[82600,1008] };
+const KERN = { 'SAXPY ~0.08':0.083, 'Reduction ~0.25':0.25, 'Stencil ~0.5':0.5, 'Conv ~2':2.0, 'GEMM (tiled) ~64':64, 'Attention ~10':10 };
+const $ = id => document.getElementById(id);
+const cv = $('cv'), ctx = cv.getContext('2d');
+let P=8100, B=220, AI=0.083, ach=null;
+
+function css(v){ return getComputedStyle(document.documentElement).getPropertyValue(v).trim(); }
+const C = { line:'#2a3245', tx:'#e8edf5', dim:'#7e8aa0', acc:'#5b9bff', good:'#36c98a', warn:'#f5b850', bad:'#ff6b6b' };
+
+function buildChips(){
+  const d=$('devchips'); d.innerHTML='';
+  for(const k of Object.keys(DEV)){ const b=document.createElement('span'); b.className='chip'; b.textContent=k;
+    b.onclick=()=>{ P=DEV[k][0]; B=DEV[k][1]; $('P').value=P; $('B').value=B; [...d.children].forEach(c=>c.classList.remove('on')); b.classList.add('on'); render(); }; d.appendChild(b); }
+  d.firstChild.classList.add('on');
+  const kd=$('kernchips'); kd.innerHTML='';
+  for(const k of Object.keys(KERN)){ const b=document.createElement('span'); b.className='chip'; b.textContent=k;
+    b.onclick=()=>{ AI=KERN[k]; $('AI').value=Math.log10(AI); [...kd.children].forEach(c=>c.classList.remove('on')); b.classList.add('on'); syncAI(); render(); }; kd.appendChild(b); }
+}
+function syncAI(){ $('aival').textContent = AI>=1 ? AI.toFixed(1) : AI.toFixed(3); }
+
+const ML=64, MR=18, MT=16, MB=42, W=660, H=380;
+const xmin=0.01, xmax=1000;
+function ymax(){ return P*2; } function ymin(){ return 1; }
+function Xp(ai){ return ML + (Math.log10(ai)-Math.log10(xmin))/(Math.log10(xmax)-Math.log10(xmin))*(W-ML-MR); }
+function Yp(p){ return H-MB - (Math.log10(p)-Math.log10(ymin()))/(Math.log10(ymax())-Math.log10(ymin()))*(H-MT-MB); }
+
+function render(){
+  P=parseFloat($('P').value)||1; B=parseFloat($('B').value)||1;
+  AI=Math.pow(10, parseFloat($('AI').value)); syncAI();
+  ach = $('ach').value==='' ? null : parseFloat($('ach').value);
+  const ridge=P/B, roof=Math.min(P, AI*B), bound = AI<ridge ? 'memory':'compute';
+  const pct = ach!=null ? ach/roof*100 : null;
+
+  ctx.clearRect(0,0,W,H); ctx.font='11px ui-monospace, monospace';
+  // grid (decades)
+  ctx.strokeStyle=C.line; ctx.fillStyle=C.dim; ctx.lineWidth=1;
+  for(let e=-2;e<=3;e++){ const x=Xp(Math.pow(10,e)); ctx.globalAlpha=.5; ctx.beginPath(); ctx.moveTo(x,MT); ctx.lineTo(x,H-MB); ctx.stroke(); ctx.globalAlpha=1;
+    ctx.textAlign='center'; ctx.fillText('1e'+e, x, H-MB+16); }
+  const yTop=ymax(); for(let e=0;e<=Math.ceil(Math.log10(yTop));e++){ const yv=Math.pow(10,e); if(yv>yTop)break; const y=Yp(yv); ctx.globalAlpha=.5; ctx.beginPath(); ctx.moveTo(ML,y); ctx.lineTo(W-MR,y); ctx.stroke(); ctx.globalAlpha=1; ctx.textAlign='right'; ctx.fillText((yv>=1000?(yv/1000)+'k':yv)+'', ML-6, y+3); }
+  ctx.textAlign='center'; ctx.fillStyle=C.dim; ctx.fillText('arithmetic intensity (FLOP/byte)', W/2, H-6);
+  ctx.save(); ctx.translate(14,H/2); ctx.rotate(-Math.PI/2); ctx.fillText('performance (GFLOP/s)',0,0); ctx.restore();
+
+  // memory roof (diagonal y=ai*B) up to ridge, clamped to plot
+  ctx.strokeStyle=C.warn; ctx.lineWidth=2.4; ctx.beginPath();
+  let started=false;
+  for(let lx=Math.log10(xmin); lx<=Math.log10(Math.min(ridge,xmax)); lx+=0.02){ const ai=Math.pow(10,lx); const p=ai*B; if(p<ymin())continue; const X=Xp(ai),Y=Yp(p); if(!started){ctx.moveTo(X,Y);started=true;}else ctx.lineTo(X,Y); }
+  ctx.stroke();
+  // compute roof (flat at P) from ridge to xmax
+  ctx.strokeStyle=C.good; ctx.beginPath(); ctx.moveTo(Xp(Math.max(ridge,xmin)),Yp(P)); ctx.lineTo(Xp(xmax),Yp(P)); ctx.stroke();
+  // ridge point
+  ctx.fillStyle=C.acc; ctx.beginPath(); ctx.arc(Xp(ridge),Yp(P),4.5,0,7); ctx.fill();
+  ctx.fillStyle=C.dim; ctx.textAlign='left'; ctx.fillText('ridge '+ridge.toFixed(1), Xp(ridge)+7, Yp(P)-6);
+  // kernel vertical + marker at roof
+  const kx=Xp(AI);
+  ctx.strokeStyle=C.dim; ctx.setLineDash([4,4]); ctx.beginPath(); ctx.moveTo(kx,H-MB); ctx.lineTo(kx,Yp(roof)); ctx.stroke(); ctx.setLineDash([]);
+  ctx.fillStyle = bound==='memory'?C.warn:C.good; ctx.beginPath(); ctx.arc(kx,Yp(roof),6,0,7); ctx.fill();
+  ctx.fillStyle=C.tx; ctx.textAlign='center'; ctx.fillText('ceiling '+Math.round(roof), kx, Yp(roof)-10);
+  // achieved marker + gap
+  if(ach!=null && ach>0){ const ay=Yp(Math.min(ach,ymax())); ctx.fillStyle=C.bad; ctx.beginPath(); ctx.arc(kx,ay,5,0,7); ctx.fill();
+    ctx.strokeStyle=C.bad; ctx.setLineDash([2,3]); ctx.beginPath(); ctx.moveTo(kx,ay); ctx.lineTo(kx,Yp(roof)); ctx.stroke(); ctx.setLineDash([]);
+    ctx.fillText('you '+Math.round(ach), kx, ay+16); }
+
+  const v=$('verdict'); v.className='verdict '+(bound==='memory'?'mem':'comp');
+  let msg='<b>'+(bound==='memory'?'Memory-bound':'Compute-bound')+'</b> — ceiling ≈ <span class="kv">'+Math.round(roof)+'</span> GFLOP/s at intensity '+(AI>=1?AI.toFixed(1):AI.toFixed(3))+' FLOP/byte. Ridge point = '+ridge.toFixed(1)+' FLOP/byte.';
+  if(bound==='memory') msg+=' You are left of the ridge: raise intensity (fuse ops, reuse data in cache/shared memory) to climb the diagonal — more math per byte moved.';
+  else msg+=' You are right of the ridge: you are near the FLOP ceiling. Only faster math (better ISA use, tensor cores) or a bigger chip helps — bandwidth is not your limit.';
+  if(pct!=null) msg+=' <br>You are at <span class="kv">'+pct.toFixed(0)+'%</span> of this ceiling — the remaining '+(100-pct).toFixed(0)+'% is your to-do list (4.7).';
+  v.innerHTML=msg;
+}
+['P','B','AI','ach'].forEach(id=>$(id).addEventListener('input',render));
+buildChips(); render();
+</script>
+</body>
+</html>

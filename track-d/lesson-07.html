@@ -1,0 +1,175 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>D7 Triton &amp; MLIR — GPU Mastery</title>
+<link rel="stylesheet" href="../assets/style.css">
+</head>
+<body data-lesson="dl7">
+<nav><div class="inner">
+  <a class="logo" href="../index.html">GPU<span>Mastery</span></a>
+  <a class="item" href="../index.html">Home</a>
+  <a class="item on" href="../curriculum.html">Curriculum</a>
+  <a class="item" href="../labs.html">Labs</a>
+  <a class="item" href="../setup.html">Lab setup</a>
+  <a class="item" href="../prompt.html">Generator prompt</a>
+</div></nav>
+<div class="wrap">
+
+<div class="lesson-top">
+  <div><span class="badge">Track D · Lesson 7</span><span class="badge dim">≈ 3 h</span></div>
+  <button id="donebtn" class="donebtn">Mark lesson complete</button>
+</div>
+<h1>Triton &amp; MLIR — let the compiler do the porting</h1>
+<p class="lead">Every rung so far asked <em>you</em> to port: rename to HIP, rewrite into SYCL accessors, feature-detect in WGSL. The compiler rung inverts it. You write one kernel in Triton (the language from Track A's A4), and the compiler lowers it through MLIR to NVIDIA's PTX or AMD's AMDGCN — same source, different ISA, zero edits. And because the compiler re-tunes per architecture, it does the one thing a human porter can't do at scale: turn 5.6's occupancy dial optimally for every backend, automatically. Today: how the lowering works, why compilers are eating this problem, and the honest limit where they still lose to vendor libraries.</p>
+
+<h2>Concept</h2>
+
+<h3>Portable by IR: one Python kernel, two vendor ISAs</h3>
+<div class="diagram" data-diagram="d7-lowering" data-caption="A Triton kernel lowers through MLIR: Python to Triton-IR to Triton-GPU-IR to LLVM-IR, then branches to PTX (NVIDIA, via nvvm) or AMDGCN (AMD, via rocdl). One source, two cards."></div>
+<p>In A4 you wrote Triton kernels as the Python-with-tiles alternative to CUDA — <code>@triton.jit</code>, <code>tl.load</code>/<code>tl.store</code> with masks, <code>program_id</code> as the block index. Track D's angle is what happens to that kernel <em>underneath</em>. It doesn't compile straight to PTX; it flows through a stack of MLIR intermediate representations, and the vendor split happens near the bottom:</p>
+<pre><code>your @triton.jit Python kernel   (you write this ONCE)
+        |
+   Triton-IR (TTIR)              block-level MLIR dialect — the algorithm, abstractly
+        |
+   Triton-GPU-IR (TTGIR)         + hardware layout: tiles, warps, memory access patterns
+        |
+   LLVM-IR                       the gpu dialect lowers to nvvm OR rocdl
+        |
+   +----+----+
+   |         |
+  PTX      AMDGCN / hsaco        NVIDIA path         AMD path (ROCm 6.2+)
+  (nvvm)   (rocdl)</code></pre>
+<p>The key idea is that portability lives in the <em>IR</em>, not in your source. TTIR captures the algorithm; TTGIR adds the hardware-specific layout (how tiles map to warps, how memory is accessed); only at the LLVM-IR-to-machine step does the target vendor matter, where MLIR's <code>gpu</code> dialect lowers to <code>nvvm</code> (NVIDIA) or <code>rocdl</code> (AMD). On AMD, a <code>TritonAMDGPUDialect</code> handles the backend specifics and the result is AMDGCN assembled into an hsaco binary; on NVIDIA it's PTX. You wrote none of that — you wrote the tiled Python once and the compiler retargeted it. This is D1's "IR/compiler" rung: the porting work moved from your hands into the toolchain.</p>
+
+<h3>Why compilers are eating this problem: the dial turned by machines</h3>
+<div class="diagram" data-diagram="d7-autotune" data-caption="Triton's autotuner searches block size, num_warps, and num_stages per GPU — 5.6's occupancy dial turned by a machine, not a human. The honest limit: vendor libraries still own absolute tensor-core peak."></div>
+<p>Here's the deeper reason IR-level tools are winning, and it's a direct callback to 5.6. Performance tuning is a search over knobs — tile size, <code>num_warps</code>, <code>num_stages</code> (the pipelining depth), the occupancy dial. On CUDA you turned those knobs by hand, per kernel, guided by the profiler (5.6, 5.10). But the optimal setting differs <em>per architecture</em> — a T4, an H100, and an MI300 have different register files, shared-memory sizes, and warp/wavefront widths, so the best tile size on one is wrong on another. A human porting by hand has to re-tune every kernel for every target; a compiler with <code>@triton.autotune</code> just <em>searches</em> the knob space per backend at compile time. The machine turns 5.6's dial optimally for each GPU, automatically, which is something no human port does at fleet scale. That's why the compiler approach is ascendant: it doesn't just translate the algorithm across vendors, it re-optimizes it for each one — the porting <em>and</em> the tuning, both automated.</p>
+
+<h3>The honest limit: vendor libraries still own the peak</h3>
+<p>Track D's through-line is honesty about the last 10% (D1), and here it's sharp. Triton and compiler-level tools get you excellent, portable performance for custom and fused kernels — often ~90%+ of achievable, rising as the compilers improve. But for the absolute-peak, tensor-core/matrix-core-class operations — a production matmul at the hardware's FLOP ceiling — hand-tuned vendor libraries (cuBLAS on NVIDIA, rocBLAS on AMD, or CUTLASS-level templates) still win the last few percent, because they encode assembly-level scheduling the compiler hasn't matched. So the real-world map is the one 5.11 and D1 keep drawing: use Triton/compilers for the 90% (the custom, fused, portable kernels — Track A's A5 fusion work, now portable), and call the vendor library for the pinned-to-peak 10% (the matmul). The compiler is eating the problem from the bottom up, but the top of the FLOP curve is still vendor territory — and pretending otherwise is how you ship a "portable" matmul that's 2x slower than the library on every card.</p>
+
+<h2>Worked example</h2>
+<div class="card">
+<p><strong>Task:</strong> Quantify the portability ladder by counting source changes to move one kernel across vendors, at three rungs. Prediction first: rank hand-CUDA→hand-HIP, Triton, and the effort each needs to go from NVIDIA to AMD.</p>
+<pre><code>the same saxpy/elementwise kernel, NVIDIA -> AMD:
+  rung: dialect (HIP)      source changes = 6 host-API renames (MEASURED, D2)
+                           + the wavefront-64 audit for any warp literals (D2)
+  rung: IR (Triton)        source changes = 0    the compiler re-lowers TTIR->
+                           TTGIR->AMDGCN and re-autotunes; you rebuild, don't rewrite
+  rung: hand CUDA -> hand rewrite   source changes = the whole kernel, by hand
+Prediction: Triton (0) &lt; HIP (6 + audit) &lt; hand-rewrite (all). Confirmed by
+  construction: Triton's portability is in the IR, so the SOURCE delta is zero —
+  the compiler absorbs the 6 renames AND the wavefront audit AND the re-tuning.
+Caveat that keeps it honest: "0 source changes" != "0 work" — you still re-validate
+  numerically on AMD (fixtures, M2 L6) and re-profile (D8); and if the kernel is a
+  matmul chasing peak, you'd call rocBLAS anyway (the last 10%).</code></pre>
+<p><strong>What to internalize:</strong> the portability ladder is a real gradient of <em>who does the porting</em>. Hand-rewriting means you do all of it. HIP means the tool does the renames and you do the wavefront audit and re-tuning (D2's 6 lines plus the landmine hunt). Triton means the compiler does the renames, the wavefront handling, <em>and</em> the per-architecture tuning — your source delta is zero, and you're left with only the irreducible work that no rung eliminates: numerically re-validating on the new hardware (a fixture is still machine-specific, D2's lesson) and deciding whether this kernel is in the 90% (let Triton have it) or the peak-chasing 10% (call the vendor library). The compiler didn't make porting free; it moved the porting into the toolchain and left you with the judgment calls — which is exactly where a senior engineer's time should go.</p>
+</div>
+
+<h2>Key points</h2>
+<ul class="keypoints">
+<li>A Triton kernel (A4's language) lowers through MLIR — Python to TTIR to TTGIR to LLVM-IR — then branches to PTX (NVIDIA, via nvvm) or AMDGCN (AMD, via rocdl, ROCm 6.2+); portability lives in the IR, so your source delta across vendors is zero.</li>
+<li>The MLIR gpu dialect lowering to nvvm/rocdl is where the vendor split happens; a TritonAMDGPUDialect handles AMD specifics, producing an hsaco binary versus NVIDIA's PTX.</li>
+<li>@triton.autotune searches block size, num_warps, and num_stages per architecture — 5.6's occupancy dial turned by a machine, re-optimizing per backend in a way no hand port does at scale.</li>
+<li>Compilers are ascendant because they automate BOTH the translation and the per-architecture tuning — the porting and the dial-turning — not just one.</li>
+<li>The honest limit: vendor libraries (cuBLAS/rocBLAS/CUTLASS) still own absolute tensor-core/matrix-core peak, so the map is Triton for the fused/custom 90%, vendor library for the pinned-to-peak matmul 10% (5.11, D1).</li>
+<li>Zero source changes is not zero work: you still re-validate numerically on the new hardware (fixtures are machine-specific, D2) and re-profile (D8) — the compiler absorbs the porting, not the judgment.</li>
+</ul>
+
+<h2>Quiz</h2>
+<div class="quiz">
+  <div class="q">1. A team benchmarks a Triton matmul against cuBLAS on NVIDIA and finds Triton ~2x slower at large sizes. They conclude "Triton is a failure for portability." What's the flawed assumption, and what's the correct role for Triton here?</div>
+  <button class="opt">Correct conclusion — if it can't beat cuBLAS, Triton is useless</button>
+  <button class="opt" data-c="1">The flawed assumption is that portable custom kernels should beat hand-tuned vendor libraries at their own game. A production matmul is exactly the tensor-core peak operation where cuBLAS/rocBLAS encode assembly-level scheduling Triton doesn't match — that's the honest last-10% limit, not a portability failure. Triton's role is the OTHER 90%: fused, custom, and non-standard kernels (fused epilogues, attention variants, novel ops — A5) that no library ships, made portable across vendors with zero source changes. Comparing Triton to cuBLAS on matmul tests it where it's designed to lose; test it on a fused kernel cuBLAS can't express</button>
+  <button class="opt">Triton is only for AMD, so of course it's slow on NVIDIA</button>
+  <button class="opt">Recompile cuBLAS with Triton to fix it</button>
+  <div class="expl">Options 3 and 4 are nonsense (Triton targets both vendors; you can't recompile cuBLAS through Triton). The correct answer draws D1's 90/10 line precisely: matmul-at-peak is the 10% vendor libraries own, so benchmarking Triton there is choosing its worst case. Triton wins where there's no library to call — fused and custom kernels — which is most of a real model's long tail (Track A's fusion story). The general lesson: judge a tool against its purpose, not against a specialist at the specialist's task; "portable custom kernels" and "peak vendor matmul" are different jobs.</div>
+</div>
+<div class="quiz">
+  <div class="q">2. Moving a hand-written CUDA reduction to AMD took a wavefront-64 audit (D2). Moving a Triton reduction to AMD took zero source changes. A colleague says "so Triton has no wavefront-64 problem — the bug doesn't exist there." Precisely right or subtly wrong?</div>
+  <button class="opt">Precisely right — Triton kernels are immune to the wavefront issue</button>
+  <button class="opt" data-c="1">Subtly wrong in its reasoning, right in its outcome. The wavefront-64 issue absolutely exists at the hardware level on AMD — but the Triton COMPILER handles the SIMD-width difference when it lowers TTGIR to AMDGCN, so YOUR source never encodes a literal 32 to get wrong. The bug didn't vanish; the compiler owns it instead of you. That's the whole value of the IR rung — it absorbs the per-architecture details (warp width, tuning) that a hand port makes you audit. But you should still re-validate the reduction numerically on AMD, because a compiler can have its own bugs, and a fixture certifies the machine it runs on (D2)</button>
+  <button class="opt">Subtly wrong — Triton actually can't target AMD at all</button>
+  <button class="opt">Precisely right — AMD wavefronts are 32 lanes like NVIDIA</button>
+  <div class="expl">Option 4 is a factual error (AMD wavefronts are 64). Option 3 is wrong (Triton targets AMD via ROCm 6.2+). The subtle correctness the answer captures: "no source-level bug" is not "no hardware difference" — the compiler assumed responsibility for the 32-vs-64 handling, which is exactly why the IR rung is powerful. But it also means you've traded auditing your own literals for trusting the compiler, so the D2 discipline (re-run fixtures on the actual AMD hardware) still applies — now guarding against compiler bugs instead of your own. Ownership moved; it didn't disappear.</div>
+</div>
+
+<h2>Exercises</h2>
+<details><summary>Exercise 1 — On a machine with a GPU, write a small Triton kernel (or reuse an A4 one) and inspect what the compiler emits: dump the generated PTX (NVIDIA) or AMDGCN (AMD), and note that the SAME Python produced target-specific assembly. Alternatively, use <code>torch.compile</code> (Track A's A9) and read the Triton it generates. (This course's sandbox has no GPU; Triton needs one, so this targets your hardware.)</summary><div class="body">
+<p>Expected: Triton exposes the compiled artifacts (via its cache or <code>kernel.asm</code>), so you can see the PTX or AMDGCN your Python became — concrete proof that one source lowered to a vendor ISA. With <code>torch.compile</code> (A9), setting the appropriate debug/log flag prints the Triton kernels Inductor generated for your ops, closing the loop from A4 (you write Triton) to A9 (the framework writes it for you) to D7 (it's portable by IR). The deliverable: a snippet of the generated PTX/AMDGCN and a one-line note on how much of it you'd never want to write by hand — which is the point of the compiler rung. No GPU? Read A4's kernel and trace it through the TTIR to TTGIR to LLVM stages on paper using the lowering diagram.</p>
+</div></details>
+<details><summary>Exercise 2 — Reason about the lowering. Given a Triton kernel with <code>BLOCK_SIZE=1024</code> and <code>num_warps=4</code>, explain what changes and what stays the same when the target switches from an H100 (warp 32) to an MI300 (wavefront 64), and at which IR stage the difference is introduced.</summary><div class="body">
+<p>What stays the same: your Python source (0 changes) and the TTIR (the abstract algorithm — a block of 1024 elements reduced, independent of hardware). What changes: at the TTGIR stage, the compiler maps the block onto the target's SIMD groups — 1024 elements over 32-lane warps (H100) means 32 warps' worth of structure, but over 64-lane wavefronts (MI300) the mapping differs, and <code>num_warps</code> is reinterpreted for the wavefront width. The final LLVM-to-machine step emits PTX vs AMDGCN. So the hardware-specific SIMD-width handling enters at TTGIR (the "GPU-IR" that adds layout), which is exactly why your source didn't need a wavefront audit — TTGIR is where the compiler absorbs the 32-vs-64 difference (quiz 2). Deliverable: a labeled version of the lowering diagram marking where the wavefront width first matters.</p>
+</div></details>
+
+<hr>
+<h1>Go deeper — the compiler that ports for you</h1>
+
+<h2>1. The lowering pipeline, stage by stage</h2>
+<pre><code>stage        what it represents                       vendor-specific?
+───────────  ───────────────────────────────────────  ─────────────────
+Python       @triton.jit — tiles, tl.load/store, masks  no (you write once)
+TTIR         block-level algorithm (MLIR dialect)        no
+TTGIR        + layouts: tiles->warps, memory patterns    YES (SIMD width enters here)
+LLVM-IR      gpu dialect -> nvvm (NVIDIA) / rocdl (AMD)   the branch point
+target       PTX (NVIDIA) / AMDGCN+hsaco (AMD)            fully vendor-specific
+insight: the higher IRs are portable (algorithm); vendor detail is pushed as LOW
+as possible (TTGIR and below). That's the general compiler-portability principle —
+keep the IR abstract, specialize late — and it's why MLIR (multi-level IR) exists.</code></pre>
+
+<h2>2. Autotuning: 5.6's dial, searched by machine</h2>
+<pre><code>@triton.autotune(configs=[
+    Config({'BLOCK_SIZE': 256}, num_warps=4, num_stages=2),
+    Config({'BLOCK_SIZE': 1024}, num_warps=8, num_stages=4), ...],
+    key=['n'])   // re-search when n changes
+what it does: benchmarks each config on THIS gpu at compile time, picks the best.
+  · BLOCK_SIZE  = tile size (5.5)
+  · num_warps   = threads per program (5.6's occupancy)
+  · num_stages  = software-pipelining depth (5.9's overlap, as a knob)
+why it beats hand-tuning across vendors: the optimal config differs per arch
+  (register file, smem, warp/wavefront width), and the tuner just re-searches per
+  backend — 5.6's dial turned by a machine, per GPU, for free. A human can't
+  re-tune every kernel for every target; the compiler does it on every build.</code></pre>
+
+<h2>3. Where compilers win, and where they don't (yet)</h2>
+<pre><code>compilers (Triton/MLIR) WIN:            vendor libraries/hand-asm still WIN:
+  fused/custom kernels (no library)      dense matmul at tensor-core peak (cuBLAS)
+  fusion-rich elementwise chains (A5)    the last few % of the FLOP ceiling
+  novel ops, research kernels            CUTLASS-level template metaprogramming
+  portability across vendors (0 source)  operations with a mature, tuned library
+the map (5.11, D1): compilers for the 90% (portable, fused, custom);
+  vendor library for the pinned-to-peak 10% (call cuBLAS/rocBLAS, don't reinvent).
+trend: the compiler frontier keeps rising — more of the 10% falls to compilers each
+  year — but "call the library for peak matmul" remains the safe default in 2026.</code></pre>
+
+<h2>Gotchas</h2>
+<div class="gotcha"><strong>Benchmarking Triton against cuBLAS on matmul.</strong> That's the peak operation vendor libraries own — testing Triton where it's designed to lose (quiz 1). Compare it on fused/custom kernels no library ships.</div>
+<div class="gotcha"><strong>Assuming "0 source changes" means "0 work."</strong> The compiler absorbs the porting and tuning, but you still re-validate numerically on the new hardware and re-profile (D8). A fixture certifies the machine it ran on (D2), compiler backends included.</div>
+<div class="gotcha"><strong>Trusting the compiler handled the wavefront width without checking.</strong> TTGIR does handle 32-vs-64, but compilers have bugs too — run the reduction fixtures on actual AMD hardware (quiz 2). Ownership moved to the compiler; verification is still yours.</div>
+<div class="gotcha"><strong>Skipping autotune and hard-coding one config.</strong> A block size tuned for an H100 is likely wrong on an MI300 (different smem/registers) — hard-coding forfeits the per-architecture search that is the compiler rung's main advantage (5.6).</div>
+<div class="gotcha"><strong>Expecting Triton to express everything.</strong> Triton's tile-based model fits many kernels but not all (irregular, pointer-chasing, or deeply stateful ones). When the model doesn't fit, drop to HIP/CUDA for that kernel — the rungs of D1's ladder coexist in one project.</div>
+<div class="gotcha"><strong>Ignoring compile/autotune time in latency-sensitive paths.</strong> Autotuning searches configs at first compile — a real one-time cost (like OpenCL's runtime build, D4). Cache the tuned kernel; don't re-autotune in a hot request path.</div>
+
+<h2>Scenario — the porting team that automated itself out of a job (the good way)</h2>
+<p>An ML infrastructure team maintains ~40 custom kernels — fused activations, a few attention variants, some quantization ops (Track A's world) — originally hand-written in CUDA. The company adds AMD MI300 capacity, and the mandate is "make the custom kernels run on AMD too." The team's first plan is to hipify all 40 and audit each for wavefront-64 bugs (D2) — a multi-week slog of renames, warp-literal hunts, and re-tuning, repeated for every kernel and destined to repeat again for the next vendor. A senior engineer proposes the compiler rung instead: rewrite the 40 kernels once in Triton (many were already Triton from Track A's A4 work), and let the compiler lower them to both PTX and AMDGCN with zero per-vendor source. The rewrite-to-Triton is real work up front, but it's paid once, and the payoff is structural: adding AMD becomes a rebuild, not a port; the wavefront-64 handling moves into the compiler (quiz 2); and <code>autotune</code> re-optimizes each kernel for the MI300's register file and wavefront width automatically, which the hand-port would have required a human to do per kernel (5.6, at 40x). The one place they don't use Triton is the matmul-heavy path — that calls cuBLAS on NVIDIA and rocBLAS on AMD, because chasing tensor-core peak is the vendor library's job (quiz 1, D1's last 10%). Six months later a third vendor's hardware arrives, and the custom kernels are a rebuild while the competition is still hand-porting. The moral is the compiler rung's whole thesis: the highest-leverage move in cross-vendor work is often to stop porting by hand and let the toolchain do it — you pay a one-time cost to express the kernel in a portable IR, and in exchange every future vendor is a compile target instead of a project. The team didn't eliminate the porting work; they moved it into the compiler, where it happens once per build instead of once per engineer per vendor.</p>
+
+<h2>Practice</h2>
+<details><summary>1. List the IR stages a Triton kernel passes through from Python to an AMD binary, and name the stage where the wavefront-64 difference is handled.</summary><div class="body">Python (@triton.jit) to Triton-IR (TTIR, block-level algorithm) to Triton-GPU-IR (TTGIR, adds hardware layout: tiles-to-warps, memory patterns) to LLVM-IR (gpu dialect to rocdl for AMD) to AMDGCN assembled into an hsaco binary. The wavefront-64 (SIMD width) difference is handled at the <strong>TTGIR</strong> stage, where the abstract block is mapped onto the target's SIMD groups — which is exactly why your Python source never encodes a literal 32 and never needs D2's audit (the compiler owns it there).</div></details>
+<details><summary>2. What does <code>@triton.autotune</code> do that a hand port across vendors can't, and which core lesson's "dial" is it turning?</summary><div class="body">It benchmarks a set of configs — block size, num_warps, num_stages — on the actual target GPU at compile time and picks the best, then re-does that search per architecture automatically. A hand port has to re-tune every kernel manually for every target, which doesn't scale past a few kernels or a couple vendors. It's turning 5.6's occupancy dial (plus 5.5's tile size and 5.9's pipeline depth), but by machine search instead of human intuition, per backend. That automated per-architecture re-tuning — not just translation — is why the compiler rung is ascendant.</div></details>
+<details><summary>3. Why is comparing Triton to cuBLAS on matmul the wrong benchmark, and what's the right one?</summary><div class="body">Matmul at large sizes is the tensor-core peak operation that vendor libraries (cuBLAS/rocBLAS) hand-tune to the FLOP ceiling with assembly-level scheduling — the last 10% Triton isn't designed to win (D1). So that benchmark tests Triton at its worst case against a specialist at its specialty. The right benchmark is a fused or custom kernel that no library ships — a fused activation-plus-bias epilogue, a novel attention variant (A5) — where Triton provides portable performance and cuBLAS provides nothing because it can't express the fusion. Judge a tool on its purpose: Triton's purpose is portable custom kernels, not beating the vendor matmul (quiz 1).</div></details>
+<details><summary>4. "Zero source changes to port a Triton kernel to AMD" — what work does that phrase still leave you?</summary><div class="body">Three things the compiler doesn't do for you: (1) numerically re-validate on the AMD hardware — run the fixtures there, because a fixture certifies the machine it ran on and compilers can have bugs (D2, quiz 2); (2) re-profile on the target — the roofline verdict doesn't port (D8), so confirm the kernel is still doing what you think; (3) the judgment call of whether this kernel belongs to Triton (the fused/custom 90%) or should call a vendor library (the peak matmul 10%). The compiler absorbs the translation and tuning; it doesn't absorb validation, profiling, or architectural judgment — which is precisely the senior-engineer work.</div></details>
+<details><summary>5. Explain the general compiler-portability principle "keep the IR abstract, specialize late" using the TTIR/TTGIR split.</summary><div class="body">The principle: represent the algorithm in a high, hardware-independent IR for as long as possible, and push vendor-specific detail to the lowest stages, so the portable part is maximized and the specialized part is isolated. In Triton, TTIR holds the abstract block-level algorithm (fully portable — the same for any GPU), and only TTGIR adds hardware layout (tiles-to-warps, SIMD width, memory patterns), with the true vendor branch at LLVM-IR-to-machine (nvvm vs rocdl). So a change of target only re-runs the low stages; the algorithm in TTIR is reused. This is why it's called MLIR (multi-level IR) and why the source never encodes vendor detail — the levels exist precisely to specialize late.</div></details>
+<details><summary>6. When does the Triton/compiler rung NOT fit, and what do you do instead?</summary><div class="body">It doesn't fit when the kernel doesn't match Triton's tile-based model — irregular or pointer-chasing algorithms (graph traversal, sparse structures with data-dependent access), deeply stateful kernels, or code needing an instruction Triton can't express. It also doesn't fit for peak matmul (call the vendor library). In those cases you drop that specific kernel to HIP/CUDA (the dialect rung) or the vendor library, while keeping the rest of the project on Triton — the rungs of D1's ladder coexist. A real cross-vendor codebase is usually mostly-Triton with a few HIP/CUDA kernels for the parts that don't lower well and library calls for the peak ops. Match each kernel to the rung that fits it.</div></details>
+<details><summary>7. The interview closer: "When do you reach for Triton/compiler-level portability versus hand-porting to HIP versus Kokkos?" Deliver the spoken skeleton.</summary><div class="body">"These are three rungs of the portability ladder, and I pick by what I'm porting and who should do the work. Triton is my choice for custom and fused GPU kernels — fused epilogues, attention variants, novel ops — because I write the kernel once in Python and the compiler lowers it through MLIR to PTX or AMDGCN with zero source changes AND re-autotunes it per architecture, turning the occupancy dial by machine instead of by hand. So adding a vendor is a rebuild, not a port, and the wavefront-64 handling moves into the compiler. I reach for HIP when I have a large existing CUDA codebase targeting mainly AMD and I want the closest-to-the-metal, lowest-risk port — renames plus a wavefront audit, full control. I reach for Kokkos when it's a big C++ application, especially HPC, that must run WELL across many vendors and outlive the hardware, because it makes layout and memory spaces compile-time parameters so one source is optimal everywhere. And across all three I keep the same discipline: call the vendor library for peak matmul — that's the last 10% Triton and hand-ports both lose to cuBLAS/rocBLAS — and re-validate numerically on each target because a fixture only certifies the machine it ran on. So: Triton for portable custom kernels with automated tuning, HIP for control on a CUDA-heavy AMD port, Kokkos for long-lived multi-vendor C++ apps, and always the vendor library for the peak. The unifying idea is that the compiler rung moves the porting into the toolchain — my job becomes judgment, not translation.' That framing — three rungs, one judgment layer — is the answer."</div></details>
+
+<div class="pager">
+  <a href="lesson-06.html">← Kokkos &amp; RAJA</a>
+  <a href="lesson-08.html">Next: Cross-Vendor Benchmarking →</a>
+</div>
+<div class="footer">GPU Mastery · Track D · Lesson 7 — works offline · progress saved in your browser</div>
+</div>
+<script src="../assets/diagramsD.js"></script>
+<script src="../assets/app.js"></script>
+</body>
+</html>

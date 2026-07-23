@@ -1,0 +1,171 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>C4 GLSL Shaders Deep Dive — GPU Mastery</title>
+<link rel="stylesheet" href="../assets/style.css">
+</head>
+<body data-lesson="cl4">
+<nav><div class="inner">
+  <a class="logo" href="../index.html">GPU<span>Mastery</span></a>
+  <a class="item" href="../index.html">Home</a>
+  <a class="item on" href="../curriculum.html">Curriculum</a>
+  <a class="item" href="../labs.html">Labs</a>
+  <a class="item" href="../setup.html">Lab setup</a>
+  <a class="item" href="../prompt.html">Generator prompt</a>
+</div></nav>
+<div class="wrap">
+
+<div class="lesson-top">
+  <div><span class="badge">Track C · Lesson 4</span><span class="badge dim">≈ 3 h</span></div>
+  <button id="donebtn" class="donebtn">Mark lesson complete</button>
+</div>
+<h1>GLSL Shaders — the I/O contract and the alignment trap</h1>
+<p class="lead">Shaders are small SIMT kernels (5.2), but their power and their bugs live at the boundary — how data gets in and results get out. Today: the vertex/fragment I/O contract, the four ways to feed a shader (a latency table straight out of 4.5), and the std140 layout rules whose vec3-padding trap silently corrupts data in a way that looks like a GPU bug and is really M2 L5's strides with alignment.</p>
+
+<p class="small dim">Lab note: shaders compile and run on any GPU; the SDK's glslang/glslc turns GLSL into SPIR-V offline. The layout arithmetic below is verifiable by hand (and any std140 calculator); no GPU needed to learn the rule that causes the most shader data bugs.</p>
+
+<h2>Concept</h2>
+
+<h3>The I/O contract: in, uniform, out</h3>
+<p>A shader has three kinds of data. <strong>Inputs</strong> (<code>in</code>): per-invocation data — vertex attributes for a vertex shader (position, normal, UV), or the interpolated varyings for a fragment shader. <strong>Uniforms</strong>: data constant across the whole draw — the MVP matrix, light positions, time. <strong>Outputs</strong> (<code>out</code>): what the stage produces — the vertex shader outputs clip position and varyings; the fragment shader outputs color. The subtle piece is the varying: a value the vertex shader writes <code>out</code> and the fragment shader reads <code>in</code> is <em>interpolated</em> across the triangle by the rasterizer, perspective-correctly by default (C1/C2). So the vertex shader computes per-vertex, the hardware blends per-pixel via barycentrics, and the fragment shader receives the blend. Getting the I/O declarations to match between stages (and match the pipeline's vertex layout) is the contract; a mismatch is a link error or, worse, silently wrong data.</p>
+
+<h3>Four ways to feed a shader — a latency/size table</h3>
+<div class="diagram" data-diagram="c4-descriptors" data-caption="Push constants (tiny, fastest), uniform buffers (per-frame constants), storage buffers (large, read/write), and textures (filtered) — the same small-hot-vs-big-cold hierarchy as 4.5's memory system."></div>
+<p>Uniform data comes in four flavors, and choosing right is 4.5's memory hierarchy thinking applied to graphics: <strong>push constants</strong> (~128 bytes, fastest — they ride in the command buffer itself) for tiny per-draw data like an object index or a single matrix; <strong>uniform buffers</strong> (UBOs, ~64 KB, cached) for per-frame constants like camera and lights; <strong>storage buffers</strong> (SSBOs, gigabytes, read/write) for large or variable-size arrays and compute output; and <strong>textures + samplers</strong> (gigabytes, with hardware filtering) for images. The principle is identical to 4.5: keep the small and hot data closest to the shader (push constants), and the big and cold data in buffers you index. Using an SSBO for a single matrix wastes the hierarchy; using push constants for a megabyte won't fit. Match the data's size and update frequency to the mechanism.</p>
+
+<h3>std140/std430: the vec3 padding trap</h3>
+<div class="diagram" data-diagram="c4-std140" data-caption="std140 aligns a vec3 to 16 bytes, so it occupies 16 (not 12) — a struct's GPU offsets differ from the naive C++ ones, and reading the wrong offset returns garbage. It's M2 L5's strides with alignment."></div>
+<p>Here is the bug that bites every graphics programmer once. When you share a struct between C++ and a shader via a UBO, the GPU lays it out by <strong>std140</strong> rules, which are not your C++ compiler's rules. The infamous case: a <code>vec3</code> aligns to <strong>16 bytes</strong>, not 12. So this struct:</p>
+<pre><code>struct { float a; vec3 b; float c; };
+naive C++ offsets you'd assume: a@0, b@4, c@16   (20 bytes)
+std140 ACTUAL offsets:           a@0, b@16, c@32  (48 bytes)
+   · a @ 0   (float, align 4)
+   · b @ 16  (vec3 aligns to 16! bytes 4..15 are PADDING)
+   · vec3 OCCUPIES 16 bytes (its 4th slot is padding)
+   · c @ 32  (after the padded vec3)</code></pre>
+<p>Upload your C++ struct's bytes and read <code>c</code> on the GPU and you get garbage, because the shader looks at offset 32 while your data put <code>c</code> at 16. This is not a GPU bug — it's M2 L5's stride/alignment model with std140's specific rules, and it's why every serious codebase either matches the rules exactly (pad your C++ structs to agree), uses <code>std430</code> (SSBO layout, tighter — vec3 still aligns to 16, but arrays pack better), or generates the layout from a single source of truth. The defense is to <em>verify offsets</em>, not assume them — the same "know your strides" discipline from M2 L5, now with real consequences for whether your lighting reads the right numbers.</p>
+
+<h3>Compilation: GLSL to SPIR-V</h3>
+<div class="diagram" data-diagram="c4-spirv" data-caption="GLSL compiles offline to SPIR-V (a portable IR); the driver finishes to vendor ISA at pipeline creation — 3.1's compiler pipeline, and the same portable-IR idea as Triton/MLIR and SYCL."></div>
+<p>Modern Vulkan doesn't consume GLSL directly; you compile GLSL (or HLSL) to <strong>SPIR-V</strong> — a portable intermediate representation — with <code>glslang</code>/<code>glslc</code>, offline, and hand the SPIR-V to the driver, which finishes to vendor ISA when the pipeline is created (5.1's compiled state). This is 3.1's compiler pipeline in graphics dress, and — you've seen this exact idea twice in Track D — SPIR-V is the same portable-IR strategy as Triton/MLIR (D7) and the backend under SYCL/OpenCL (D4): compile ahead to a vendor-neutral IR, let each driver specialize. Practical upshot: precompile your shaders to SPIR-V as a build step; don't ship GLSL and compile at runtime (that's the OpenGL shader-stutter problem you're leaving behind).</p>
+
+<h2>Worked example</h2>
+<div class="card">
+<p><strong>Task:</strong> Compute the std140 layout of a realistic material struct and find where a naive upload corrupts. Prediction first: for <code>{ vec3 albedo; float metallic; vec3 emissive; float roughness; }</code>, will the naive C++ offsets match std140, and if not, where does the first mismatch land?</p>
+<pre><code>struct { vec3 albedo; float metallic; vec3 emissive; float roughness; }
+naive C++ (12+4+12+4 = 32 bytes):  albedo@0, metallic@12, emissive@16, roughness@28
+std140 ACTUAL:
+  albedo    @ 0    (vec3, align 16, occupies 12, pad to 16)
+  metallic  @ 12   (float — fits in albedo's padding slot! align 4) ✓ lucky
+  emissive  @ 16   (vec3, align 16)
+  roughness @ 28   (float, align 4) ✓
+Prediction: albedo+metallic happen to pack (metallic uses the vec3's 4th slot),
+  so THIS struct aligns — offsets match at 0,12,16,28.
+Result: it works, but by luck. Swap to { vec3 albedo; vec3 emissive; ... } (two
+  vec3s adjacent) and emissive jumps to offset 16 (not 12), corrupting everything after.</code></pre>
+<p><strong>What to internalize:</strong> the terrifying part of std140 is that <em>some</em> structs happen to align and some don't, depending on whether a following scalar fits into a vec3's padding slot. A layout that works by luck today breaks the moment someone reorders fields or adds a vec3, and the symptom — a material reading wrong roughness or emissive — looks like a shading bug, not a layout bug, so it's chased in the wrong place. The disciplines that actually prevent it: put a <code>float</code> after each <code>vec3</code> deliberately (fill the padding), or use explicit <code>vec4</code>s, or generate the C++ and GLSL structs from one definition, and — always — verify the offsets with a std140 calculator or by printing <code>offsetof</code> against the shader's expectation. This is M2 L5's "know your strides" with teeth: in compute a stride mistake was slow; here a layout mistake is silently wrong pixels.</p>
+</div>
+
+<h2>Key points</h2>
+<ul class="keypoints">
+<li>Shaders have three data kinds: in (per-invocation, e.g. vertex attributes or interpolated varyings), uniform (constant across a draw), out (the stage's result) — a varying is written out by the VS and read in by the FS after perspective-correct interpolation (C2).</li>
+<li>Four ways to feed a shader, mirroring 4.5's hierarchy: push constants (~128 B, fastest), UBOs (~64 KB, per-frame constants), SSBOs (GBs, read/write), textures (filtered) — match data size/frequency to the mechanism.</li>
+<li>std140 aligns a vec3 to 16 bytes (occupying 16, not 12), so GPU struct offsets differ from naive C++ offsets — reading the wrong offset returns garbage (executed: a@0, b@16, c@32).</li>
+<li>The std140 trap is that some structs align by luck (a scalar fitting a vec3's padding) and break on field reorder — the symptom looks like a shading bug, so verify offsets, don't assume them (M2 L5 with teeth).</li>
+<li>GLSL compiles offline to SPIR-V (a portable IR) via glslang/glslc; the driver finishes to vendor ISA at pipeline creation (5.1) — the same portable-IR idea as Triton/MLIR (D7) and SYCL/OpenCL (D4).</li>
+<li>Precompile shaders to SPIR-V as a build step rather than compiling GLSL at runtime — that avoids the OpenGL shader-compile stutter.</li>
+</ul>
+
+<h2>Quiz</h2>
+<div class="quiz">
+  <div class="q">1. A team shares a C++ lighting struct with a UBO. Everything works until an artist adds a second vec3 field, after which materials render with wrong roughness and emissive values — but only for materials touched after the new field. A programmer suspects a shader math bug. Where should they actually look?</div>
+  <button class="opt">The fragment shader's lighting math — a wrong formula was introduced</button>
+  <button class="opt" data-c="1">The std140 memory layout. Adding a vec3 changed the byte offsets of every field after it, because std140 aligns vec3 to 16 bytes and the new vec3 pushed subsequent fields to offsets the C++ side doesn't match — so the shader reads roughness/emissive from the wrong bytes (garbage). The math is fine; the data is misaligned. Fix: recompute the std140 offsets, pad the C++ struct to agree (a float after each vec3, or vec4s), or generate both from one definition, and verify with a std140 calculator</button>
+  <button class="opt">The texture sampler is misconfigured for the new material</button>
+  <button class="opt">The GPU driver has a bug with vec3 in uniform buffers</button>
+  <button class="opt">The artist's material values are out of range</button>
+  <div class="expl">The symptom screams "shading bug" (wrong roughness/emissive), which is exactly why this is misdiagnosed and chased in the shader math. But the tell is temporal: it broke when a vec3 was ADDED, and only affects fields after it — the fingerprint of an alignment shift, not a math error. Option 4 blames the driver for correct (if surprising) std140 behavior. The correct answer is the worked example as a field diagnosis: a vec3 changed the offsets, the shader now reads the wrong bytes, and the fix is to make the C++ layout match std140 and verify it. "Wrong values after adding a field" is layout until proven otherwise.</div>
+</div>
+<div class="quiz">
+  <div class="q">2. You need to pass a per-object model matrix (64 bytes) that changes every draw, and a scene's 200 light structs (large, read in a loop) that change per frame. Which mechanisms fit each, and why?</div>
+  <button class="opt">Put both in push constants for speed</button>
+  <button class="opt" data-c="1">Push constants don't fit either well at those sizes (typically ~128 B total), and 200 lights certainly won't. The per-object matrix that changes every draw is a good fit for push constants if it fits the limit, or a small dynamic UBO otherwise — it's small and per-draw. The 200 lights are large and per-frame, so a storage buffer (SSBO) indexed in a loop is right — SSBOs hold big variable-size arrays. This is 4.5's hierarchy: small+hot (the matrix) near the shader, big+cold (the light array) in a buffer you index</button>
+  <button class="opt">Put both in a single giant SSBO to keep it simple</button>
+  <button class="opt">Use a texture for the lights and push constants for the matrix</button>
+  <div class="expl">Option 1 ignores the push-constant size limit (~128 B) — 200 light structs are orders of magnitude too big. Option 3 works but wastes the fast path for the tiny per-draw matrix and treats a per-draw value like bulk data. Option 4's texture-for-lights is an old trick from before SSBOs existed and is worse ergonomically now. The correct answer applies the size/frequency match: per-draw + tiny → push constants (or small dynamic UBO); per-frame + large array → SSBO. It's literally 4.5's memory-hierarchy reasoning — the mechanism should mirror how big and how often the data is.</div>
+</div>
+
+<h2>Exercises</h2>
+<details><summary>Exercise 1 — By hand (or with a std140 calculator), compute the offsets and total size of three structs: {float; vec3; float}, {vec3; vec3; float}, and {vec2; vec3; vec4}. For each, state whether a naive tightly-packed C++ struct would upload correctly, and where the first mismatch is.</summary><div class="body">
+<p>Expected: {float; vec3; float} → 0, 16, 32 (size 48); naive assumes 0,4,16 → breaks at the vec3 (offset 4 vs 16). {vec3; vec3; float} → 0, 16, 32 (size 48); naive assumes 0,12,24 → breaks at the second vec3 (12 vs 16). {vec2; vec3; vec4} → vec2@0 (align 8), vec3@16 (align 16, so pad 8..15), vec4@32 (align 16); naive breaks at the vec3. The pattern to internalize: every vec3 is a 16-byte alignment landmine, and a scalar right after a vec3 can sneak into its padding slot (the "lucky" case). Deliverable: the three offset tables and, for each, the C++ padding you'd add to make a tight upload correct. This is the exact skill that prevents the quiz-1 bug.</p>
+</div></details>
+<details><summary>Exercise 2 — Take a shader you compile to SPIR-V and inspect the result: dump the SPIR-V (spirv-dis) and note that the same GLSL produced a vendor-neutral IR. Then articulate why precompiling to SPIR-V at build time beats compiling GLSL at runtime, in terms of the OpenGL stutter problem.</summary><div class="body">
+<p>Expected: <code>glslangValidator -V shader.frag</code> (or glslc) emits SPIR-V; <code>spirv-dis</code> shows the portable IR — the same GLSL, one compile, vendor-neutral (the driver specializes it at pipeline creation). Precompiling to SPIR-V at build time means the expensive front-end compile happens once, offline, so at runtime the driver only does the fast back-end specialization — no frame hitches. OpenGL's runtime GLSL compilation is the classic "shader compile stutter": the first time a material is drawn, the driver compiles its shader mid-frame, dropping a frame. SPIR-V + pipeline pre-creation (and pipeline caches) is how modern engines eliminate it. Deliverable: your SPIR-V snippet and a one-line statement connecting build-time SPIR-V to stutter-free frames. It's the same "precompile, don't JIT in the hot path" lesson as OpenCL's runtime build (D4).</p>
+</div></details>
+
+<hr>
+<h1>Go deeper — the shader boundary in full</h1>
+
+<h2>1. The descriptor set: kernel arguments, bundled</h2>
+<pre><code>a descriptor set = the bundle of resources (UBOs, SSBOs, textures) a shader can access
+  @binding slots inside @set groups — the shader indexes them (set 0, binding 2...)
+  bind a set once, many draws share it (per-frame set) — like reusing kernel args
+BINDLESS (Vulkan 1.4 direction: descriptor indexing + VK_EXT_descriptor_heap):
+  put ALL textures in one big array, index by an integer in the shader — no re-binding
+  per material. This is how modern renderers avoid thousands of descriptor-set swaps
+  (and it's the same "index a big array" idea as an SSBO, applied to textures).
+mental model: a descriptor set is 5.2's kernel arguments; bindless is "pass the whole
+resource table once and index it," the graphics version of a global argument buffer.</code></pre>
+
+<h2>2. The alignment rules, compactly</h2>
+<pre><code>std140 (UBO):                          std430 (SSBO):
+  scalar (float/int): align 4            same
+  vec2:  align 8                         same
+  vec3:  align 16 (!!)                   align 16 (still!)
+  vec4:  align 16                        same
+  array/struct: element align rounded    tighter: arrays pack at element align
+    UP to 16 (arrays of float waste 12/16!) (no round-up-to-16 for arrays)
+takeaways: vec3 is always the trap (16, not 12). Arrays of scalars in std140 waste
+75% (each float padded to 16) — use std430/SSBO or pack into vec4s. VERIFY, don't assume.</code></pre>
+
+<h2>3. Where shaders fit the compiler story</h2>
+<pre><code>GLSL / HLSL  → glslang / glslc / DXC → SPIR-V (portable IR) → driver → vendor ISA
+  · SPIR-V is Khronos's IR — the SAME idea as Triton→PTX/AMDGCN (D7) and the
+    backend under SYCL/OpenCL (D4). Graphics, compute, and portability all converge
+    on "compile to a vendor-neutral IR, specialize per driver."
+  · precompile at build time (offline) → ship SPIR-V → fast pipeline creation,
+    no runtime GLSL compile stutter (the OpenGL problem, solved).
+  · SPIR-V is also why HLSL can target Vulkan and why cross-API shader tooling exists.
+one IR to rule the GPU: the portability lesson of Track D, hiding inside your shaders.</code></pre>
+
+<h2>Gotchas</h2>
+<div class="gotcha"><strong>Assuming C++ struct offsets match std140.</strong> vec3 aligns to 16, so they usually don't. Pad deliberately, use vec4s, or generate both from one source — and verify offsets with a calculator. The bug looks like a shading error (quiz 1).</div>
+<div class="gotcha"><strong>Arrays of floats/vec3 in a UBO.</strong> std140 rounds each array element up to 16 bytes, so an array of floats wastes 75% and reads wrong if packed tightly. Use std430 (SSBO) or pack four floats per vec4.</div>
+<div class="gotcha"><strong>Compiling GLSL at runtime.</strong> That reintroduces the OpenGL shader-compile stutter. Precompile to SPIR-V at build time and use pipeline caches so the driver only specializes, never front-end compiles, mid-frame.</div>
+<div class="gotcha"><strong>Mismatched I/O between stages.</strong> A varying declared out in the VS must match the FS's in declaration (location, type); a mismatch is a link error or silently wrong interpolation. Keep an explicit interface (locations) and check it.</div>
+<div class="gotcha"><strong>Using push constants for too much.</strong> The guaranteed minimum is small (~128 bytes); overflow is a validation error or a silent cap. Push constants are for tiny per-draw data; use a UBO/SSBO for anything larger.</div>
+<div class="gotcha"><strong>Forgetting a texture needs a sampler (and layout).</strong> A sampled image must be in the right layout (SHADER_READ_ONLY) and paired with a sampler; getting the layout wrong is a C8 barrier bug that shows as black or garbage textures. The shader boundary includes the resource's state, not just its bytes.</div>
+
+<h2>Scenario — the material bug that was really a byte offset</h2>
+<p>A rendering team adds a new physically-based material with an emissive color, extending the material UBO struct with a <code>vec3 emissive</code> inserted before the existing <code>float roughness</code>. Immediately, every material in the game renders with wrong roughness — some too glossy, some too matte — and worse, the emissive glows are the wrong colors. The lead graphics programmer, seeing wrong roughness and color, spends a day in the fragment shader auditing the PBR math (C6), finds nothing wrong, and starts to suspect a driver bug. Then a teammate who read this lesson asks the diagnostic question: "when did it break?" — and the answer, "when we added the emissive vec3," points straight at std140. They pull up a std140 calculator: inserting the <code>vec3 emissive</code> aligned it to a 16-byte boundary and shifted <code>roughness</code> and every subsequent field to new offsets, while the C++ upload still wrote them at the old, tightly-packed positions — so the shader was reading roughness from emissive's bytes and vice versa. The math was flawless; the data was scrambled by an alignment rule. The fix is to make the C++ struct match std140 exactly (add explicit padding, or reorder so scalars fill vec3 padding slots, or generate both structs from one schema) and to add a startup assertion that compares <code>offsetof</code> on the C++ side against the shader's expected offsets, so the next reorder fails loudly instead of silently. The morals are C4's spine. First, a data-layout bug wears the costume of a math bug — wrong values in, wrong pixels out — so the instinct to debug the shader math is exactly the wrong instinct; the tell is that it broke on a struct change, not a formula change. Second, this is M2 L5's stride lesson with real stakes: "know your strides" was a performance concern in compute and is a correctness concern here, because a misaligned read doesn't crash, it just quietly returns the wrong number and paints it on the screen. Verify your offsets; the GPU is doing exactly what you told it, at the address you (accidentally) specified.</p>
+
+<h2>Practice</h2>
+<details><summary>1. What is a "varying," how does its value reach the fragment shader, and what determines the interpolation?</summary><div class="body">A varying is a value the vertex shader writes as an <code>out</code> and the fragment shader reads as an <code>in</code>. Its value reaches the FS via the rasterizer: for each fragment, the three vertices' varying values are blended by the fragment's barycentric coordinates (C2), and — because it's an attribute in a perspective projection — the blend is perspective-corrected via 1/w by default (C1). So the VS computes per-vertex, the hardware interpolates per-pixel, and the FS receives the interpolated result. The interpolation is determined by the barycentrics (position within the triangle) and the interpolation qualifier (smooth/perspective-correct by default; flat or noperspective if you ask).</div></details>
+<details><summary>2. Compute the std140 offsets of { float a; vec3 b; vec2 c; } and give the total size.</summary><div class="body">a @ 0 (float, align 4). b: vec3 aligns to 16, so b @ 16 (bytes 4–15 are padding), occupying 16 (a vec3 takes a 16-byte slot). c: vec2 aligns to 8; the next free offset after b is 32, which is 8-aligned, so c @ 32, occupying 8. Total size rounds up to the struct's alignment (16): last field ends at 40, round up to 48. So offsets 0, 16, 32; size 48. A naive tight C++ struct (a@0, b@4, c@16, size 24) would mismatch at b — the classic vec3-16 trap.</div></details>
+<details><summary>3. Match each to the right shader-feed mechanism and justify: (a) a 4-byte object index per draw; (b) the camera view/projection matrices per frame; (c) a 10,000-entry particle array read/written by a compute shader.</summary><div class="body">(a) 4-byte object index per draw → push constants: tiny and per-draw, so it rides in the command buffer for the lowest latency. (b) camera matrices per frame → a uniform buffer (UBO): a modest block of constants updated once per frame and read by many draws, cached. (c) 10,000-entry read/write particle array → a storage buffer (SSBO): large, variable-size, and read/write (push constants and UBOs are read-only and size-limited). This is 4.5's hierarchy: small+hot → push constants; per-frame constants → UBO; big+mutable → SSBO. Size and update frequency pick the mechanism.</div></details>
+<details><summary>4. Why does the same GLSL compile to SPIR-V rather than straight to GPU machine code, and what problem does precompiling solve?</summary><div class="body">Because SPIR-V is a portable intermediate representation: compiling GLSL to SPIR-V (offline, with glslang/glslc) produces a vendor-neutral binary that any conformant driver can consume and specialize to its own ISA at pipeline creation (5.1). This decouples the language front-end from the vendor back-end — the same portable-IR strategy as Triton/MLIR (D7) and SYCL/OpenCL (D4). Precompiling to SPIR-V at build time solves the OpenGL shader-compile stutter: the expensive front-end compile happens once offline, so at runtime the driver only does fast back-end specialization (further cached), eliminating the mid-frame hitch when a new shader is first used.</div></details>
+<details><summary>5. An array of 1000 floats in a std140 UBO reads wrong and wastes memory. Explain both problems and the fix.</summary><div class="body">std140 rounds each array element's stride up to 16 bytes, so an array of floats stores each float in its own 16-byte slot: it wastes 12 of every 16 bytes (75%), and if the C++ side packs the floats tightly (4 bytes each), the shader reads every element from the wrong offset (element i at 16·i vs your 4·i) — garbage. Two fixes: (1) use std430 (an SSBO), which packs array elements at their natural alignment (4 bytes for floats), eliminating both waste and mismatch; or (2) pack four floats per vec4 in the UBO and index accordingly. The general rule: scalar/small-element arrays belong in SSBOs (std430), not UBOs (std140) — the vec3/array padding is std140's biggest footgun.</div></details>
+<details><summary>6. What is bindless (descriptor indexing), what problem does it solve, and which earlier concept is it like?</summary><div class="body">Bindless (descriptor indexing, a Vulkan 1.4 direction with VK_EXT_descriptor_heap) puts all resources — typically all textures — into one large array and lets the shader index it by an integer, instead of binding a separate descriptor set per material. It solves the descriptor-set-swap bottleneck: a traditional renderer rebinds descriptors thousands of times per frame (once per material), which is CPU overhead and prevents GPU-driven rendering; bindless binds the whole resource table once and each draw just passes an index. It's like an SSBO for textures — the same "index into a big array" idea you use for data buffers, applied to resource handles — and conceptually like passing one global argument table once (5.2's kernel arguments) and indexing it, rather than re-binding per call.</div></details>
+<details><summary>7. The interview closer: "You upload a struct to a uniform buffer and the shader reads wrong values. Walk me through how you'd diagnose and fix it." Deliver the spoken skeleton.</summary><div class="body">"My first hypothesis is a std140 layout mismatch, because that's the most common cause of 'shader reads wrong values' and it masquerades as a shading bug. The GPU lays out a UBO by std140 rules, which differ from a C++ compiler's packing — most importantly, a vec3 aligns to 16 bytes, occupying 16 not 12 — so my tightly-packed C++ struct's offsets probably don't match what the shader reads. I'd confirm it by computing the std140 offsets (by hand or with a calculator) and comparing them to my C++ offsetof for each field; the first field whose offsets disagree is where the corruption starts, and everything after it is garbage. The tell that points here first: it usually breaks right after someone adds or reorders a field, especially a vec3. The fix is to make the C++ layout match std140 — add explicit padding, put a scalar after each vec3 to fill its padding slot, or use vec4s — or generate the C++ and GLSL structs from one schema so they can't drift, and for arrays of scalars I'd move to an SSBO with std430 which packs tightly. Then I'd add a startup assertion comparing offsetof against the shader's expected offsets so the next reorder fails loudly. The key insight I'd want to convey is that this is a data-layout bug in a math bug's costume — the shader math is fine, it's reading the right formula from the wrong bytes — so I debug the layout, not the lighting. It's the same 'know your strides' discipline from tensor memory, but here a misalignment is silently wrong pixels instead of just slow.' Reaching for std140 first, and knowing vec3 aligns to 16, is the graphics-experience signal."</div></details>
+
+<div class="pager">
+  <a href="lesson-03.html">← First Triangle: OpenGL to Vulkan</a>
+  <a href="lesson-05.html">Next: Textures, Sampling, Mipmaps →</a>
+</div>
+<div class="footer">GPU Mastery · Track C · Lesson 4 — works offline · progress saved in your browser</div>
+</div>
+<script src="../assets/diagramsC.js"></script>
+<script src="../assets/app.js"></script>
+</body>
+</html>

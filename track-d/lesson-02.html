@@ -1,0 +1,198 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>D2 ROCm &amp; HIP — GPU Mastery</title>
+<link rel="stylesheet" href="../assets/style.css">
+</head>
+<body data-lesson="dl2">
+<nav><div class="inner">
+  <a class="logo" href="../index.html">GPU<span>Mastery</span></a>
+  <a class="item" href="../index.html">Home</a>
+  <a class="item on" href="../curriculum.html">Curriculum</a>
+  <a class="item" href="../labs.html">Labs</a>
+  <a class="item" href="../setup.html">Lab setup</a>
+  <a class="item" href="../prompt.html">Generator prompt</a>
+</div></nav>
+<div class="wrap">
+
+<div class="lesson-top">
+  <div><span class="badge">Track D · Lesson 2</span><span class="badge dim">≈ 3.5 h</span></div>
+  <button id="donebtn" class="donebtn">Mark lesson complete</button>
+</div>
+<h1>ROCm &amp; HIP — CUDA with the labels swapped, and one number that isn't</h1>
+<p class="lead">HIP is the lowest rung of D1's ladder: AMD's answer to "how do I run my CUDA on your GPU" is to give you an API that is CUDA with the identifiers renamed. The port really is that easy — the diff you'll measure is mechanical — right up until the single place it isn't: NVIDIA's warp is 32 lanes and AMD's wavefront is 64. This lesson is that one true difference, executed until it draws blood, wrapped in the stack that makes everything else feel like home.</p>
+
+<h2>Concept</h2>
+
+<h3>hipify: the diff really is renames</h3>
+<div class="diagram" data-diagram="d2-hipify" data-caption="hipify a CUDA file and read the diff: host API calls get a cuda→hip prefix swap; the kernel body and the launch syntax do not move a byte."></div>
+<p>HIP (Heterogeneous-computing Interface for Portability) ships in ROCm 7.2 as a C++ runtime and kernel language deliberately shaped like CUDA. Its porting tool, <strong>HIPIFY</strong>, comes in two forms: a Clang-based rewriter that understands the AST, and a <code>perl</code> script that is essentially a big <code>sed</code> of known renames. To see why the port is cheap, run it and count. Taking a standard saxpy and applying the canonical rename map:</p>
+<pre><code>$ hipify-perl saxpy.cu &gt; saxpy.hip.cpp ; diff saxpy.cu saxpy.hip.cpp
+&lt; #include &lt;cuda_runtime.h&gt;        →  &gt; #include &lt;hip/hip_runtime.h&gt;
+&lt; cudaMalloc(&amp;dx, sz);            →  &gt; hipMalloc(&amp;dx, sz);
+&lt; cudaMemcpy(dx, hx, sz, cudaMemcpyHostToDevice);  →  hipMemcpy(... hipMemcpyHostToDevice);
+&lt; cudaDeviceSynchronize();        →  &gt; hipDeviceSynchronize();
+&lt; cudaFree(dx);                   →  &gt; hipFree(dx);
+
+MEASURED: 6 of 15 lines changed — and ALL SIX are host-side API renames.
+The kernel itself:
+  __global__ void saxpy(int n, float a, float* x, float* y){
+      int i = blockIdx.x*blockDim.x + threadIdx.x;   // 0 lines changed
+      if (i &lt; n) y[i] = a*x[i] + y[i];               // 0 lines changed
+  }
+  saxpy&lt;&lt;&lt;(n+255)/256, 256&gt;&gt;&gt;(...);                   // &lt;&lt;&lt;&gt;&gt;&gt; UNCHANGED — HIP kept it</code></pre>
+<p>That is the lesson in one command. The <em>device</em> code — the part that took you five modules to learn to write well — changed by zero lines. Even the triple-angle-bracket launch survived (HIP kept CUDA's syntax rather than forcing OpenCL-style enqueue). Everything that moved was host plumbing (5.3's allocate/copy/sync), and it moved by a prefix. If porting were always this, D2 would be a footnote. It isn't, because of the next section.</p>
+
+<h3>The one row that isn't a rename: wavefront = 64</h3>
+<div class="diagram" data-diagram="d2-wavefront" data-caption="The hardcoded warpSize/2 = 16 reduction fully folds 32 lanes but silently abandons lanes 32–63 on a 64-wide wavefront. It compiles. It runs. It's wrong."></div>
+<p>D1's translation table printed one row in red. Here is why. A warp reduction (5.8) walks a shuffle tree whose offsets are seeded from the SIMD width: <code>for (int o = warpSize/2; o &gt; 0; o &gt;&gt;= 1) v += __shfl_down(v, o);</code>. On NVIDIA, <code>warpSize</code> is 32, so <code>o</code> runs 16, 8, 4, 2, 1 and lane 0 ends up holding the sum of all 32 lanes. Port that blind — leave a literal <code>16</code> where you meant "half a wavefront" — and on AMD's 64-lane wavefront the tree starts too small: offsets 16, 8, 4, 2, 1 fold lanes 0–31 into lane 0 and <strong>never touch lanes 32–63</strong>. The kernel compiles clean, launches clean, and returns the sum of the first half of your data. Let's not take that on faith — measure it:</p>
+<pre><code>simulated wavefront reduction (executed in NumPy — runs on any machine):
+  64 lanes of 1.0, CORRECT (offset starts at 32): lane0 = 64   ✓
+  64 lanes of 1.0, BUG    (offset starts at 16): lane0 = 32   ← exactly half
+  random 64 lanes, true sum = 327
+                  buggy(16)  = 191   and   sum(first 32 lanes) = 191   → IDENTICAL
+The bug is not "noisy" or "approximately right." It deterministically returns
+the sum of the first 32 of 64 lanes. On uniform data that's a clean ~2× low;
+on real data it's whatever the first half happened to hold — an answer that
+passes a smoke test and fails a fixture (M2 L6). This is the blind-port bug.</code></pre>
+<p>The fix is a one-word discipline: never write the literal <code>32</code> or <code>16</code> for "the warp." Use <code>warpSize</code> (a runtime value: 32 on NVIDIA, 64 on AMD) or, for compile-time trees, <code>__AMDGCN_WAVEFRONT_SIZE__</code>. The same landmine hides anywhere a kernel bakes in 32: <code>__shfl</code> offsets, <code>__ballot</code> masks (32-bit on NVIDIA, needs 64-bit on AMD), shared-memory tree sizes (5.5), and occupancy math that assumed 32 threads share a scheduler slot (5.6). Auditing for the literal 32 is the entire safety procedure of an AMD port.</p>
+
+<h3>The ROCm stack: same shape, new labels</h3>
+<div class="diagram" data-diagram="d2-stack" data-caption="Every tool you learned on NVIDIA has a ROCm twin at the same layer: rocBLAS for cuBLAS, LDS for shared, rocprof for ncu, hipcc for nvcc."></div>
+<p>Once the two ideas above land, the rest of ROCm is a familiarity exercise, because it was built layer-for-layer against CUDA's stack. Your library-first doctrine (5.11) still holds: <code>rocBLAS</code>/<code>rocFFT</code>/<code>rocSPARSE</code> are the drop-in twins of cuBLAS/cuFFT/cuSPARSE, and calling them is still the first move for a standard operation. Shared memory (5.5) is <strong>LDS</strong> (Local Data Share) — same on-chip scratchpad, same bank-conflict rules, and HIP even keeps the <code>__shared__</code> keyword. Your profiler ritual (5.10) transfers: <code>rocprofv3</code> and the compute profiler give you the same sectors/occupancy/stall story that ncu did, just with AMD counter names. And the compiler is <code>hipcc</code>, which lowers to AMDGCN the way nvcc lowered to SASS (5.1) — same fat-binary idea, different ISA.</p>
+<p>One place AMD doesn't merely match but changes the arithmetic: memory bandwidth. The MI300/MI350 accelerators pair the compute with HBM3E at bandwidths that dwarf PCIe-class cards, and the MI300A fuses CPU and GPU on one package with shared memory. That redraws 4.7's roofline — the ridge point (where a kernel flips from memory-bound to compute-bound) sits at a different arithmetic intensity on an MI300 than on a T4, so a kernel that was memory-bound on your Colab T4 may be compute-bound on an MI300 and vice-versa. Portability of <em>code</em> does not imply portability of <em>the roofline verdict</em> — you re-profile per machine (D8).</p>
+
+<h2>Worked example</h2>
+<div class="card">
+<p><strong>Task:</strong> Port the 5.8 single-warp reduction to HIP and ship it correctly. We'll do it the way a burned engineer does: port, then <em>predict the failure before running</em>, then fix. Machine model: an AMD GPU (wavefront 64); the arithmetic below was executed in a NumPy simulation so the numbers are real, not illustrative.</p>
+<pre><code>step 1 — hipify: the kernel is unchanged except we must confront warpSize.
+  original (NVIDIA-tuned): for (int o = 16; o &gt; 0; o &gt;&gt;= 1) v += __shfl_down(v, o);
+                                        ^^ baked-in 32/2
+
+step 2 — PREDICT before running. Input: 64 lanes holding values summing to 327.
+  Prediction if we ship the literal 16 on a 64-wide wavefront:
+     the tree folds lanes 0..31 only → result = sum(first 32 lanes) = 191.
+  Prediction if we fix to warpSize/2 = 32:
+     the tree folds all 64 → result = 327.
+
+step 3 — RUN (simulated):
+  buggy literal-16 : 191   ✓ matches prediction (and == sum of first 32 lanes)
+  fixed warpSize/2 : 327   ✓ matches prediction (== true sum)
+
+step 4 — the fix, generalized:
+  for (int o = warpSize/2; o &gt; 0; o &gt;&gt;= 1) v += __shfl_down(v, o);
+  // warpSize = 64 on AMD, 32 on NVIDIA — one token, portable and correct</code></pre>
+<p><strong>What to internalize:</strong> the dangerous thing about this bug is that it is <em>invisible to every check except a numeric fixture</em>. It compiles (the types are fine), it runs (no out-of-bounds — 5.4's sanitizer stays quiet), and on a quick test with small uniform data it looks plausible. Only an oracle that knows the true sum (M2 L6's fixture doctrine, which is exactly why the core drilled it) catches a deterministic 2×-low answer. This is the archetype of the whole blind-port failure class: the port <em>runs</em>, so you trust it; the port is <em>wrong</em>, so it costs you a week of debugging a "mysterious accuracy regression" that was one un-generalized literal. Predict-then-measure (M1 L7) turns that week into four lines.</p>
+</div>
+
+<h2>Key points</h2>
+<ul class="keypoints">
+<li>hipify a CUDA file and the diff is host-API renames — measured at 6 of 15 lines on saxpy, all cuda→hip prefixes; the kernel body and the &lt;&lt;&lt;&gt;&gt;&gt; launch are byte-identical, so device logic ports for free.</li>
+<li>The wavefront is 64 lanes on AMD versus 32 on NVIDIA — the one translation-table row that changes a number, and the one that makes a blind port compile, run, and return wrong answers.</li>
+<li>A hardcoded warpSize/2 = 16 reduction on a 64-wide wavefront deterministically returns the sum of the first 32 of 64 lanes (executed: true sum 327 → buggy 191), invisible to everything but a numeric fixture.</li>
+<li>The safety procedure for an AMD port is auditing for the literal 32/16 in shuffle offsets, __ballot masks (32-bit vs 64-bit), shared-memory tree sizes, and occupancy math — replace with warpSize / __AMDGCN_WAVEFRONT_SIZE__.</li>
+<li>The ROCm stack maps layer-for-layer onto CUDA: rocBLAS/rocFFT for the libraries (5.11), LDS for shared memory (5.5), rocprofv3 for ncu (5.10), hipcc→AMDGCN for nvcc→SASS (5.1).</li>
+<li>MI300/MI350 HBM3E bandwidth redraws the roofline (4.7): a kernel's memory-vs-compute-bound verdict is machine-specific, so portable code still demands per-machine re-profiling (D8).</li>
+</ul>
+
+<h2>Quiz</h2>
+<div class="quiz">
+  <div class="q">2. Wait — first the setup. A team hipifies a working CUDA library, all fixtures pass on their NVIDIA CI, they deploy to an MI300 cluster, and a downstream model's accuracy quietly degrades. No crashes, no errors. What's the first thing you check, and why does the CI being green not clear the port?</div>
+  <button class="opt">Check for out-of-bounds bugs with the sanitizer; the CI must have missed a memory error</button>
+  <button class="opt" data-c="1">Grep every kernel for hard-coded 32 / 16 / 0xffffffff — warp-width assumptions. The CI was green because it ran on NVIDIA (warpSize 32), where those literals are correct; the bug only manifests on AMD's 64-lane wavefront, where a baked-in 32-lane reduction or ballot silently processes half the lanes. Green CI on the wrong architecture proves nothing about the target; you need the fixtures to run on the AMD hardware</button>
+  <button class="opt">Reinstall ROCm; the accuracy drop is a driver version mismatch</button>
+  <button class="opt">Nothing to check — hipify is source-to-source, so a passing CUDA build guarantees correctness</button>
+  <div class="expl">Option 4 is the exact false confidence this lesson exists to destroy — hipify guarantees the code compiles, not that architecture-specific constants are right. Option 1 chases the wrong failure mode: this bug has no out-of-bounds access, so the sanitizer (5.4) stays silent — it's a logic error, not a memory error. The correct answer names the mechanism (warp-width literals) and the reason CI lied (it ran on 32-lane hardware). The deep lesson: a fixture only tests the machine it runs on, so cross-vendor ports demand cross-vendor CI — the wavefront bug is invisible until the fixture executes where warpSize is 64.</div>
+</div>
+<div class="quiz">
+  <div class="q">2. A kernel is memory-bound on your Colab T4 (roofline says so, 4.7). You port it to an MI300 with HBM3E, expecting the same verdict and tuning. Your teammate says "it's the same kernel, so it's still memory-bound — reuse the T4 tuning." Right or wrong?</div>
+  <button class="opt">Right — a kernel's arithmetic intensity is fixed, so its roofline verdict is portable</button>
+  <button class="opt" data-c="1">Wrong — arithmetic intensity is a property of the kernel, but the ROOFLINE it sits on is a property of the machine. MI300's HBM3E bandwidth and compute peak differ from the T4's, so the ridge point moves; a kernel that was memory-bound on the T4 can become compute-bound on the MI300 (or stay memory-bound but with a totally different achievable ceiling). The tuning that helped on the T4 (say, coalescing effort) may be irrelevant if the kernel is now compute-bound. Re-profile on the target</button>
+  <button class="opt">Wrong — the MI300 is always faster, so no tuning is needed at all</button>
+  <button class="opt">Right — HBM3E and GDDR behave identically for roofline purposes</button>
+  <div class="expl">The subtle correct point (4.7 wearing a cross-vendor hat): arithmetic intensity (FLOPs per byte) is intrinsic to the algorithm and ports; the roofline's slopes and ridge are the hardware's, and they don't. Option 3's "always faster" is the lazy over-claim D8 dismantles — faster at what, and per dollar/watt? The metric that survives porting is % of the target's OWN roofline, which is exactly why you re-profile rather than assume. Reusing a verdict across machines is reusing an answer to a question you never re-asked.</div>
+</div>
+
+<h2>Exercises</h2>
+<details><summary>Exercise 1 — Reproduce the wavefront bug yourself (runs on ANY machine, no GPU needed). Write a NumPy or plain-Python simulation of a shuffle-tree reduction over N lanes with a configurable starting offset. Show that offset=16 over 64 lanes returns sum(first 32), and offset=32 returns the true sum. Then predict, before running, what offset=8 over 64 lanes returns.</summary><div class="body">
+<pre><code>def reduce(vals, start):          # models v += __shfl_down(v, o)
+    v=list(vals); off=start
+    while off&gt;0:
+        for i in range(len(v)):
+            if i+off &lt; len(v): v[i]+=v[i+off]
+        off//=2
+    return v[0]
+# 64 lanes, offset 16 → sum of lanes 0..31 ; offset 32 → sum of all 64
+</code></pre>
+<p>Expected (executed): 64 ones → offset16 = 32, offset32 = 64; random sum 327 → offset16 = 191 = sum(first 32). Prediction for offset=8 over 64: it folds lanes 0..15 only → returns sum(first 16). The pattern: a start offset of 2^k reduces exactly the first 2^(k+1) lanes. Deliverable: a one-paragraph note for your team's porting checklist — "warp/wavefront literals are a correctness bug, not a perf bug; here's the 8-line repro." That repro is worth more than any lecture when a teammate doubts the risk.</p>
+</div></details>
+<details><summary>Exercise 2 — If you have an AMD GPU or WSL2 with ROCm, hipify a small CUDA program of yours and read the diff; count host-renames vs device changes. If you don't, do it on paper with the saxpy above plus a kernel that uses __shfl_down. Mark every line hipify changes AND every line it should flag for human review (the warp-width literals it can't fix).</summary><div class="body">
+<p>hipify handles the mechanical renames (cuda→hip on the host API, includes) but it does NOT know your intent on warp-width literals — a raw <code>16</code> is just an integer to the tool. So the human-review list is: any <code>__shfl_*</code> offset, any <code>__ballot</code>/<code>__activemask</code> (mask width 32→64), any <code>__shared__</code> array sized to a multiple of 32 that was really "one per warp lane," and occupancy calculations dividing by 32. Deliverable: the hipify diff plus a hand-annotated "hipify can't see this" list. Realizing the tool's boundary — it renames what it recognizes and is blind to semantics — is the exercise; that boundary is exactly the 10% of D1's 90/10 rule for the HIP rung.</p>
+</div></details>
+
+<hr>
+<h1>Go deeper — porting like someone who's been burned</h1>
+
+<h2>1. What hipify handles, and the 10% it can't</h2>
+<pre><code>hipify DOES (mechanical, safe):            hipify CANNOT (needs a human):
+  cuda* API      → hip* API                 warp-width literals (32/16) — semantics
+  cuBLAS         → hipblas (mostly)          inline PTX asm — no AMDGCN equivalent
+  &lt;cuda_runtime&gt; → &lt;hip/hip_runtime&gt;         __ballot 32-bit mask → 64-bit (uint64)
+  &lt;&lt;&lt;g,b&gt;&gt;&gt; kept as-is                        cooperative-groups edge cases
+  cub            → hipcub (names differ)     hand-tuned smem tile sizes per arch
+the 90% is the left column (a tool does it in seconds);
+the 10% is the right column (the reason this lesson exists).</code></pre>
+<p>Inline PTX is the sharpest edge: if a CUDA kernel dropped to <code>asm volatile</code> PTX for a specific instruction, there is no mechanical translation — AMDGCN is a different ISA, so that path must be rewritten (often back up to a portable intrinsic first). This is rare in application code and common in libraries, which is one more reason the library-first doctrine (5.11) pays off across vendors: let rocBLAS's authors own the AMDGCN assembly so you don't.</p>
+
+<h2>2. The blind-port bug taxonomy</h2>
+<pre><code>symptom                         root cause                         defense
+──────────────────────────────  ─────────────────────────────────  ───────────────────────
+answer ~2× low / half-right     warpSize/2 literal in reduction    use warpSize; fixture on AMD
+__ballot result wrong           32-bit mask on 64-lane wavefront   use 64-bit ballot type
+smem bank conflicts appear      tile sized to 32, wavefront is 64  size to warpSize
+occupancy lower than expected   regs/smem budget differs per arch  re-run occupancy calc (5.6)
+perf cliff, not wrong answer    coalescing width assumption        re-profile (5.7 still holds)
+subtle fp differences           different FMA/rounding order (M1 L8) budget-based fixtures, not bitwise</code></pre>
+<p>Notice the split: the top rows are <em>correctness</em> bugs (wrong answers — the dangerous kind, because they're silent), the bottom rows are <em>performance</em> bugs (slow but correct — the visible, safe kind). A blind port's real hazard is the correctness cluster, all rooted in the 32-vs-64 constant. The last row is a reminder from M1 L8: even a <em>correct</em> port won't be bitwise-identical to the CUDA run, because the hardware reorders floating-point differently — so your cross-vendor fixtures must use error budgets, never bitwise equality (the exact lesson 5.11 built its verification policy on).</p>
+
+<h2>3. MI-series memory and the redrawn roofline</h2>
+<pre><code>why AMD data-center parts change the performance conversation:
+  MI300X / MI355X : massive HBM3E capacity + bandwidth (embarrasses PCIe-class cards)
+  MI300A          : CPU+GPU on ONE package, shared/unified memory — no PCIe staging
+                    (4.6's bridge toll... deleted, for that hop)
+consequence for YOUR kernel:
+  the ridge point (AI where memory-bound flips to compute-bound) moves LEFT on high-BW
+  parts for some kernels and the achievable ceiling changes — so "memory-bound" is a
+  per-machine verdict. Re-run the roofline on the target (4.7); don't port the conclusion.</code></pre>
+
+<h2>Gotchas</h2>
+<div class="gotcha"><strong>Trusting green CI on NVIDIA to bless an AMD port.</strong> warpSize is 32 in that CI, so warp-width bugs are invisible there. Fixtures must run where warpSize is 64 or they test the wrong machine (quiz 1).</div>
+<div class="gotcha"><strong>The literal 32 (and 16, and 0xffffffff).</strong> Every hard-coded warp constant is a latent AMD bug. Grep for them before you trust a port; replace with warpSize or the wavefront macro.</div>
+<div class="gotcha"><strong>__ballot / __activemask mask width.</strong> A 32-bit mask can't address 64 lanes. On AMD these need a 64-bit type; a truncated mask drops half the wavefront's votes — a silent logic error in warp-vote algorithms.</div>
+<div class="gotcha"><strong>Assuming hipify handles inline PTX.</strong> It can't — PTX is NVIDIA's ISA. Any <code>asm</code> block needs a hand-written AMDGCN path or, better, a rewrite up to a portable intrinsic.</div>
+<div class="gotcha"><strong>Porting the roofline verdict with the code.</strong> "It was memory-bound on the T4" is not a fact about the kernel; it's a fact about the T4. Re-profile on the MI300 — the ridge moved (quiz 2).</div>
+<div class="gotcha"><strong>Expecting bitwise-identical results across vendors.</strong> Different FMA/rounding order (M1 L8) makes cross-vendor equality a fantasy. Use budget-based fixtures; a bitwise diff will "fail" a perfectly correct port.</div>
+
+<h2>Scenario — the accuracy regression that was one integer</h2>
+<p>A recommender team moves inference from H100s to a cheaper MI300 fleet to cut serving cost. The port is textbook: hipify runs in an afternoon, the build is clean, their unit tests (run on the old NVIDIA CI) are green, and they ship. A week later, offline metrics show the model's quality has slipped a few points — not catastrophically, just enough to matter, and with no error anywhere. The team burns days hunting data drift and config skew before someone reads this lesson's bug taxonomy and greps the custom kernels for warp constants. There it is: a hand-rolled softmax-normalization kernel with a warp reduction seeded at offset <code>16</code>, written years ago for 32-lane warps. On the MI300's 64-lane wavefronts it had been summing half of each normalization group — a deterministic, ~2×-off partial sum that skewed every score just slightly. The fix is one token (<code>16</code> → <code>warpSize/2</code>) and a new CI job that runs the fixtures on actual AMD hardware. The morals compound. First, the silent correctness bug is the expensive one: a crash would have been found in an hour, but a plausible-looking wrong number hid for a week. Second, and this is the one to carry: <em>a test only certifies the machine it ran on.</em> Their fixtures were excellent (M2 L6) and still missed it, because green-on-NVIDIA says nothing about wavefront-64 behavior. Cross-vendor correctness requires cross-vendor execution — the moment you support a second architecture, your CI matrix grows a second row, or your ports are faith-based.</p>
+
+<h2>Practice</h2>
+<details><summary>1. Write the hipify diff, by hand, for these four CUDA lines: <code>cudaMalloc(&amp;p, n);</code> / <code>cudaMemcpyToSymbol(C, &amp;h, n);</code> / <code>k&lt;&lt;&lt;g, b&gt;&gt;&gt;();</code> / <code>__syncwarp();</code>. Which one is NOT a clean rename?</summary><div class="body">hipMalloc(&amp;p, n); hipMemcpyToSymbol(C, &amp;h, n); k&lt;&lt;&lt;g, b&gt;&gt;&gt;(); — the launch is unchanged. The trap is <code>__syncwarp()</code>: it renames to <code>__syncwarp()</code> in HIP but its <em>semantics</em> lean on warp-width and the sync-mask concept that differs on a 64-lane wavefront. Three clean renames, one that hipify will rename but you must review — the recurring 90/10 split at the token level.</div></details>
+<details><summary>2. A kernel does <code>unsigned mask = __ballot_sync(0xffffffff, pred);</code> then <code>int count = __popc(mask);</code>. Port it to AMD and explain the two-part bug.</summary><div class="body">Part one: the mask literal <code>0xffffffff</code> is 32 bits — it can only represent 32 lanes, but a wavefront has 64, so half the lanes are unaddressable. Part two: the mask type must widen to 64-bit (<code>uint64_t</code>) and <code>__popc</code> becomes a 64-bit population count (<code>__popcll</code>-equivalent), or the count silently caps at the low 32 lanes' votes. The correct AMD version uses a 64-bit ballot type and a 64-bit popcount. This is the __ballot row of the taxonomy — a warp-vote algorithm that looks like a rename and is a width bug.</div></details>
+<details><summary>3. Your teammate says "hipify changed 40% of my file's lines, so HIP is very different from CUDA." Rebut with the right metric.</summary><div class="body">Line-count percentage is the wrong metric — it's inflated by host boilerplate (every malloc/memcpy/free is a rename). The right metric is "how many lines of KERNEL LOGIC changed," which for a clean port is zero. In the measured saxpy, 6 of 15 lines changed (40%) but all six were host-API renames and the device code was untouched. "40% of lines" and "0% of the hard part" are both true; only the second predicts the porting effort. This is why you read the diff, not the stat.</div></details>
+<details><summary>4. Why does the library-first doctrine (5.11) get MORE important when you go cross-vendor, not less?</summary><div class="body">Because the hardest-to-port code — inline assembly, warp-intrinsic-heavy kernels, tensor/matrix-core paths — is exactly what vendor libraries encapsulate. If you call rocBLAS instead of hand-writing a matmul, AMD's engineers own the AMDGCN assembly and the wavefront-64 tuning; your port of that operation is a one-line API rename. Every hot path you delegate to a library is a hot path you don't have to audit for the 32-vs-64 landmine. Portability multiplies the payoff of "don't roll your own."</div></details>
+<details><summary>5. On an MI300A (unified CPU+GPU memory), which piece of your standard CUDA host code becomes unnecessary, and which 4.6 concept does that delete?</summary><div class="body">The explicit host-to-device staging copy (<code>cudaMemcpy</code> H2D/D2H) becomes unnecessary for data already in the shared physical memory — the CPU and GPU address the same HBM. That deletes 4.6's bridge toll for that hop: no PCIe transfer, no staging buffer, no copy/compute overlap to schedule (5.9) for that data path. It doesn't delete the <em>concept</em> of data movement (on-package bandwidth still bills you), but it removes the PCIe bottleneck that dominated so many T4-era designs. Caveat: unified memory has its own page-migration costs, so "no copy" isn't "no cost" — re-profile (D8).</div></details>
+<details><summary>6. Design a CI matrix that would have caught the scenario's bug before production. What's the minimum addition to an NVIDIA-only pipeline?</summary><div class="body">The minimum addition is one job: run the existing numeric fixtures on actual AMD hardware (or an AMD-backed cloud runner) with wavefront 64. That single row flips the wavefront bug from "silent in production" to "red in CI," because the fixture's oracle now judges a 64-lane execution. Ancillary hardening: a static lint that greps kernels for bare <code>32</code>/<code>16</code>/<code>0xffffffff</code> literals and warns. The principle (quiz 1): a green test certifies only the architecture it ran on, so a multi-vendor product needs a multi-vendor CI matrix — full stop.</div></details>
+<details><summary>7. The interview closer: "You're handed a working CUDA reduction kernel and asked to make it run correctly on AMD. Walk me through exactly what you do." Deliver the spoken skeleton.</summary><div class="body">"I start by separating the two kinds of work, mechanical and semantic. Mechanically, I hipify — the host API renames from cuda to hip and the launch syntax survives, so the file compiles for AMD in minutes. Then the part that actually earns my paycheck: I audit the reduction for warp-width assumptions, because AMD's wavefront is 64 lanes, not 32. Specifically I look for a shuffle offset seeded from a literal — a <code>16</code> or <code>32</code> — and replace it with <code>warpSize/2</code> so the tree folds all 64 lanes instead of silently summing the first 32. I check any <code>__ballot</code> for a 32-bit mask that needs to widen to 64. Then I verify with a numeric fixture — an oracle sum with an error budget, not bitwise, because floating-point reorders differently across vendors — and critically I run that fixture on AMD hardware, not just NVIDIA CI, since the bug is invisible where warpSize is 32. Finally I re-profile on the target: the roofline verdict doesn't port, so I confirm whether it's still memory-bound before reusing any tuning. The whole thing is the 90/10 rule made concrete — the port is 90% free renames, and the 10% is this specific, findable wavefront audit. If I had to name the single highest-value check, it's grepping for the literal 32.' That last line is the hire signal — it shows I know the one thing that turns a clean-compiling port into a correct one."</div></details>
+
+<div class="pager">
+  <a href="lesson-01.html">← The Portability Problem</a>
+  <a href="lesson-03.html">Next: SYCL &amp; oneAPI →</a>
+</div>
+<div class="footer">GPU Mastery · Track D · Lesson 2 — works offline · progress saved in your browser</div>
+</div>
+<script src="../assets/diagramsD.js"></script>
+<script src="../assets/app.js"></script>
+</body>
+</html>

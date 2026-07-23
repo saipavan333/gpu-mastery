@@ -1,0 +1,169 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>1.6 Matrices & Matrix Multiplication — GPU Mastery</title>
+<link rel="stylesheet" href="../assets/style.css">
+</head>
+<body data-lesson="m1l6">
+<nav><div class="inner">
+  <a class="logo" href="../index.html">GPU<span>Mastery</span></a>
+  <a class="item" href="../index.html">Home</a>
+  <a class="item on" href="../curriculum.html">Curriculum</a>
+  <a class="item" href="../labs.html">Labs</a>
+  <a class="item" href="../setup.html">Lab setup</a>
+  <a class="item" href="../prompt.html">Generator prompt</a>
+</div></nav>
+<div class="wrap">
+
+<div class="lesson-top">
+  <div><span class="badge">Module 1 · Lesson 6</span><span class="badge dim">≈ 3 h</span></div>
+  <button id="donebtn" class="donebtn">Mark lesson complete</button>
+</div>
+<h1>Matrices — the operation GPUs were built for</h1>
+<p class="lead">A matrix is a grid of numbers that <em>acts</em>: it moves every point in space at once. Matrix multiplication is the single most-executed heavy computation on Earth — every neural network layer, every 3D camera, every physics solve. Learn it slowly here; you'll optimize it for the rest of the course.</p>
+
+<h2>Concept</h2>
+
+<h3>A matrix is a function you can store</h3>
+<p>An m×n matrix (m rows, n columns) eats an n-vector, produces an m-vector. The recipe never changes: <strong>output element i = (row i) · (input vector)</strong> — m dot products, and you own dot products now.</p>
+<pre><code>A = [ 2  0 ]      A·(x, y) = (2x, y)      — stretches x by 2: a "scale" function
+    [ 0  1 ]                                 stored as four numbers</code></pre>
+<p>The magic viewpoint (from this lesson's third diagram): <strong>the columns of A are where the basis vectors land.</strong> Column 1 = A·(1,0), column 2 = A·(0,1). Any matrix you ever meet can be read this way at sight — rotation, scale, projection, a neural layer's weights — no memorization required.</p>
+<div class="diagram" data-diagram="m1l6-transform" data-caption="Read any matrix by its columns: they are the images of the axes."></div>
+
+<h3>Matrix × matrix: composing two functions</h3>
+<p>If B then A are applied to a vector, the combined function is a single matrix C = A·B ("A after B"). The rule for computing it follows from that requirement — and it's dot products again:</p>
+<div class="diagram" data-diagram="m1l6-matmul" data-caption="C[i][j] = (row i of A)·(column j of B). One highlighted cell, fully worked."></div>
+<pre><code>C[i][j] = Σₖ A[i][k] · B[k][j]        // row i of A  ·  column j of B
+
+for (i = 0; i < M; i++)               // the triple loop — your Module 3 project
+  for (j = 0; j < N; j++) {
+    float s = 0;
+    for (k = 0; k < K; k++) s += A[i*K+k] * B[k*N+j];   // Lesson 2's linearization!
+    C[i*N+j] = s;
+  }</code></pre>
+<p>Shape rule: (M×K)·(K×N) = (M×N) — inner dimensions must match and disappear. Properties that matter:</p>
+<table>
+<tr><th>Property</th><th>Statement</th><th>Consequence</th></tr>
+<tr><td>Associative</td><td>(AB)C = A(BC)</td><td>Chain transforms freely; choose the cheaper grouping (deep dive §4 — big money)</td></tr>
+<tr><td><strong>Not</strong> commutative</td><td>AB ≠ BA in general</td><td>rotate-then-scale ≠ scale-then-rotate; order is meaning</td></tr>
+<tr><td>Identity I</td><td>AI = IA = A</td><td>1s on the diagonal; the "do nothing" transform, initialization staple</td></tr>
+<tr><td>Transpose</td><td>(Aᵀ)[i][j] = A[j][i]; (AB)ᵀ = BᵀAᵀ</td><td>rows↔columns; note the order flip — backprop lives on it</td></tr>
+</table>
+
+<h3>The cost: 2mnk, and why GPUs exist</h3>
+<p>Each of the m·n output cells needs k multiply-adds → <strong>2·m·n·k FLOPs</strong> (Lesson 3's FMA counting). Square case: 2n³ — cubic growth (Lesson 3's table says: handle with care). But look at the structure: every one of the m·n dot products is <em>independent</em> — no cell needs another cell's answer. A million independent dot products is exactly the shape of work a 10,000-lane machine devours. Matmul isn't "a thing GPUs happen to run"; modern GPUs (tensor cores) are silicon <em>shaped like this loop</em>.</p>
+
+<h3>Storage: the row-major / column-major schism</h3>
+<div class="diagram" data-diagram="m1l6-rowmajor" data-caption="Same grid, two linear orders. Every interop bug between C and cuBLAS starts here."></div>
+<p>Memory is 1D (Lesson 1); a grid must pick an order. C/C++/CUDA/NumPy default to <strong>row-major</strong> (i = r·W + c — Lesson 2's formula); Fortran, MATLAB, cuBLAS and classic BLAS assume <strong>column-major</strong> (i = c·H + r). Neither is faster in principle — but the <em>combination</em> of layout and access pattern decides everything (walk memory in its native order or pay), and the <em>mismatch</em> between conventions silently transposes matrices at API boundaries.</p>
+
+<h2>Worked example</h2>
+<div class="card">
+<p><strong>Task:</strong> A tiny neural layer: 2 inputs → 2 outputs, weights W = [[0.5, −1.0], [0.25, 0.75]], bias b = (0.1, −0.2), input x = (2, 4). Compute y = W·x + b by hand, then re-read the computation as "the columns view," then price the real-world version.</p>
+<p><strong>Dot-product view:</strong> y₁ = (0.5)(2) + (−1.0)(4) + 0.1 = 1 − 4 + 0.1 = <strong>−2.9</strong>; y₂ = (0.25)(2) + (0.75)(4) − 0.2 = 0.5 + 3 − 0.2 = <strong>3.3</strong>.</p>
+<p><strong>Columns view:</strong> y − b = x₁·(col 1) + x₂·(col 2) = 2·(0.5, 0.25) + 4·(−1.0, 0.75) = (1, 0.5) + (−4, 3) = (−3, 3.5) ✓ — the output is a <em>mix of the columns</em>, weighted by the inputs. Both views are worth owning: rows = "how each output is assembled," columns = "what each input contributes."</p>
+<p><strong>Scale it:</strong> a real transformer layer is the same line with W of 4096×4096 and a <em>batch</em> of x's stacked as a matrix: Y = X·Wᵀ + b. At batch 512: 2·512·4096·4096 ≈ 1.7×10¹⁰ FLOPs per layer — ~0.35 ms at 50 TFLOP/s (Lesson 3 method). <strong>Decision made:</strong> batching turned 512 matrix-vector products (memory-bound, AI ≈ 2 — each weight read does 2 FLOPs) into ONE matrix-matrix product (compute-bound, AI ≈ hundreds — each weight read is reused 512 times). Same math, ~50× faster per sample. "Batch to feed the beast" is the economics of all ML serving, and it falls straight out of counting reuse.</p>
+</div>
+
+<h2>Key points</h2>
+<ul class="keypoints">
+<li>A matrix stores a linear function; its columns are the landing spots of the basis vectors — read any matrix that way on sight.</li>
+<li>C[i][j] = row i · column j; shapes (M×K)(K×N)→(M×N); the inner dimension must match and vanishes.</li>
+<li>Matmul is associative (regroup freely — huge cost lever) but not commutative (order is meaning: AB ≠ BA).</li>
+<li>Cost is 2mnk FLOPs of mutually independent dot products — the exact shape of work GPUs and tensor cores are built to saturate.</li>
+<li>Row-major (C/CUDA/NumPy) vs column-major (Fortran/cuBLAS) is a storage-order convention; mismatches silently transpose your data.</li>
+<li>Batching converts matrix-vector (memory-bound, weights read once per sample) into matrix-matrix (compute-bound, weights reused across the batch) — the core trick of ML serving.</li>
+</ul>
+
+<h2>Quiz</h2>
+<div class="quiz">
+  <div class="q">1. A is 3×5, B is 5×2. Which products exist, and what shape results?</div>
+  <button class="opt">Both AB (3×2) and BA (2×3) — multiplication always works both ways</button>
+  <button class="opt" data-c="1">Only AB, shape 3×2 — BA would need B's 2 columns to match A's 3 rows</button>
+  <button class="opt">Only BA, shape 5×5</button>
+  <button class="opt">Neither — dimensions must be equal squares</button>
+  <div class="expl">AB: (3×5)(5×2) — inner 5s match → 3×2. BA: (5×2)(3×5) — inner 2 vs 3 fails. Shape-checking before writing any matmul line is a two-second habit that catches half of all framework bugs ("mat1 and mat2 shapes cannot be multiplied").</div>
+</div>
+<div class="quiz">
+  <div class="q">2. Your C code fills a row-major array with matrix M and calls a column-major BLAS gemm on it, no flags. What does the library actually compute with?</div>
+  <button class="opt">M — memory is memory</button>
+  <button class="opt">Garbage — it will crash on the layout mismatch</button>
+  <button class="opt" data-c="1">Mᵀ — it reads your rows as its columns; no error, wrong numbers</button>
+  <button class="opt">M with rows reversed</button>
+  <div class="expl">Both sides see the same 1D bytes but decode with different formulas (r·W+c vs c·H+r) — which is exactly the definition of transposition. Nothing crashes; results are silently wrong (or, worse, right for symmetric test matrices and wrong in prod). Fixes: use the 'T' transpose flags, swap operand order using (AB)ᵀ=BᵀAᵀ, or use cuBLAS's row-major-aware wrappers.</div>
+</div>
+
+<h2>Exercises</h2>
+<details><summary>Exercise 1 — Compute by hand: R(90°)·S where S scales x by 2 (S = [[2,0],[0,1]]), R = [[0,−1],[1,0]]. Then compute S·R(90°). Apply both to the point (1, 0) and explain the difference in one sentence.</summary><div class="body">
+<p>R·S = [[0·2+(−1)·0, 0·0+(−1)·1], [1·2+0·0, 1·0+0·1]] = [[0, −1], [2, 0]]. S·R = [[2·0+0·1, 2·(−1)+0·0], [0·0+1·1, 0·(−1)+1·0]] = [[0, −2], [1, 0]].</p>
+<p>Point (1,0): R·S gives column 1 of RS = (0, 2) — stretched along x <em>first</em>, then rotated (the stretch ends up vertical). S·R gives (0, 1) — rotated first (now vertical), then the x-stretch does nothing to it. One sentence: matrix order is application order (right-to-left), and geometry remembers which came first. Reading the answer off column 1 — no arithmetic — is the columns view paying rent.</p>
+</div></details>
+<details><summary>Exercise 2 — Diagnose from cost alone: a vision model needs P·Q·v where P is 512×4096, Q is 4096×4096, v is a 4096-vector (one sample, no batch). A teammate computes (P·Q) first "to cache it." Count FLOPs both ways; when IS caching PQ right?</summary><div class="body">
+<p>(P·Q) first: 2·512·4096·4096 ≈ 1.72×10¹⁰ FLOPs, then (PQ)·v: 2·512·4096 ≈ 4.2×10⁶ → ~1.72×10¹⁰ total. Q·v first: 2·4096·4096 ≈ 3.4×10⁷, then P·(Qv): 2·512·4096 ≈ 4.2×10⁶ → <strong>~3.8×10⁷ total — 450× cheaper</strong>. Associativity lets you choose; matrix-chain ordering is a real optimization (frameworks do NOT reorder for you — einsum optimize flags exist precisely for this).</p>
+<p>Caching PQ is right when it's reused enough: precompute cost ≈ 1.72×10¹⁰ amortizes if you apply PQ to ≥ ~1000 vectors (break-even where 1.72×10¹⁰ ≈ n·(2·512·4096 saved per use vs the two-step 3.8×10⁷)... roughly n ≥ 500–1000). Rule: fold constants when reuse is high; keep chains factored when inputs stream through once.</p>
+</div></details>
+
+<hr>
+<h1>Go deeper — the complete guide</h1>
+<p>Where the multiply rule comes from, the transform zoo, homogeneous coordinates (the 4×4 trick behind all 3D), matrix-chain economics, transposes in backprop, and the layout/stride machinery under NumPy and PyTorch.</p>
+
+<h2>1. The rule is forced, not chosen</h2>
+<p>Demand: (A·B)·v = A·(B·v) for every v — "one matrix that does B then A." Feed in basis vector eⱼ: B·eⱼ is column j of B; then A·(that column) must equal column j of AB. So <em>column j of AB = A applied to column j of B</em>, and expanding that application row by row gives C[i][j] = Σₖ A[i][k]B[k][j]. The "weird" rule is the only one that makes composition work — same reason function composition f(g(x)) isn't f(x)·g(x). If you internalize one derivation from this module, make it this one; interviewers who ask "why is matmul defined that way" are checking for exactly it.</p>
+
+<h2>2. The transform zoo (2D; 3D is the same idea per-axis)</h2>
+<pre><code>identity [1 0; 0 1]      scale(sx,sy) [sx 0; 0 sy]      rotate(θ) [cosθ −sinθ; sinθ cosθ]
+shear-x(k) [1 k; 0 1]    reflect-x [1 0; 0 −1]          project-onto-x [1 0; 0 0]</code></pre>
+<p>Sanity habits: a rotation's columns are unit length and perpendicular (it's a rigid motion — an <em>orthonormal</em> matrix, Rᵀ = R⁻¹, a fact that saves a real inverse). The projection matrix squashes — information is destroyed, no inverse exists. The <strong>determinant</strong> (for 2×2: ad − bc) is the area-scale factor: det(rotation) = 1, det(scale 2,1) = 2, det(projection) = 0 — zero determinant ⇔ dimensions collapsed ⇔ not invertible. That one number diagnoses "why is my transform not undoable."</p>
+
+<h2>3. Homogeneous coordinates: how translation sneaks in</h2>
+<p>Translation (x+tx, y+ty) is not linear (it moves the origin), so no 2×2 matrix does it. The fix powering every 3D API: add a coordinate. Point (x, y) becomes (x, y, 1); transforms become 3×3 (3D: 4×4):</p>
+<pre><code>[ 1 0 tx ]   [x]   [x + tx]
+[ 0 1 ty ] · [y] = [y + ty]      — translation is now a matrix like any other
+[ 0 0  1 ]   [1]   [  1   ]</code></pre>
+<p>Now rotate-about-a-pivot = T(c)·R(θ)·T(−c) — Lesson 4's translate-rotate-translate as ONE stored matrix, applied to millions of vertices for the price of one 4×4 multiply each. The whole graphics pipeline is Model·View·Projection: three 4×4s, pre-multiplied once per frame (associativity!), then one matrix-vector per vertex. Vectors-as-directions get w = 0 (translations must not move them) vs points w = 1 — mixing those up is Track C's most classic bug: "my normals translate."</p>
+
+<h2>4. Chain economics, formalized</h2>
+<p>Cost((M×K)(K×N)) = 2MKN. For a chain A₁A₂…Aₙ the total depends on parenthesization — Exercise 2 showed 450×. The optimal order is a classic dynamic-programming problem, but the working heuristic covers 95% of cases: <strong>collapse onto the smallest dimension first</strong> — if a vector (dimension 1!) sits at either end, multiply from that end inward, making everything matrix-vector. In einsum terms: <code>np.einsum('ij,jk,k->i', P, Q, v, optimize=True)</code> — the flag exists because the default left-to-right order can be catastrophically naive. Knowing WHY the flag exists puts you ahead of most working engineers.</p>
+
+<h2>5. Transpose: backprop's favorite operator</h2>
+<p>(AB)ᵀ = BᵀAᵀ — order flips, like socks and shoes. Two places this runs your future life: <strong>(a)</strong> cuBLAS interop (quiz 2): instead of physically transposing (a full memory pass), pass transpose <em>flags</em> — the library reads with swapped strides for free. <strong>(b)</strong> Backpropagation: if forward is y = W·x, the gradient flows backward through Wᵀ: ∂L/∂x = Wᵀ·(∂L/∂y). Every linear layer's backward pass is a matmul with the transposed weights — which is why training does ~2× the matmuls of inference (grad wrt input AND wrt weights: ∂L/∂W = (∂L/∂y)·xᵀ, an <em>outer product</em> — a matmul of two skinny matrices). You'll derive these honestly in Track A1; today, notice they're all still "row · column."</p>
+
+<h2>6. Strides: how NumPy/PyTorch really store matrices</h2>
+<p>A framework matrix is a flat buffer + a <em>stride</em> per dimension (bytes or elements to skip per +1 step — Lesson 2's multipliers, stored as data):</p>
+<pre><code>4×6 float32, row-major: strides = (6, 1)  elements   → a[i,j] at buffer[i*6 + j]
+a.T:                    strides = (1, 6)             → SAME buffer, no copy!
+a[:, ::2]:              strides = (6, 2)             → slicing = stride surgery</code></pre>
+<p>Transpose in NumPy/PyTorch is free — it edits strides, not memory. The bill arrives later: a strided ("non-contiguous") tensor defeats coalesced loads and vectorized kernels, so libraries call <code>.contiguous()</code> (a real copy) before hot ops. When PyTorch warns about non-contiguous tensors, or when your custom CUDA kernel gets a transposed view and reads garbage because it assumed row-major — this paragraph is the explanation. Strides are also how NCHW vs NHWC (Lesson 2's worked example) coexist in one framework.</p>
+
+<h2>7. Gotchas</h2>
+<div class="gotcha"><strong>AB when you meant BA.</strong> Non-commutativity + "which side does the vector go" (column vector: rightmost transform applies first). Write the application order as a comment: <code>// world = T * R * S * local</code>.</div>
+<div class="gotcha"><strong>Row-major data, column-major API (or vice versa).</strong> Silent transpose. Symmetric test matrices hide it; asserts on a known asymmetric fixture catch it in CI.</div>
+<div class="gotcha"><strong>NumPy <code>*</code> is elementwise.</strong> <code>A*B</code> is Hadamard, <code>A@B</code> is matmul. In MATLAB it's the reverse convention (* is matmul, .* elementwise) — porting scientists hit this constantly.</div>
+<div class="gotcha"><strong>Free transpose, expensive access.</strong> <code>a.T</code> costs nothing until a kernel walks it against the grain. Profile shows a mysterious 10× slowdown; <code>.contiguous()</code> (or a layout-aware kernel) fixes it.</div>
+<div class="gotcha"><strong>Chain order left to the defaults.</strong> P·Q·v computed left-to-right can be 100–1000× the cost of right-to-left. Put the vector-end first, or use einsum with optimize.</div>
+<div class="gotcha"><strong>Points vs directions in homogeneous coords.</strong> w=1 vs w=0. Transforming normals by the model matrix (instead of the inverse-transpose) shears them under non-uniform scale — lighting goes subtly wrong, and teams lose days.</div>
+
+<h2>Scenario — the 40 ms frame that was one flag away from 12 ms</h2>
+<p>An indie team's renderer chugs at 25 fps on scenes that should fly. You profile with Module-5 tools, but the findings are all Module-1 math. (1) Their skinning path computes bone·(bind⁻¹·(model·vertex)) per vertex — three matrix-vector products, 12 ms; associativity says precompute (bone·bind⁻¹·model) once per bone per frame (a few hundred 4×4 multiplies, microseconds) then ONE matrix-vector per vertex: 4 ms. (2) Physics broadphase multiplies (P·Q)·v with a 4096-wide Q every query — Exercise 2's bug verbatim; reordering saves 8 ms. (3) A GPU debug view samples a transposed matrix texture the slow way — a .contiguous()-equivalent bake fixes 6 ms. (4) Normals light wrong under the boss's non-uniformly-scaled door: inverse-transpose fix, no perf cost, one day of "why is the door too dark" closed. Frame: 40 ms → 12.5 ms, 80 fps. Not one new algorithm — just multiplication order, precomputation, layout, and w-discipline. This is what "knows matrices" means in production.</p>
+
+<h2>Practice</h2>
+<details><summary>1. Hand-compute [[1,2],[3,4]]·[[0,1],[1,0]], and the reverse order. What does [[0,1],[1,0]] DO, read by its columns?</summary><div class="body">AB = [[2,1],[4,3]] (columns swap), BA = [[3,4],[1,2]] (rows swap). B's columns: (1,0)→(0,1), (0,1)→(1,0) — it swaps the axes (a reflection across y=x). Post-multiplying permutes columns, pre-multiplying permutes rows — permutation matrices in action.</div></details>
+<details><summary>2. Shapes: X is (batch 64 × features 512), W₁ (512×2048), W₂ (2048×512). Verify X·W₁·W₂ works, give every intermediate shape, and count total FLOPs.</summary><div class="body">X·W₁ → (64×2048): 2·64·512·2048 ≈ 1.34×10⁸. Then (64×2048)·W₂ → (64×512): 2·64·2048·512 ≈ 1.34×10⁸. Total ≈ 2.7×10⁸ FLOPs — ~5 µs at 50 TFLOP/s; this two-matmul "MLP block" is the second half of every transformer layer.</div></details>
+<details><summary>3. Show R(α)·R(β) = R(α+β) by multiplying the 2×2 rotation matrices — which trig identities appear in the product cells?</summary><div class="body">Top-left: cosα cosβ − sinα sinβ = cos(α+β); bottom-left: sinα cosβ + cosα sinβ = sin(α+β) — the sum formulas from Lesson 4 §2, now revealed as "rotation matrices compose by adding angles." Also proves rotations DO commute with each other in 2D (α+β = β+α) — the exception that tests the rule.</div></details>
+<details><summary>4. Why is det [[2,0],[0,3]] = 6 the "right" answer geometrically? What happens to areas under [[1,2],[2,4]], and what does that tell you about solving it as a system?</summary><div class="body">Scale(2,3) turns the unit square into a 2×3 rectangle: area ×6 = det. [[1,2],[2,4]]: det = 4−4 = 0 — the plane collapses onto the line y = 2x (column 2 = 2·column 1), areas → 0. A collapsed map can't be undone: the system [[1,2],[2,4]]x = b has no solution for most b, infinitely many along the line — "singular matrix" errors in NumPy are this picture.</div></details>
+<details><summary>5. Using strides: a (1000×1000) float32 row-major matrix — give the strides of A, A.T, A[::2, :], and say which of the three defeats coalesced access when 32 threads read "a row."</summary><div class="body">A: (1000, 1). A.T: (1, 1000) — a "row" of A.T is a column of the buffer: consecutive threads hit addresses 4000 bytes apart — coalescing destroyed. A[::2, :]: (2000, 1) — rows are still internally contiguous (fine per-row), just fewer of them. Stride-1 in the thread-varying index is the whole game (Lesson 5.7 makes it quantitative).</div></details>
+<details><summary>6. Your framework reports "expected shape (B, 4096), got (4096, B)". Give the three legitimate fixes and the cost of each.</summary><div class="body">(1) <code>x.T</code> / <code>x.transpose(0,1)</code> — free (stride edit), but may cost later as non-contiguous. (2) <code>x.T.contiguous()</code> — one full copy pass (memory-bound, ~2·bytes/bandwidth), guarantees fast downstream. (3) Fix the producer to emit the right layout — free forever; the correct answer when you own the producing code. Knowing WHY (2) exists — kernels want stride-1 access — is the difference between cargo-culting and engineering.</div></details>
+<details><summary>7. Design: implement "rotate this 4096×4096 image by 30° about its center" as matrix machinery. Give the matrix pipeline (homogeneous), explain why you iterate over DESTINATION pixels applying the INVERSE, and name the sampling issue that remains.</summary><div class="body">M = T(center)·R(30°)·T(−center), 3×3 homogeneous. Iterate destination pixels (x', y'), compute source = M⁻¹·(x', y', 1), read source pixel. Forward mapping (source→dest) leaves holes: rotated source pixels land on non-integer targets and some destinations get zero hits. Inverse mapping guarantees every output pixel gets exactly one lookup. Remaining issue: source coords are fractional → sample by nearest (blocky) or bilinear (Lesson 7's weighted average, really a 4-pixel lerp of lerps). GPUs bake exactly this into texture units — your future <code>tex2D()</code> call is this design, in silicon. Note M⁻¹ = T(center)·R(−30°)·T(−center) — invert by reversing the story, no numeric inverse needed (rotations: Rᵀ = R⁻¹).</div></details>
+
+<div class="pager">
+  <a href="lesson-05.html">← Vectors & dot product</a>
+  <a href="lesson-07.html">Next: Probability & statistics →</a>
+</div>
+<div class="footer">GPU Mastery · Module 1 · Lesson 6 — works offline · progress saved in your browser</div>
+</div>
+<script src="../assets/diagrams.js"></script>
+<script src="../assets/app.js"></script>
+</body>
+</html>

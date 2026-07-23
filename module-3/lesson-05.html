@@ -1,0 +1,223 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>3.5 The Stack, the Heap & malloc — GPU Mastery</title>
+<link rel="stylesheet" href="../assets/style.css">
+</head>
+<body data-lesson="m3l5">
+<nav><div class="inner">
+  <a class="logo" href="../index.html">GPU<span>Mastery</span></a>
+  <a class="item" href="../index.html">Home</a>
+  <a class="item on" href="../curriculum.html">Curriculum</a>
+  <a class="item" href="../labs.html">Labs</a>
+  <a class="item" href="../setup.html">Lab setup</a>
+  <a class="item" href="../prompt.html">Generator prompt</a>
+</div></nav>
+<div class="wrap">
+
+<div class="lesson-top">
+  <div><span class="badge">Module 3 · Lesson 5</span><span class="badge dim">≈ 3 h</span></div>
+  <button id="donebtn" class="donebtn">Mark lesson complete</button>
+</div>
+<h1>The Stack, the Heap & malloc — you are the garbage collector now</h1>
+<p class="lead">Python freed memory when the last tag fell off (M2 L1). C hands you the whole lifecycle: request bytes, use them, return them — exactly once, at the right time, on every code path. This discipline IS cudaMalloc/cudaFree's discipline; learn it where the tools (3.8) can catch you.</p>
+
+<h2>Concept</h2>
+
+<h3>The memory map: four neighborhoods, four lifetimes</h3>
+<div class="diagram" data-diagram="m3l5-map" data-caption="Where a byte lives determines when it dies. Most memory bugs are wrong-neighborhood stories."></div>
+<pre><code>int global_counter;                    /* data/bss: lives for the whole program,   */
+                                       /* zero-initialized (unlike locals! — 3.2)  */
+void f(void) {
+    double local[256];                 /* STACK: born at call, DIES AT RETURN      */
+    double *big = malloc(1&lt;&lt;30);       /* HEAP: born NOW, dies when YOU say free   */
+}                                      /* local gone; big SURVIVES (and leaks if   */
+                                       /* f's caller never receives/frees it)      */</code></pre>
+<p>Stack: automatic, fast (bump a register), small (~8 MB default — a 2048×2048 float matrix is 16 MB: instant overflow), and frame-scoped, which is <em>why</em> 3.3's "return &local" dangles. Heap: explicit, large (GBs), survives returns — and therefore needs an owner. The question "who frees this?" must have exactly one answer, written down.</p>
+
+<h3>malloc / free: the contract</h3>
+<div class="diagram" data-diagram="m3l5-heap" data-caption="free() returns the bytes to the allocator; your pointer keeps the old address — dangling."></div>
+<pre><code>float *x = malloc(n * sizeof *x);      /* THE idiom: count × size-of-what-p-points-at */
+if (!x) { return -1; }                 /* malloc CAN fail: NULL — check it            */
+float *z = calloc(n, sizeof *z);       /* zeroed (and overflow-checked n*size!)       */
+free(x);                               /* return the block — exactly once             */
+x = NULL;                              /* disarm: later misuse now crashes cleanly    */
+/* the big three, forever:  LEAK (never free) · USE-AFTER-FREE (*x later) ·           */
+/* DOUBLE FREE (free twice) — all three detected by ASan/valgrind (3.8)               */</code></pre>
+<p>Why <code>sizeof *x</code> beats <code>sizeof(float)</code>: change x's type to double later and the allocation follows automatically — the size expression can't drift from the pointer (3.2's "say what you mean" applied to bytes). And <code>free(NULL)</code> is legal and does nothing — which makes cleanup paths simpler than you'd fear.</p>
+
+<h3>realloc and growth: Python's list, hand-built</h3>
+<div class="diagram" data-diagram="m3l5-grow" data-caption="Doubling capacity = amortized O(1) appends — and realloc may MOVE the block."></div>
+<pre><code>float *bigger = realloc(x, new_cap * sizeof *x);
+if (!bigger) { free(x); return -1; }   /* on failure the OLD block still lives —   */
+x = bigger;                             /* the classic leak: x = realloc(x, ...)    */
+/* realloc may move: every saved pointer INTO the old block is now dangling.       */
+/* You met this rule as vector-invalidation foreshadowing; here is its engine.     */</code></pre>
+
+<h3>The GPU mirror (why this lesson is non-negotiable)</h3>
+<table>
+<tr><th>CPU (this lesson)</th><th>GPU (Module 5)</th><th>Same discipline</th></tr>
+<tr><td>malloc / free</td><td>cudaMalloc / cudaFree</td><td>one owner, exactly one free, NULL-check (error-check) every call</td></tr>
+<tr><td>malloc returns NULL</td><td>returns cudaErrorMemoryAllocation</td><td>allocation failure is a NORMAL path — handle it</td></tr>
+<tr><td>memcpy</td><td>cudaMemcpy(+direction)</td><td>bytes, not elements: n * sizeof *p</td></tr>
+<tr><td>use-after-free = UB</td><td>use-after-cudaFree = corruption/crash</td><td>compute-sanitizer ≈ ASan (3.8's twin)</td></tr>
+<tr><td>alignment 16 (malloc)</td><td>alignment 256 (cudaMalloc)</td><td>M1 L1 masks; vectorized loads care (5.7)</td></tr>
+</table>
+
+<h2>Worked example</h2>
+<div class="card">
+<p><strong>Task:</strong> <code>FloatBuf</code> — the growable buffer (M2 L4 §4's amortized doubling, hand-built), plus the matrix-allocation decision 3.9 depends on. This is the last time you'll write manual growth (3.7 retires it with vector) — write it once to own the machinery.</p>
+<pre><code>#include &lt;stdlib.h&gt;
+#include &lt;stdint.h&gt;
+
+typedef struct { float *data; size_t len, cap; } FloatBuf;
+
+int fb_push(FloatBuf *b, float v) {
+    if (b-&gt;len == b-&gt;cap) {                       /* full → double (min 8)        */
+        size_t ncap = b-&gt;cap ? b-&gt;cap * 2 : 8;
+        float *nd = realloc(b-&gt;data, ncap * sizeof *nd);
+        if (!nd) return -1;                        /* old block still valid        */
+        b-&gt;data = nd;  b-&gt;cap = ncap;              /* pointers into old data: DEAD */
+    }
+    b-&gt;data[b-&gt;len++] = v;
+    return 0;
+}
+void fb_free(FloatBuf *b) { free(b-&gt;data); b-&gt;data = NULL; b-&gt;len = b-&gt;cap = 0; }
+
+/* ——— and the 3.9 decision: how to allocate an H×W matrix ———                     */
+float *matrix_flat(size_t H, size_t W) {           /* ✅ ONE block, contiguous,     */
+    return malloc(H * W * sizeof(float));           /* IDX(r,c,W) — cache-friendly, */
+}                                                   /* one free, cudaMemcpy-able    */
+/* ❌ the pointer-per-row alternative: H+1 mallocs, rows scattered across the heap, */
+/* an indirection per access, H+1 frees, and IMPOSSIBLE to memcpy to a GPU in one   */
+/* call. It appears in old textbooks; it should not appear in your code.            */</code></pre>
+<p><strong>Contract notes, each one a scar from this module:</strong> push returns int status (3.3's convention); the realloc result lands in a <em>temporary</em> first (the x=realloc(x,…) leak, dodged); fb_free disarms the pointer (dangling → clean crash); and the flat-matrix choice is M1 L6 layout + M2 L5 contiguity + 3.4 IDX converging into one line of engineering. <strong>The test that matters</strong> (M2 L6's playbook, C edition): push 10,000 values, assert data[i] == i for all i (growth preserved contents), assert exactly one free closes it leak-clean under ASan. That test IS the acceptance gate; write it now, and in 3.7 watch std::vector pass it with zero lines of your memory code.</p>
+</div>
+
+<h2>Key points</h2>
+<ul class="keypoints">
+<li>Stack = automatic, fast, ~8 MB, dies at return (dangling's origin); heap = explicit, huge, survives until freed (leak's origin); globals = whole-program, zeroed.</li>
+<li>The idiom: p = malloc(n * sizeof *p); check NULL; free exactly once; p = NULL after — and free(NULL) is a legal no-op that simplifies cleanup.</li>
+<li>realloc may move the block: assign to a temporary (or leak on failure), and every saved pointer into the old block is dead — vector invalidation's engine.</li>
+<li>Doubling capacity gives amortized O(1) growth (M1 L2's geometric series; M2 L4's Python list) — ~2N total copies for N pushes.</li>
+<li>Matrices: ONE flat allocation + IDX(r,c,W), never pointer-per-row — contiguity is cache speed, single ownership, and GPU-transferability in one decision.</li>
+<li>Every rule here is cudaMalloc/cudaFree's rule with the names changed; the ownership discipline you build now is Module 5's prerequisite.</li>
+</ul>
+
+<h2>Quiz</h2>
+<div class="quiz">
+  <div class="q">1. <code>double *make(void) { double d[1000]; return d; }</code> vs <code>double *make2(void) { return malloc(1000 * sizeof(double)); }</code> — why does gcc warn on the first and stay silent on the second, and what NEW obligation does the second create?</div>
+  <button class="opt">The first is too large for the stack</button>
+  <button class="opt" data-c="1">d lives in make's frame and dies at return (dangling — the stack neighborhood); malloc's block survives returns (heap) but now SOMEONE must free it — the caller inherits ownership, which the API must document</button>
+  <button class="opt">malloc arrays are faster to return</button>
+  <button class="opt">No difference; the warning is stylistic</button>
+  <div class="expl">Same signature, opposite lifetimes — the memory-map diagram in one quiz. The second is correct AND dangerous differently: an undocumented transfer of ownership is a leak factory ("who frees make2's result?"). Real APIs write it down: 'caller must free' in the docs, or a paired destroy function (make_buffer/free_buffer — the shape of cudaMalloc/cudaFree).</div>
+</div>
+<div class="quiz">
+  <div class="q">2. A service leaks ~40 MB/hour. The code contains <code>buf = realloc(buf, cap * 2 * sizeof *buf);</code> inside a retry loop where realloc occasionally fails (huge caps). Where's the leak?</div>
+  <button class="opt">realloc always leaks the old block</button>
+  <button class="opt">cap*2 overflows — 3.2's UB</button>
+  <button class="opt" data-c="1">On failure realloc returns NULL but the OLD block still exists — and buf just got overwritten with NULL: the old block's last tag is gone. Leak, then likely NULL-deref later</button>
+  <button class="opt">The loop should call free before realloc</button>
+  <div class="expl">The x = realloc(x, ...) anti-pattern: failure orphans the old allocation (no pointer left to free it — M2 L1's 'no tags left' but with no collector coming). The temporary-variable idiom from the worked example is the entire fix. This exact bug ships constantly because the happy path works perfectly. (cap*2 overflow is ALSO worth guarding at huge sizes — calloc checks its multiply; your realloc wrapper should too.)</div>
+</div>
+
+<h2>Exercises</h2>
+<details><summary>Exercise 1 — Write matrix_flat's full lifecycle test: allocate a 3×4, fill via IDX with 10r+c (3.4 P4's fixture), verify all cells AND buffer order, free once, set NULL. Then run it under <code>gcc -fsanitize=address</code> twice: once correct, once with the free deleted — and file both outputs. What does ASan call a leak at exit?</summary><div class="body">
+<pre><code>#include &lt;stdlib.h&gt;
+#include &lt;assert.h&gt;
+#define IDX(r, c, W) ((size_t)(r) * (W) + (c))
+int main(void) {
+    size_t H = 3, W = 4;
+    float *m = malloc(H * W * sizeof *m);
+    assert(m);
+    for (size_t r = 0; r &lt; H; r++)
+        for (size_t c = 0; c &lt; W; c++)
+            m[IDX(r, c, W)] = 10.0f * r + c;
+    assert(m[0] == 0.0f &amp;&amp; m[5] == 11.0f &amp;&amp; m[11] == 23.0f);  /* order pinned */
+    free(m); m = NULL;
+    return 0;
+}</code></pre>
+<p>With the free deleted, ASan's exit report reads: <em>"LeakSanitizer: detected memory leaks — Direct leak of 48 byte(s) in 1 object(s) allocated from: #1 main"</em> — the allocation's birthplace stack (3.8's report anatomy, leak edition). 48 bytes = 3×4×4 ✓ (M1 L1 arithmetic corroborating the tool). The habit this builds: every allocation test runs under ASan by default — in 3.9's Makefile, <code>make test</code> compiles with sanitizers, period.</p>
+</div></details>
+<details><summary>Exercise 2 — The invalidation trap, staged: push 3 floats into a FloatBuf, save <code>float *first = b.data;</code>, push until capacity doubles, then compare first with b.data (%p) and explain what reading *first NOW would be. Connect to the exact same trap in (a) M2 L5 and (b) 3.7's vector — and state the rule that fixes all three.</summary><div class="body">
+<p>After the doubling push, <code>b.data</code> prints a different address than <code>first</code> (realloc moved the block — sometimes it extends in place and they match: that nondeterminism is what makes the bug intermittent and vicious). Reading *first is use-after-free: the old block was returned to the allocator (likely still contains your bytes — plausible values! — until reused: the heisenbug factory, 3.8's "scary quiet branch"). The trilogy: (a) M2 L5 — NumPy views into an array that gets reassigned (Python kept the old buffer alive via refcount — the garbage collector was silently SAVING you); (b) here — realloc invalidates raw pointers, nothing saves you; (c) 3.7 — push_back invalidates iterators/pointers/references, same engine under RAII clothes. The one rule: <strong>after any operation that can grow a container, treat every previously-derived pointer/index-view into it as poison; re-derive from the container.</strong> Store indices, not pointers, across growth boundaries — indices survive moves (they're relative — M1 L2's linearization is move-proof by construction).</p>
+</div></details>
+
+<hr>
+<h1>Go deeper — the complete guide</h1>
+<p>What malloc actually does, error-path hygiene (goto cleanup — yes, really), stack depth economics, ownership patterns that scale, and alignment/aliasing footnotes that matter on GPUs.</p>
+
+<h2>1. Inside malloc: why allocation isn't free (pun intended)</h2>
+<p>malloc manages arenas of memory obtained from the OS (brk/mmap), carving blocks with headers (size, flags — typically 16 bytes overhead) and threading freed blocks onto free lists by size class. Consequences you'll feel: <strong>allocation costs</strong> (~50–200 ns typical; a malloc/free pair per loop iteration is a performance bug — allocate once outside, reuse); <strong>fragmentation exists</strong> (many mixed-size alloc/free cycles can leave unusable gaps — long-running services preallocate pools); <strong>writing past a block corrupts the allocator's own headers</strong> (the crash then happens INSIDE a later malloc/free with a baffling backtrace — when free() crashes, suspect an earlier overflow, not free). GPU note: cudaMalloc is 10–100× costlier still (driver round-trip, page tables) — which is why Module 5 code allocates once and reuses religiously, and why frameworks (PyTorch) run their own caching allocators on top. Your mental model transfers up the whole stack.</p>
+
+<h2>2. Error-path hygiene: the one sanctioned goto</h2>
+<pre><code>int pipeline(size_t n) {
+    float *a = NULL, *b = NULL, *c = NULL;
+    int rc = -1;
+    a = malloc(n * sizeof *a); if (!a) goto cleanup;
+    b = malloc(n * sizeof *b); if (!b) goto cleanup;
+    c = malloc(n * sizeof *c); if (!c) goto cleanup;
+    /* ... real work ... */
+    rc = 0;                                   /* success                          */
+cleanup:                                      /* ONE exit; frees in reverse;      */
+    free(c); free(b); free(a);                /* free(NULL) no-ops make this SAFE */
+    return rc;
+}</code></pre>
+<p>Three mallocs = seven distinct failure/success paths; per-path manual frees is how 3.7's RAII diagram got its leak. The goto-cleanup pattern (used throughout the Linux kernel and every serious C codebase) gives one exit, reverse-order teardown, and NULL-init + free(NULL) making partially-constructed states safe. This is ALSO the shape of CUDA host code: three cudaMallocs, work, one cleanup label with cudaFrees — you'll copy this skeleton into 5.3 nearly verbatim. (And yes: RAII automates precisely this; knowing the manual form is how you'll debug other people's C.)</p>
+
+<h2>3. Stack economics: when locals are wrong</h2>
+<pre><code>ulimit -s                    → 8192 (KB) typical: ~8 MB total stack
+double frame[1&lt;&lt;20];         → 8 MB in ONE frame: overflow now or on the next call
+recursion depth × frame size → the budget (M2 L3's tree_sum: log n depth = fine;
+                               linear recursion on big inputs = crash — same math)</code></pre>
+<p>Rules: locals for small, fixed scratch (≤ a few KB); heap for anything runtime-sized or big (3.4's VLA verdict, now with the mechanism visible); recursion budgeted by depth × frame (log-depth divide-and-conquer is safe by M1 L3's arithmetic). Stack overflow reports as SIGSEGV with a stack address near the guard page — 3.8 teaches you to recognize the signature (backtrace 40,000 frames deep = recursion; one frame with a huge local = the array). GPU twist for later: device threads get KILOBYTES of stack each (thousands of threads — M1 L3 estimation says why); kernel code keeps frames tiny, another reason kernels look C-ish rather than deeply abstracted.</p>
+
+<h2>4. Ownership patterns that scale beyond one function</h2>
+<table>
+<tr><th>Pattern</th><th>Shape</th><th>Where you'll see it</th></tr>
+<tr><td>Caller-allocates</td><td>f(float *out, size_t cap) — callee fills</td><td>snprintf, min_max, most hot paths (zero allocs inside)</td></tr>
+<tr><td>Callee-allocates, caller frees</td><td>T *make(); /* doc: caller frees */</td><td>strdup, matrix_flat — MUST be documented</td></tr>
+<tr><td>Create/destroy pairs</td><td>ctx_create(&h) … ctx_destroy(h)</td><td>cuBLAS handles, FILE*, 3.3's scenario library</td></tr>
+<tr><td>Arena / pool</td><td>alloc many from one region; free the REGION once</td><td>parsers, per-frame game allocs, GPU memory pools</td></tr>
+</table>
+<p>The through-line: ownership is part of the SIGNATURE's meaning, exactly like const was (3.3). A code review that asks "who frees this?" on every new pointer is applying this table; an API that can't answer is a bug that hasn't scheduled itself yet. The arena pattern deserves a star: one free for ten thousand allocations sidesteps per-object ownership entirely — it's how compilers, servers, and (as cudaMallocAsync memory pools) modern GPU runtimes actually cope.</p>
+
+<h2>5. Alignment & calloc's quiet superpowers</h2>
+<pre><code>malloc: aligned to 16 (max_align_t) — fine for double/float4-on-CPU
+aligned_alloc(64, n);        /* cache-line aligned (M4) — size must be multiple    */
+calloc(n, size);             /* zeroed AND overflow-checked: n*size can't silently */
+                             /* wrap (3.2!) — prefer it when zero-init is wanted   */</code></pre>
+<p>calloc's zero pages often come from the OS pre-zeroed (lazily mapped) — "calloc then write" can beat "malloc then memset" for huge buffers. And the overflow check matters: <code>malloc(n * sizeof *p)</code> with attacker-ish n can wrap (M1 L1) into a tiny allocation followed by a heap overflow — calloc(n, sizeof *p) refuses. For the course: calloc for zeroed, aligned_alloc when a tool (5.7's profiler) proves alignment matters, plain malloc otherwise.</p>
+
+<h2>6. Gotchas</h2>
+<div class="gotcha"><strong>x = realloc(x, …).</strong> Failure orphans the block (quiz 2). Temporary variable, always — make it muscle memory before 3.7 hides the realloc.</div>
+<div class="gotcha"><strong>free, then use "just to read."</strong> Freed memory often still holds your bytes — until the allocator reuses it, at which point values change "randomly." Plausible-data-then-chaos is THE use-after-free signature (Ex.2). ASan makes it deterministic.</div>
+<div class="gotcha"><strong>Freeing the middle.</strong> free() takes the EXACT pointer malloc returned. free(p + 10), free of a stack address, free of a string literal — heap corruption or abort. Keep the original; walk a copy (3.4's *p++ loops walk copies for this reason).</div>
+<div class="gotcha"><strong>sizeof drift.</strong> p = malloc(n * sizeof(float)) survives; then someone retypes p to double* and the malloc silently under-allocates. sizeof *p makes drift impossible (worked example's idiom, now justified twice).</div>
+<div class="gotcha"><strong>Leaks in early returns.</strong> Every return between malloc and free is a leak candidate — the RAII diagram's left panel. goto cleanup (§2), or restructure so allocation and free share a scope.</div>
+<div class="gotcha"><strong>double free after "shared" pointers.</strong> Two structs both storing p, both "owning" it — second free aborts (glibc detects; older systems corrupt). One owner; everyone else BORROWS (documented). This distinction becomes vocabulary in 3.7 (unique vs raw) and in Rust it became a whole language.</div>
+
+<h2>Scenario — the overnight run that ate the workstation</h2>
+<p>A labmate's parameter-sweep harness (C, 400 lines, "worked all semester") now kills the shared workstation: 60 GB of RAM consumed by hour six of an overnight sweep, OOM-killer takes the desktop with it. You get the mail because you "know C now." Forensics with this lesson: valgrind on a 3-minute mini-sweep reports <em>definitely lost: 1.4 GB in 1,200 blocks</em> — allocation birthplace: <code>load_config_matrix()</code>, called per sweep-point, whose result is passed to <code>evaluate()</code>… which was recently refactored to return early on invalid configs (~15% of points). The early return skips the caller's free — gotcha #5 verbatim, introduced by a PR that "didn't touch memory code" (it added a return). Fix one: goto-cleanup in the caller (§2), sweep now flat at 900 MB. Fix two, the systemic one: the harness allocated a fresh 1.2 MB matrix per point (86,000 points!) for a buffer whose size never changes — §1's allocate-once rule: hoist it, reuse, one free at the end; runtime drops 11% as a bonus (allocation overhead was real). Fix three, cultural: <code>make test</code> now runs the mini-sweep under ASan with <code>ASAN_OPTIONS=detect_leaks=1</code>, and the CI gate (M2 L6's constitution, C amendment #2) fails on any new "definitely lost" byte. The postmortem's one-liner for the lab wiki writes itself: <em>leaks are introduced by control-flow changes, not memory changes — so leak detection must be automatic, not vigilant.</em> Three lessons of this module, one evening, one workstation returned to service.</p>
+
+<h2>Practice</h2>
+<details><summary>1. Classify each address's neighborhood and lifetime, and mark the bug: (a) static double cache[1000]; (b) double tmp[1000] in a function; (c) malloc'd block returned up 3 call levels; (d) &tmp[5] stored in a global struct; (e) a string literal "gpu".</summary><div class="body">(a) data segment, whole-program, zero-init ✓. (b) stack, dies at return ✓ (if ≤ a few KB). (c) heap, alive until freed — fine IF ownership documented (quiz 1). (d) BUG: stack address outliving its frame via a global — dangling the moment the function returns (the map diagram's red note). (e) read-only data segment, whole-program — writing it is UB (and free()-ing it is gotcha #3). Five addresses, four neighborhoods, one dangling — the triage skill in miniature.</div></details>
+<details><summary>2. Compute the FloatBuf copy bill: pushing N = 1,000,000 floats with doubling from cap 8 — how many reallocs, how many floats copied in total, and what fraction is that of N? (M1 L2's geometric series, now with YOUR code as the subject.)</summary><div class="body">Doublings: 8→16→…→2²⁰ ≈ 17 reallocs (⌈log₂(10⁶/8)⌉). Copies: each realloc copies the current contents: 8+16+…+2¹⁹ = 2²⁰−8 ≈ 1.05M floats — ≈ 1.05× N total, i.e., amortized ~1 extra copy per element (the series sums to &lt;2× the final size; M1 L2 §4's r=½ sum read backwards). This is WHY doubling (not +1000 per grow: that's N²/2000 copies — Gauss's revenge). reserve()-style preallocation (cap = N upfront) makes it 0 reallocs — the optimization 3.7's vector exposes as one method call.</div></details>
+<details><summary>3. Spot all four bugs: <code>char *dup_upper(const char *s) { char buf[64]; strcpy(buf, s); for (char *p = buf; *p; p++) *p = toupper(*p); return buf; }</code> — then write the correct version with THIS lesson's tools.</summary><div class="body">(1) strcpy unbounded into 64 bytes — overflow for long s (3.4). (2) returns stack buffer — dangling (the quiz!). (3) toupper on plain char — UB for negative chars (3.2/3.4 P3). (4) no NULL policy for s. Correct: <code>char *dup_upper(const char *s) { if (!s) return NULL; size_t n = strlen(s) + 1; char *out = malloc(n); if (!out) return NULL; for (size_t i = 0; i &lt; n; i++) out[i] = (char)toupper((unsigned char)s[i]); return out; /* doc: caller frees */ }</code> — heap for the outliving result, +1 budget, cast discipline, documented ownership. Four modules of scars in one 6-line function; this exact question (strdup-with-a-twist) is an interview staple.</div></details>
+<details><summary>4. Why does the allocator's own crash implicate YOUR earlier code? Explain the header-corruption mechanism (§1), the telltale backtrace shape ("crash inside free/malloc"), and the 30-second ASan experiment that converts the mystery into a line number.</summary><div class="body">Blocks carry allocator metadata adjacent to your bytes; writing one element past your block (3.4's fencepost) lands in the NEXT block's header (or this block's footer). The corruption sits silent until the allocator next walks its structures — a later, unrelated malloc/free aborts ("corrupted size vs. prev_size", "invalid pointer"). Backtrace shape: top frames all in libc's allocator, YOUR frame is some innocent free() far from the crime. Experiment: recompile -fsanitize=address, rerun — ASan's redzones catch the overflow AT THE WRITE, with the 3.8 report naming your fencepost line. Rule extracted: allocator crashes are messengers; shoot the overflow, not the messenger.</div></details>
+<details><summary>5. Design the reuse refactor: a loop calls <code>process_chunk()</code> 10,000 times; inside, it mallocs a 2 MB scratch buffer, uses it, frees it. Give the refactored signature(s), the ownership story, the failure-path story, and the measured-cost estimate you'd put in the PR description (§1 numbers + M1 L3 arithmetic).</summary><div class="body">Refactor: hoist — <code>float *scratch = malloc(SCRATCH_BYTES)</code> once before the loop; signature becomes <code>process_chunk(..., float *scratch, size_t scratch_cap)</code> (caller-allocates pattern — §4 row 1); one free after; callee asserts cap sufficiency at entry (M2 L6 boundary). Ownership: loop owns; callee borrows (const-ness on the OTHER params documents what's read). Failure path: ONE malloc to check instead of 10,000 mid-flight failure points. PR arithmetic: 10,000 × (malloc+free ≈ 150 ns) ≈ 1.5 ms saved — honestly small! — BUT: eliminates 10,000 failure paths, all fragmentation churn, and (the real win) makes the buffer's lifetime obvious for the CUDA port, where the same refactor saves 10,000 × ~200 µs of cudaMalloc = 2 SECONDS (§1's GPU note). Writing "the CPU win is negligible; the pattern is for correctness + the GPU port" is exactly the honesty that makes PRs trustworthy.</div></details>
+<details><summary>6. valgrind vocabulary: differentiate "definitely lost", "indirectly lost", "still reachable" at exit — which one is the 3.8-gotcha false-alarm-ish category, which one signals a broken data structure, and what's the one-line policy for CI?</summary><div class="body">Definitely lost: no pointer chain reaches the block — a true leak (CI: fail). Indirectly lost: reachable only THROUGH a definitely-lost block (a leaked list head drags its nodes — fix the head, these vanish; signals the structure's OWNER leaked). Still reachable: a live global/static pointer still holds it at exit — technically not leaked (the OS reclaims), often benign (caches, one-time inits), the false-alarm-ish bucket 3.8's gotcha names… but GROWING still-reachable across iterations is a leak wearing a seatbelt. CI policy line: fail on any new definitely/indirectly lost; report (don't fail) still-reachable, with a trend graph. That one line is the difference between a leak gate teams trust and one they mute.</div></details>
+<details><summary>7. Design: an arena allocator for 3.9's benchmark harness — arena_create(cap), arena_alloc(a, n) (bump pointer, 16-aligned), arena_reset(a), arena_destroy(a). Specify the struct, the alignment math (M1 L1 masks!), what alloc does when full (policy!), why reset is O(1), which ownership pattern this is, and the exact reason GPU frameworks converged on the same design.</summary><div class="body"><code>struct arena { uint8_t *base; size_t cap, used; };</code> create: one malloc(cap). alloc: <code>size_t off = (a-&gt;used + 15) &amp; ~(size_t)15;</code> (M1 L1's round-up mask, at last in production); if off + n &gt; cap → return NULL (policy: refuse — the harness sizes arenas from a dry run; growing would invalidate outstanding pointers, the Ex.2 rule). Return base+off; used = off+n. reset: <code>used = 0;</code> — O(1) "free everything": no per-block bookkeeping EXISTS (§4's arena row: ten thousand allocs, one lifetime). destroy: free(base). Ownership: the arena owns all; borrowers never free — per-iteration scratch gets arena_reset between benchmark reps (zero alloc churn inside timed regions: the §1 rule enforced structurally, which also makes timings LESS NOISY — M1 L7 smiles). GPU convergence: cudaMalloc's cost (§1) and fragmentation on 80 GB cards pushed every framework to pool/arena designs (PyTorch's caching allocator, CUDA's cudaMemPool) — same struct, same bump, same reset-between-iterations, bigger numbers. You've now designed the memory system you'll later configure via environment variable in Track A10.</div></details>
+
+<div class="pager">
+  <a href="lesson-04.html">← Arrays & pointer arithmetic</a>
+  <a href="lesson-06.html">Next: Structs, headers & the build →</a>
+</div>
+<div class="footer">GPU Mastery · Module 3 · Lesson 5 — works offline · progress saved in your browser</div>
+</div>
+<script src="../assets/diagrams3.js"></script>
+<script src="../assets/app.js"></script>
+</body>
+</html>

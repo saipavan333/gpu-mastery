@@ -1,0 +1,177 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>D1 The Portability Problem & the 2026 Landscape — GPU Mastery</title>
+<link rel="stylesheet" href="../assets/style.css">
+</head>
+<body data-lesson="dl1">
+<nav><div class="inner">
+  <a class="logo" href="../index.html">GPU<span>Mastery</span></a>
+  <a class="item" href="../index.html">Home</a>
+  <a class="item on" href="../curriculum.html">Curriculum</a>
+  <a class="item" href="../labs.html">Labs</a>
+  <a class="item" href="../setup.html">Lab setup</a>
+  <a class="item" href="../prompt.html">Generator prompt</a>
+</div></nav>
+<div class="wrap">
+
+<div class="lesson-top">
+  <div><span class="badge">Track D · Lesson 1</span><span class="badge dim">≈ 3 h</span></div>
+  <button id="donebtn" class="donebtn">Mark lesson complete</button>
+</div>
+<h1>The Portability Problem — your CUDA skills were never about CUDA</h1>
+<p class="lead">Five modules taught you the GPU in NVIDIA's dialect: warps, shared memory, coalescing, streams, reductions. This track proves those were the IDEAS, not the vendor — the same primitives run under new names on AMD, Intel, and every web browser. Today we map the whole territory: why portability stopped being optional in 2026, the one translation table that is this track's spine, and the four families of portable code you'll spend the next eight lessons inside.</p>
+
+<h2>Concept</h2>
+
+<h3>Why portability stopped being optional</h3>
+<div class="diagram" data-diagram="d1-landscape" data-caption="Four forces pushing every serious GPU shop off single-vendor code — and the uncomfortable TOP500 ranking that makes it concrete."></div>
+<p>For a decade the honest advice was "just use CUDA" — the ecosystem (cuBLAS, Nsight, nvcc) was so far ahead that portability was a tax with no payoff. In 2026 the arithmetic flipped. Four forces did it. <strong>Supply:</strong> one vendor cannot physically build enough silicon for the AI demand curve, so the GPU you can actually <em>buy</em> this quarter may not be the one you trained on. <strong>Price:</strong> dollars-per-FLOP now varies ~3× across vendors and clouds, and at datacenter scale that is the whole margin (4.6's bridge economics, wearing a purchasing hat). <strong>Browsers:</strong> WebGPU shipped in every major browser, turning ~5 billion devices into compute targets you reach with zero install. <strong>National labs:</strong> the machines that define the frontier stopped being NVIDIA.</p>
+<pre><code>TOP500, June 2026 — the ranking that ends the "just use CUDA" era:
+  #1  LineShine (China)   — new entrant, displaced the incumbent
+  #2  El Capitan (LLNL)   — AMD EPYC + Instinct MI300A     1.809 EF
+  #3  Frontier (ORNL)     — AMD                            1.353 EF
+  #4  Aurora (Argonne)    — INTEL Xeon Max + GPU Max       1.012 EF
+The two fastest machines in the United States run ZERO NVIDIA GPUs.
+If your only skill is "write CUDA", you cannot touch them. This track fixes that.</code></pre>
+<p>None of this means CUDA was wasted — the opposite. It means the <em>concepts</em> you paid for (occupancy, the memory hierarchy, launch geometry) are the transferable asset, and the vendor-specific spelling is the cheap part. The rest of this lesson makes that claim precise enough to bet a migration plan on.</p>
+
+<h3>The translation table — the track's spine</h3>
+<div class="diagram" data-diagram="d1-translation" data-caption="Every hardware idea from the core, spelled four ways. Learn the ROWS; the columns are just typography — except the highlighted one."></div>
+<p>Here is the single most important artifact in Track D. Read it as a claim: every row is <em>one idea</em> you already own, and the four columns are only how NVIDIA, AMD, Intel, and the web spell it. A warp (4.4) is a wavefront is a <code>sub_group</code> is a <code>subgroup</code>. Shared memory (5.5) is LDS is <code>local</code> is <code>var&lt;workgroup&gt;</code>. <code>__syncthreads()</code> is <code>group_barrier</code> is <code>workgroupBarrier()</code>. When someone says "I don't know AMD", what they usually mean is "I don't know AMD's <em>words</em>" — a weekend problem, not a career one.</p>
+<p>One row is printed in warning colour, and you should tattoo it: NVIDIA's warp is <strong>32</strong> lanes; AMD's wavefront is <strong>64</strong>. Every other row is a pure rename — this one changes a number your code may have hard-wired (5.6's occupancy math, 5.8's reduction tree). It is the one place a blind port compiles, runs, and returns garbage, so it gets its own lesson (D2). For now: same ideas, new vocabulary, one landmine.</p>
+
+<h3>Four families of portable code</h3>
+<div class="diagram" data-diagram="d1-taxonomy" data-caption="The four ways to write once and run on many GPUs, ordered by how much of the machine they hide — and the 90/10 rule that governs all of them."></div>
+<p>"Portable GPU code" is not one thing; it is four strategies at different rungs of the abstraction ladder, and choosing the wrong rung is how portability projects die. <strong>Dialect (HIP):</strong> CUDA with the identifiers renamed — you keep full control and near-1:1 mental mapping, at the cost of still being C++-per-vendor (D2). <strong>Single-source C++ (SYCL, Kokkos, RAJA):</strong> one standard <code>.cpp</code> the compiler retargets to any backend — maximum reuse, at the cost of trusting an abstraction (D3, D6). <strong>IR / compiler (Triton, MLIR):</strong> write in one intermediate language, let the compiler emit PTX or AMDGCN — the machines do the porting (D7). <strong>Portable API (WebGPU, OpenCL):</strong> a runtime that picks the driver at load time — the widest reach, the thinnest control (D4, D5).</p>
+<p>Governing all four is the rule that is this track's honest through-line — the <strong>90/10 rule</strong>: portability buys you roughly 90% of peak performance for about 10% of the effort, and the last 10% of performance costs the other 90%. That last slice — tensor-core-class kernels, wavefront-tuned reductions, vendor-library hot paths — is where the "portability tax" lives. The engineering skill this track builds is knowing exactly where that 10% is for a given workload, so you pay it only where it pays you back (D8's cross-vendor discipline, D9's capstone report).</p>
+
+<h2>Worked example</h2>
+<div class="card">
+<p><strong>Task:</strong> Port one line of CUDA to all four vocabularies and count what actually changes. The line is the identity every kernel opens with (5.2), the global thread index. Prediction first: of the four ports, how many change the underlying <em>arithmetic</em>, versus just the spelling?</p>
+<pre><code>CUDA :  int i = blockIdx.x * blockDim.x + threadIdx.x;   // the 5.2 identity
+HIP  :  int i = blockIdx.x * blockDim.x + threadIdx.x;   // BYTE-IDENTICAL
+SYCL :  size_t i = it.get_global_id(0);                  // same value, one call
+WGSL :  let i = global_invocation_id.x;                  // same value, a builtin
+Kokkos: parallel_for(N, KOKKOS_LAMBDA(int i){ ... });    // the index is HANDED to you
+
+Prediction: 0 of 4 change the arithmetic.  All four compute
+   (block coordinate) x (block size) + (lane) — M1 L2's linearization, everywhere.
+Result: confirmed. SYCL/WGSL/Kokkos just wrap the same multiply-add in a
+   named accessor; HIP doesn't even do that. The MATH did not move.</code></pre>
+<p><strong>What to internalize:</strong> this is the whole track in one line. Across four ecosystems, the global-index computation — the beating heart of every data-parallel kernel — is the same multiply-add you simulated in M2 L2 and made hardware in 5.2. What differs is packaging: a raw expression (HIP), a method call (SYCL), a builtin (WGSL), or a value the framework injects (Kokkos). The <em>one</em> thing that could change behaviour is not visible here at all — it is how many lanes that index spans per SIMD group (32 or 64), which is why the translation table prints wavefront-64 in red. Port vocabulary freely; audit the wavefront deliberately.</p>
+</div>
+
+<h2>Key points</h2>
+<ul class="keypoints">
+<li>Portability turned mandatory in 2026 because of supply, price (~3× on $/FLOP), the browser fleet, and the labs — El Capitan (AMD) and Aurora (Intel), the two fastest US machines, run zero NVIDIA GPUs.</li>
+<li>The translation table is the track's spine: warp↔wavefront↔sub_group↔subgroup, SM↔CU↔Xe-core, shared↔LDS↔local↔var&lt;workgroup&gt;, __syncthreads↔group_barrier↔workgroupBarrier — memorize the rows, not the syntax.</li>
+<li>wavefront = 64 (AMD) versus warp = 32 (NVIDIA) is the single row that changes a number instead of a name, and the one place a blind port silently returns wrong answers (D2).</li>
+<li>Portable code comes in four families — dialect (HIP), single-source C++ (SYCL/Kokkos), IR/compiler (Triton/MLIR), portable API (WebGPU/OpenCL) — each hiding more of the machine than the last.</li>
+<li>The 90/10 rule is the through-line: ~90% of peak for ~10% of effort, and the last 10% of performance is the portability tax you pay only where it pays back.</li>
+<li>Your CUDA concepts are the transferable asset; the vendor spelling is the cheap part, provable by the fact that the global-index arithmetic is identical in all four ecosystems.</li>
+</ul>
+
+<h2>Quiz</h2>
+<div class="quiz">
+  <div class="q">1. Your team is "a CUDA shop." A cloud vendor offers AMD MI300X capacity at roughly half the price of the H100s you can't get enough of. The lead engineer says "porting is a full rewrite — not worth it." You've read this lesson. What's the accurate rebuttal?</div>
+  <button class="opt">The lead is right; CUDA and HIP share no concepts, so it's a ground-up rewrite</button>
+  <button class="opt" data-c="1">It's not a rewrite — HIP is CUDA with the host API identifiers renamed and the kernel body (index math, launch geometry, shared memory) unchanged; the real, bounded work is auditing every hard-coded warp-size-32 assumption for wavefront 64 and re-tuning the two or three hottest kernels. Call it a week per major kernel path, not a quarter — and the alternative, staying single-vendor during a supply crunch at 2× the price, is the larger risk</button>
+  <button class="opt">Wait for NVIDIA supply to recover; portability is always a net loss</button>
+  <button class="opt">Rewrite everything in WebGPU so it runs anywhere at once</button>
+  <div class="expl">The seductive wrong answer is "full rewrite" because it's the safe-sounding pessimism, but it contradicts the translation table and D2's hipify reality (the diff is renames, the device logic is byte-identical). Option 4 over-corrects: WebGPU trades away the control and the vendor libraries you need for a training workload (the 90/10 tax at its worst). The correct answer names the actual cost — the wavefront-64 audit plus hot-kernel re-tuning — which is exactly the 90/10 rule applied: 90% of the port is free renames, the 10% that isn't is specific and findable.</div>
+</div>
+<div class="quiz">
+  <div class="q">2. A colleague concludes: "El Capitan is an AMD machine, so all the CUDA experience on our team is worthless for HPC now." Where is the thinking wrong?</div>
+  <button class="opt">It's correct — AMD and NVIDIA are entirely different programming models</button>
+  <button class="opt">El Capitan actually uses NVIDIA GPUs, so the premise is false</button>
+  <button class="opt" data-c="1">The CUDA experience IS the asset — El Capitan's MI300A is programmed with HIP and Kokkos, both of which map 1:1 onto what the team already knows: warps become wavefronts, __shared__ becomes LDS, __syncthreads becomes a group barrier. What transfers is the hard-won part — occupancy intuition, the memory hierarchy, coalescing, reduction patterns — none of which is NVIDIA-specific. The team ports vocabulary, not concepts</button>
+  <button class="opt">HPC doesn't use GPUs, so the question doesn't apply</button>
+  <div class="expl">Option 2 is a factual trap — El Capitan is genuinely AMD (verified TOP500, June 2026), so denying the premise is wrong. Option 1 mistakes different syntax for different concepts, the exact error this lesson dismantles. The correct answer is the track's thesis stated defensively: the concepts are the moat and they're vendor-neutral; someone fluent in CUDA's ideas becomes productive in HIP/Kokkos in days because the translation table is short and the arithmetic (the worked example) doesn't move.</div>
+</div>
+
+<h2>Exercises</h2>
+<details><summary>Exercise 1 — Extend the translation table with a fifth column of your choice (OpenCL, Metal, or Intel's SYCL terms). For each concept row — SIMD group, on-chip scratch, block, barrier, global index, kernel qualifier — fill in that ecosystem's word, verifying each against the official docs (Khronos, Apple, or Intel oneAPI). Flag any row where the concept genuinely differs rather than just renaming.</summary><div class="body">
+<p>Expected shape (OpenCL column, verified against the Khronos OpenCL spec): SIMD group → "sub-group"; on-chip scratch → <code>__local</code>; block → "work-group"; barrier → <code>barrier(CLK_LOCAL_MEM_FENCE)</code>; global index → <code>get_global_id(0)</code>; kernel qualifier → <code>__kernel</code>. Every row is a rename — <em>except</em> note that OpenCL sub-group SIZE, like AMD's wavefront, is not guaranteed 32 (query <code>CL_KERNEL_PREFERRED_WORK_GROUP_SIZE_MULTIPLE</code>). Deliverable: the five-column row set saved to your machine-notes file (5.1's "know your machine" discipline extended cross-vendor). The point of doing it by hand: you will never again be intimidated by a vendor's docs, because you'll be pattern-matching to rows you already own.</p>
+</div></details>
+<details><summary>Exercise 2 — Take the 5.8 warp reduction (or any core kernel you wrote) and hand-port its index line and launch to HIP, SYCL, and WGSL on paper. For each token, label it "spelling change" or "meaning change." Then predict: which single token, if you ported it blind, could change the numeric result — and why?</summary><div class="body">
+<pre><code>launch    CUDA  reduce&lt;&lt;&lt;g,b,smem&gt;&gt;&gt;(...)   HIP  reduce&lt;&lt;&lt;g,b,smem&gt;&gt;&gt;(...)  [spelling: none]
+                SYCL  q.parallel_for(nd_range{g*b,b}, ...)         [spelling]
+                WGSL  pass.dispatchWorkgroups(g)                   [spelling]
+index     all four compute block*blockDim + lane                  [spelling]
+the trap  the reduction LOOP bound: for(o = warpSize/2; ...)      [MEANING]</code></pre>
+<p>Answer: the only meaning-changing token is the reduction's shuffle offset, because it's derived from the SIMD-group width — 16 on a 32-lane warp, 32 on a 64-lane wavefront. Port it blind (leave the literal 16) and the AMD run silently sums only the first 32 of 64 lanes. You'll execute exactly this failure in D2; for now, the deliverable is the annotated port with that one token circled in red. Everything else was spelling.</p>
+</div></details>
+
+<hr>
+<h1>Go deeper — the map before the territory</h1>
+
+<h2>1. The abstraction ladder, rung by rung</h2>
+<pre><code>family            example         port mechanism        control   perf ceiling   reach for it when
+────────────────  ──────────────  ────────────────────  ────────  ─────────────  ─────────────────────
+dialect           HIP             rename identifiers    HIGH      ~99% of native  you have a big CUDA
+                                  (source-to-source)                              codebase + one target
+single-source C++ SYCL, Kokkos    recompile per backend MED       ~90% (90/10)    many machines, one
+                                                                                   team, long-lived code
+IR / compiler     Triton, MLIR    one IR → many ISAs    MED       ~90%+, rising   fused/custom kernels;
+                                  (autotuned per arch)                            let the compiler tune
+portable API      WebGPU, OpenCL  runtime driver select LOW       ~70-90%, varies widest reach, browser,
+                                                                                   embedded, no install</code></pre>
+<p>The ladder is not a quality ranking — it's a control-versus-reach trade. Lower rungs (HIP) keep you close to the metal and near-native speed but bind you to C++-per-vendor; higher rungs (WebGPU) reach a browser on a phone but hand the driver decisions you used to make. A mature stack often uses <em>several</em> rungs: HIP for the training cluster's hot kernels, Kokkos for the portable simulation core, WebGPU for the in-browser demo. Picking the rung per component is the senior skill; "one framework to rule them all" is the junior mistake.</p>
+
+<h2>2. The 90/10 rule, quantified</h2>
+<pre><code>where the last 10% of performance actually hides (and who pays it):
+  tensor-core / matrix-core kernels   vendor libs (cuBLAS, rocBLAS) own the peak — D7
+  reduction / scan tuned to SIMD width 32 vs 64 shuffle trees — D2, D9
+  memory layout per architecture       LayoutLeft vs LayoutRight — D6
+  occupancy dial re-turned per GPU      5.6's registers/smem differ per arch
+  async/overlap depth per copy engine   5.9's streams, different engine counts
+
+the rule in one sentence: portability is cheap; portable PEAK is not.
+so the plan is never "port everything to 100%" — it's "port to 90% everywhere,
+then spend the expensive 90%-of-effort only on the 2-3 kernels a profiler says
+dominate wall time" (4.7's roofline picking the targets, cross-vendor).</code></pre>
+
+<h2>3. Reading the 2026 machine landscape as a strategy signal</h2>
+<pre><code>segment            who's there                        what it means for you
+─────────────────  ────────────────────────────────  ───────────────────────────────
+exascale HPC       El Capitan/Frontier (AMD),         HIP + Kokkos are HPC-employable
+                   Aurora (Intel), JUPITER (Europe)   skills, not niche ones
+hyperscale AI      NVIDIA still dominant, AMD MI300+   multi-vendor training is arriving;
+                   gaining, fp8/fp6/fp4 on MI350       Track A's lessons meet Track D here
+the browser        WebGPU in Chrome/Edge/Firefox/     a GPU in ~5B devices, zero install
+                   Safari (~82% of users)             — ship compute to users directly
+embedded/mobile    OpenCL's stronghold; SPIR-V core   the long tail still needs OpenCL (D4)</code></pre>
+<p>The reason a landscape slide belongs in a technical lesson: your <em>skills</em> are an investment portfolio, and concentration risk is real. A pure-CUDA engineer in 2026 is long a single vendor at the exact moment the frontier diversified. This track is the hedge — and the good news from the worked example is that the hedge is cheap, because you're buying vocabulary on top of concepts you already own.</p>
+
+<h2>Gotchas</h2>
+<div class="gotcha"><strong>"My CUDA skills are NVIDIA-locked."</strong> The most expensive myth in the field. The moat is occupancy/memory/coalescing/reduction intuition — all vendor-neutral. You're re-learning spelling, not concepts (the whole worked example).</div>
+<div class="gotcha"><strong>Treating wavefront 64 as warp 32.</strong> The one row that isn't a rename. Hard-coded 32s in reduction/scan/occupancy code compile and run on AMD and return wrong or slow results. Audit for the literal 32 before you trust a port (D2).</div>
+<div class="gotcha"><strong>Assuming single-source = free peak.</strong> SYCL/Kokkos give ~90% for ~10% effort — not 100%. Budget the last 10% explicitly or be disappointed by a "portable but slow" result and blame the framework unfairly.</div>
+<div class="gotcha"><strong>"WebGPU is just graphics."</strong> It's a first-class compute API (compute shaders, storage buffers, workgroups). The browser is now a legitimate, universal GPU-compute lab (D5) — dismissing it forfeits a free target.</div>
+<div class="gotcha"><strong>Porting syntax, ignoring the memory model.</strong> HIP shares CUDA's pointer model; SYCL's buffer/accessor model is different in kind (the runtime owns the data and infers copies — D3). Blind-porting a pointer-heavy kernel into accessors, or vice versa, fights the framework.</div>
+<div class="gotcha"><strong>Concluding "vendor X is slow" from a blind port.</strong> A kernel tuned for A and recompiled for B measures your porting effort, not B's hardware. Fair cross-vendor numbers need per-machine tuning and % -of-own-roofline (D8) — the single most common benchmark lie.</div>
+
+<h2>Scenario — the supply-crunch migration nobody wanted</h2>
+<p>A vision startup has a training pipeline that is 100% CUDA and a problem: their cloud can't get them more H100 capacity for two quarters, but has MI300X available now at roughly half the hourly rate. The eng lead's instinct is the industry reflex — "porting to AMD is a rewrite, we'll wait it out" — a decision that quietly bets the roadmap on a competitor's supply chain. The senior engineer runs the real audit instead. She hipifies the codebase in an afternoon (the diff, as you'll measure in D2, is host-API renames — the kernels don't move), then does the work that actually matters: greps every kernel for hard-coded <code>32</code> and <code>warpSize</code> assumptions, finds three reduction/scan kernels that bake in a 32-lane shuffle tree, and rewrites those to query the wavefront width. Two more kernels need their occupancy dial re-turned for MI300's register file (5.6, per-arch). A week of focused work, fixtures green (M2 L6 caught two of the wavefront bugs before they shipped), and the pipeline runs on half-price hardware. The moral is the 90/10 rule as a business decision: the port was 90% free and 10% specific-and-findable, while the "safe" alternative — single-vendor lock-in during a shortage — was the genuinely risky path. Portability isn't ideology; it's optionality, and in a supply crunch optionality is the whole game.</p>
+
+<h2>Practice</h2>
+<details><summary>1. From memory, write the translation-table row for each concept: SIMD group, on-chip scratch, block, barrier — in CUDA, HIP, SYCL, and WGSL. Then say which of the four rows contains a value (not just a name) that can differ between NVIDIA and AMD.</summary><div class="body">SIMD group: warp / wavefront / sub_group / subgroup. Scratch: __shared__ / LDS(__shared__ in HIP too) / local (local_accessor) / var&lt;workgroup&gt;. Block: block / block / work-group / workgroup. Barrier: __syncthreads() / __syncthreads() / group_barrier() / workgroupBarrier(). The row with a differing VALUE is SIMD group: warp = 32 lanes, wavefront = 64 lanes. The other three are pure renames. That one number is the entire content of D2's bug taxonomy.</div></details>
+<details><summary>2. Given this CUDA line, classify each token as "spelling change" or "meaning change" when ported to HIP: <code>float v = __shfl_down_sync(0xffffffff, x, 16);</code></summary><div class="body">Two meaning changes hide here. (a) <code>__shfl_down_sync</code> → HIP's <code>__shfl_down</code>: mostly spelling, but the mask argument <code>0xffffffff</code> assumes a 32-lane warp — on a 64-lane wavefront the "all lanes" mask concept differs (HIP's shuffle doesn't take the sync mask the same way). (b) the offset <code>16</code> = warpSize/2 is a MEANING change: correct for 32 lanes, wrong for 64. So this one line — a warp reduction step — is the densest concentration of the wavefront trap in the language. Everything about it looks like a rename and isn't.</div></details>
+<details><summary>3. Classify each into one of the four families: HIP, Triton, WebGPU, Kokkos, SYCL, OpenCL, MLIR, RAJA.</summary><div class="body">Dialect: HIP. Single-source C++: Kokkos, SYCL, RAJA. IR/compiler: Triton, MLIR. Portable API: WebGPU, OpenCL. Note the borderline calls that teach the taxonomy: SYCL is single-source C++ but compiles <em>through</em> SPIR-V (an IR), and Triton is an IR-level tool you write in Python — the families describe the PROGRAMMER'S abstraction, not the compiler's internals. That distinction is exactly what D7 explores.</div></details>
+<details><summary>4. A workload is 70% one big matmul (already on cuBLAS) and 30% a pile of small custom elementwise kernels. Apply the 90/10 rule: what ports cheaply, and where does the tax land?</summary><div class="body">The 30% custom kernels port cheaply and portably (Triton or SYCL get them to ~90% on any backend — they're memory-bound elementwise, D8's "citizens"). The 70% matmul is the tax: portable code will NOT match cuBLAS/rocBLAS on tensor cores, so on each vendor you call that vendor's library (the last-10% path D7 is honest about). Verdict: port the custom kernels once, portably; keep a thin per-vendor shim that dispatches the matmul to the local vendor library. That hybrid is the real-world answer, not "everything portable" or "everything CUDA."</div></details>
+<details><summary>5. Why is "El Capitan is AMD" a signal worth putting in a career or architecture decision, not just trivia?</summary><div class="body">Because it proves AMD's stack is production-grade at the extreme high end (an exascale weapons-simulation machine is not where you deploy immature tooling), which de-risks HIP/ROCm for everyone below that tier. For a career: HIP and Kokkos are now HPC-employable skills with lab and enterprise demand, not a hedge on a maybe-future. For an architecture: it means "AMD can't really do serious GPU compute" is a false and dangerous assumption to build a single-vendor roadmap on. Landscape facts are leading indicators for tooling maturity.</div></details>
+<details><summary>6. A manager wants "write once, run anywhere, with zero performance loss." Diagnose the request and give the honest counter-offer.</summary><div class="body">The request asks for a violation of the 90/10 rule — write-once-run-anywhere is real (single-source C++, WebGPU), but "zero performance loss" is the expensive last 10% that no abstraction delivers for free on every backend. The honest counter-offer: "write once, run anywhere, at ~90% of each machine's peak — and I'll get us the last 10% on the two or three kernels a profiler proves dominate wall time, per target, on a schedule." That reframes an impossible absolute into a budgeted engineering plan and sets the expectation D8 will make measurable (% of own roofline, not raw wall time).</div></details>
+<details><summary>7. The interview closer: "We're an all-CUDA team and leadership wants us running on AMD within a quarter. Walk me through your plan." Deliver the full spoken skeleton.</summary><div class="body">"First, set expectations with the 90/10 rule: ~90% of the port is mechanical and the risk lives in a specific 10%, so this is a bounded project, not a rewrite. Step one, hipify the codebase — that's source-to-source renames of the host API; the kernel bodies and launch geometry don't change (I'd expect a diff that's almost all <code>cuda</code>→<code>hip</code>). Step two, the audit that actually matters: grep every kernel for hard-coded warp size 32 and <code>__shfl</code> masks, because AMD's wavefront is 64 — those are the kernels that will compile, run, and return wrong answers, so I gate them behind our M2 L6 fixtures. Step three, profile on the AMD hardware and re-tune only the two or three kernels the roofline says dominate — occupancy and memory layout per architecture. Step four, I report results as percentage of each machine's own roofline, not raw wall time, so we compare fairly and know when we've hit the point of diminishing returns. Decision rule for the last 10%: hand-tune in HIP if it's a hot dominant kernel, reach for a vendor library if one exists, and accept portable-90% everywhere else. Deliverable is a migration doc a stranger on the AMD team could act on.' That plan turns a scary mandate into a schedule — and every step is a lesson in this track."</div></details>
+
+<div class="pager">
+  <a href="../curriculum.html">← Back to curriculum</a>
+  <a href="lesson-02.html">Next: ROCm &amp; HIP →</a>
+</div>
+<div class="footer">GPU Mastery · Track D · Lesson 1 — works offline · progress saved in your browser</div>
+</div>
+<script src="../assets/diagramsD.js"></script>
+<script src="../assets/app.js"></script>
+</body>
+</html>

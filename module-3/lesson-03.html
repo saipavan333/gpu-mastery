@@ -1,0 +1,256 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>3.3 Pointers — GPU Mastery</title>
+<link rel="stylesheet" href="../assets/style.css">
+</head>
+<body data-lesson="m3l3">
+<nav><div class="inner">
+  <a class="logo" href="../index.html">GPU<span>Mastery</span></a>
+  <a class="item" href="../index.html">Home</a>
+  <a class="item on" href="../curriculum.html">Curriculum</a>
+  <a class="item" href="../labs.html">Labs</a>
+  <a class="item" href="../setup.html">Lab setup</a>
+  <a class="item" href="../prompt.html">Generator prompt</a>
+</div></nav>
+<div class="wrap">
+
+<div class="lesson-top">
+  <div><span class="badge">Module 3 · Lesson 3</span><span class="badge dim">≈ 3 h · the keystone</span></div>
+  <button id="donebtn" class="donebtn">Mark lesson complete</button>
+</div>
+<h1>Pointers — addresses as values</h1>
+<p class="lead">Here it is: the concept every CUDA API, every kernel signature, and every C interview orbits. The good news — you've been preparing for three modules: M1 L1 gave you addresses as numbers, M2 L1/L4 gave you names-point-at-objects. A pointer is just that arrow, <em>handed to you as a value</em>.</p>
+
+<h2>Concept</h2>
+
+<h3>The two operators: & takes an address, * follows one</h3>
+<div class="diagram" data-diagram="m3l3-anatomy" data-caption="p is a normal variable; its value happens to be where x lives."></div>
+<pre><code>int x = 42;
+int *p = &amp;x;            /* declare p as pointer-to-int; store x's address in it   */
+printf("%p\n", (void*)p);   /* 0x7ffcc1a934a4-ish — hex! (M1 L1 pays forever)     */
+printf("%d\n", *p);     /* 42 — * FOLLOWS the arrow ("dereference")               */
+*p = 7;                 /* write THROUGH the pointer: x is now 7                  */
+p = NULL;               /* the deliberate "points at nothing" value               */
+if (p) { ... }          /* idiom: non-NULL check before following                 */</code></pre>
+<p>Read declarations right-to-left-ish: <code>int *p</code> — "p is a pointer to int." The <code>*</code> plays two roles that beginners conflate: in a <em>declaration</em> it means "is a pointer"; in an <em>expression</em> it means "follow it." Two weeks of C and the double duty becomes invisible; today, say the role out loud as you read.</p>
+
+<h3>Pass-by-value, and why swap needs pointers</h3>
+<div class="diagram" data-diagram="m3l3-swap" data-caption="Copies can't reach home. Addresses can."></div>
+<pre><code>void swap_broken(int a, int b) { int t = a; a = b; b = t; }   /* swaps COPIES     */
+void swap(int *pa, int *pb) {                                  /* receives ADDRESSES */
+    int t = *pa;  *pa = *pb;  *pb = t;                         /* writes through   */
+}
+int x = 1, y = 2;
+swap(&amp;x, &amp;y);            /* caller hands out addresses explicitly — visible at    */
+                          /* the call site! (Python hid this choice — M2 L4)       */</code></pre>
+<p>C copies every argument into the callee's frame (M2 L3's stack, now with teeth). To mutate the caller's data, pass <em>where it lives</em>. This single idea explains most C signatures you'll ever read: <code>T *out</code> parameters mean "I will write your variable"; <code>const T *in</code> means "I only read" (the const forms below).</p>
+
+<h3>Out-parameters: C's multi-return</h3>
+<pre><code>/* M2 L3's launch_shape returned a tuple. C returns ONE value — so the rest       */
+/* travel by pointer, and the return slot carries the error code (the convention  */
+/* every CUDA call uses):                                                          */
+int launch_shape(int64_t n, int block, int64_t *blocks_out, int64_t *idle_out) {
+    if (block &lt;= 0 || block &gt; 1024) return -1;        /* error code               */
+    int64_t g = (n + block - 1) / block;              /* M1 L2, eternal           */
+    *blocks_out = g;
+    *idle_out   = g * block - n;
+    return 0;                                          /* success                  */
+}
+int64_t g, idle;
+if (launch_shape(1000000, 256, &amp;g, &amp;idle) != 0) { /* handle */ }</code></pre>
+
+<h3>Pointer-to-pointer: the cudaMalloc pattern, demystified forever</h3>
+<div class="diagram" data-diagram="m3l3-pp" data-caption="To fill in YOUR pointer, the function needs your pointer's address. That's all float** is."></div>
+<pre><code>int alloc_buffer(float **out, size_t n) {      /* mirror of cudaMalloc's shape    */
+    float *p = malloc(n * sizeof *p);           /* (3.5 owns malloc's details)     */
+    if (!p) return -1;
+    *out = p;                                   /* write the address INTO caller's pointer */
+    return 0;
+}
+float *buf = NULL;
+alloc_buffer(&amp;buf, 1024);                       /* pass the pointer's ADDRESS      */
+/* CUDA, Module 5:  float *d_x;  cudaMalloc((void**)&amp;d_x, bytes);  — same shape,  */
+/* same reason: the return slot is spent on cudaError_t.                          */</code></pre>
+
+<h3>const and pointers: who may write what</h3>
+<pre><code>const float *p;        /* pointer to const: may NOT write *p; may move p          */
+float *const q = &amp;x;   /* const pointer: may write *q; may NOT move q             */
+const float *const r;  /* neither                                                  */
+/* API reading skill:  saxpy(float *y, const float *x, ...)                        */
+/*   → y will be written, x only read. Signatures are contracts — cuBLAS,         */
+/*   memcpy, and every serious C API document themselves this way.                */</code></pre>
+
+<h2>Worked example</h2>
+<div class="card">
+<p><strong>Task:</strong> min_max — one pass, two results, plus a defensive contract. The C sibling of every reduction you'll write on GPU.</p>
+<pre><code>#include &lt;stdio.h&gt;
+#include &lt;stddef.h&gt;
+
+/* returns 0 on success; -1 on empty input (contract! M2 L6's stats([]) decision) */
+int min_max(const double *xs, size_t n, double *min_out, double *max_out) {
+    if (n == 0 || !xs || !min_out || !max_out) return -1;
+    double lo = xs[0], hi = xs[0];              /* init from data, not from 0 —    */
+    for (size_t i = 1; i &lt; n; i++) {            /* M2 L2's best-so-far rule        */
+        if (xs[i] &lt; lo) lo = xs[i];
+        if (xs[i] &gt; hi) hi = xs[i];
+    }
+    *min_out = lo;  *max_out = hi;              /* deliver through the pointers    */
+    return 0;
+}
+
+int main(void) {
+    double t[] = {2.1, 2.0, 9.7, 2.2, 2.05};
+    double lo, hi;
+    if (min_max(t, 5, &amp;lo, &amp;hi) == 0)
+        printf("min=%.2f max=%.2f\n", lo, hi);   /* min=2.00 max=9.70              */
+    return 0;
+}</code></pre>
+<p><strong>Signature anatomy, left to right:</strong> <code>const double *xs</code> — reads your array, promises not to touch it; <code>size_t n</code> — the count travels with the pointer (3.4's decay makes this mandatory); <code>double *min_out, *max_out</code> — two results delivered by address; <code>int</code> return — the error channel. This five-part shape <em>is</em> the C API dialect: you can now sight-read <code>cudaMemcpy(void *dst, const void *src, size_t count, ...)</code> and know who writes, who reads, and where the errors go, before opening any documentation. <strong>Decision made:</strong> NULL-checking out-pointers costs two comparisons and converts a caller's bug into a clean −1 instead of a crash inside YOUR function with YOUR name in the backtrace (3.8's frame-blaming, pre-empted).</p>
+</div>
+
+<h2>Key points</h2>
+<ul class="keypoints">
+<li>&x yields x's address; *p follows one; *p = v writes through it. In declarations, * means "is a pointer" — same glyph, two grammatical roles.</li>
+<li>C passes copies, always; to mutate the caller's data, pass its address — and the & at the call site makes the mutation visible where Python hid it.</li>
+<li>Out-parameters (T *out) are C's multi-return; the return value carries the error code — the convention of the entire CUDA runtime API.</li>
+<li>T** exists so a function can fill in YOUR pointer: cudaMalloc((void**)&d_x, n) writes the device address through it. No magic remains.</li>
+<li>const T *p (can't write the data) vs T *const p (can't move the pointer): signatures are read/write contracts — learn to sight-read them.</li>
+<li>NULL is the deliberate nothing: initialize pointers, check before following, and pass NULL only where an API documents it.</li>
+</ul>
+
+<h2>Quiz</h2>
+<div class="quiz">
+  <div class="q">1. <code>int a = 1, b = 9; int *p = &amp;a; *p = 5; p = &amp;b; *p = 7;</code> — final values of a and b?</div>
+  <button class="opt">a=7, b=7 — p writes both</button>
+  <button class="opt" data-c="1">a=5, b=7 — *p=5 wrote through to a; then p MOVED to b; *p=7 wrote b</button>
+  <button class="opt">a=1, b=9 — pointers don't change originals</button>
+  <button class="opt">a=5, b=9 — reassigning p is an error</button>
+  <div class="expl">Two different operations: *p = 5 writes THROUGH the current arrow (a); p = &b re-aims the arrow itself (no data touched); *p = 7 writes through the new aim (b). Following-vs-moving is the pointer analog of M2 L1's "= moves tags" — and confusing them is the #1 first-week pointer error.</div>
+</div>
+<div class="quiz">
+  <div class="q">2. Why does <code>cudaMalloc</code> take <code>void**</code> instead of just returning the new pointer like malloc does?</div>
+  <button class="opt">GPU addresses are wider than CPU addresses</button>
+  <button class="opt">void** is faster to pass than returning a value</button>
+  <button class="opt" data-c="1">Its return value is already spent on the error code (cudaError_t) — so the address must travel out through a pointer-to-your-pointer</button>
+  <button class="opt">CUDA predates the return statement</button>
+  <div class="expl">malloc signals failure in-band (returns NULL). CUDA's convention: EVERY call returns cudaError_t, so results leave via out-params. To fill in your float* it needs the float*'s address: a float** (cast to void** for genericity). You'll type this weekly for years — and now it's a design decision you can explain, not an incantation.</div>
+</div>
+
+<h2>Exercises</h2>
+<details><summary>Exercise 1 — Implement <code>int clamp_inplace(float *xs, size_t n, float lo, float hi)</code> that clamps an array through the pointer, returning how many elements changed. Write a main that proves both effects (values changed, count right) on {-1, 0.5, 2, 0.7} clamped to [0,1] — and explain why the Python version of "prove it" needed a .copy() but C's needs nothing extra.</summary><div class="body">
+<pre><code>#include &lt;stdio.h&gt;
+#include &lt;stddef.h&gt;
+int clamp_inplace(float *xs, size_t n, float lo, float hi) {
+    if (!xs) return -1;
+    int changed = 0;
+    for (size_t i = 0; i &lt; n; i++) {
+        float v = xs[i];
+        float c = v &lt; lo ? lo : v &gt; hi ? hi : v;
+        if (c != v) { xs[i] = c; changed++; }     /* != on floats OK here: c IS v  */
+    }                                              /* when unchanged (same bits)   */
+    return changed;
+}
+int main(void) {
+    float xs[] = {-1.0f, 0.5f, 2.0f, 0.7f};
+    int k = clamp_inplace(xs, 4, 0.0f, 1.0f);
+    printf("changed=%d → %.1f %.1f %.1f %.1f\n", k, xs[0], xs[1], xs[2], xs[3]);
+    /* changed=2 → 0.0 0.5 1.0 0.7 */
+    return 0;
+}</code></pre>
+<p>The Python contrast: in M2 you needed <code>before = xs.copy()</code> to detect mutation because aliasing was invisible. In C, mutation is IN THE SIGNATURE — <code>float *xs</code> without const declares it. The caller consented at the call site by handing over the array. (The float != note: comparing a value against its own untouched copy is one of the legitimate float-equality cases from M1 L8's gotcha — no arithmetic happened between them.)</p>
+</div></details>
+<details><summary>Exercise 2 — The scanf crash, staged and solved: write a program that reads an int with <code>scanf("%d", n)</code> (missing &, on purpose), observe the warning and the crash, fix it, then explain — in pointer language — exactly what the broken version asked scanf to do. Then generalize: why do "write into this for me" APIs (scanf, min_max, cudaMalloc) ALL take addresses?</summary><div class="body">
+<pre><code>int n = 0;
+scanf("%d", n);      /* WARNING: format '%d' expects 'int *', has 'int'           */
+                     /* runtime: scanf treats the VALUE 0 as an ADDRESS and       */
+                     /* writes your input to memory location 0 → segfault (3.8:   */
+                     /* unmapped page, the LUCKY outcome)                          */
+scanf("%d", &amp;n);     /* correct: here is WHERE to put it                           */</code></pre>
+<p>The generalization is the lesson's thesis: any function that must <em>produce a value into your variable</em> needs to know where your variable lives — reading needs values, writing needs addresses. scanf("%d", &n), min_max(..., &lo, &hi), cudaMalloc(&d_x, ...): one pattern, three fonts. Bonus observation: gcc's -Wformat caught this at compile time — the crash was optional for anyone reading warnings (3.1's law, again). And if n happened to contain a valid-looking address instead of 0? Silent corruption somewhere else — the SCARY branch of 3.8's segfault diagram. The warning is the only reliable guard.</p>
+</div></details>
+
+<hr>
+<h1>Go deeper — the complete guide</h1>
+<p>Reading gnarly declarations, void* and generic memory, function pointers (qsort — M2 L3's key= reborn), pointer casting rules and strict aliasing (the honest version), and alignment.</p>
+
+<h2>1. Reading declarations without tears</h2>
+<pre><code>int *p;              /* p: pointer to int                                          */
+int *a, b;           /* TRAP: a is int*, b is plain int — the * binds to the NAME  */
+int **pp;            /* pointer to pointer to int (the cudaMalloc shape)           */
+const float *x;      /* pointer to const float (read-only view)                    */
+float *const y;      /* const pointer to float (fixed aim, writable target)        */
+int (*fp)(int, int); /* fp: pointer to FUNCTION taking (int,int) returning int     */
+float *fn(void);     /* fn: function returning float* (parens change everything)   */</code></pre>
+<p>The spiral rule ("start at the name, go right when you can, left when you must") handles anything; in practice, two habits remove 95% of the pain: one declaration per line (kills the <code>int *a, b</code> trap), and typedefs for function-pointer types (<code>typedef int (*cmp_fn)(const void*, const void*);</code>). CUDA code follows both religiously; so will yours.</p>
+
+<h2>2. void*: the generic address</h2>
+<pre><code>void *raw = &amp;x;              /* any data pointer converts to void* silently        */
+float *fx = raw;             /* and back (C; C++ requires a cast — 3.7 flags this) */
+memcpy(dst, src, n_bytes);   /* (void*, const void*, size_t): copies BYTES —      */
+                             /* type-blind, which is why it needs the size and     */
+                             /* why cudaMemcpy looks identical (plus a direction)  */
+qsort(arr, n, sizeof arr[0], cmp);   /* generic sort: void* + element size + fn    */</code></pre>
+<p><code>void*</code> is "an address, type forgotten" — you can store and pass it but not dereference or do arithmetic until you restore the type. It's C's generics mechanism: one memcpy for all types, paid for with the type-safety you must now supply (wrong size argument = silent corruption — the reason C++ templates exist, 3.7). You cannot dereference it, and note that <code>printf("%p", p)</code> formally wants <code>(void*)p</code> — the one cast pedantry that's actually in the standard.</p>
+
+<h2>3. Function pointers: behavior as a value (M2 L3, compiled)</h2>
+<pre><code>int by_ms(const void *a, const void *b) {           /* qsort's comparator contract */
+    const Benchmark *x = a, *y = b;                  /* restore the real type      */
+    return (x-&gt;ms &gt; y-&gt;ms) - (x-&gt;ms &lt; y-&gt;ms);        /* -1/0/1 without overflow —  */
+}                                                    /* (subtracting doubles into  */
+qsort(results, n, sizeof results[0], by_ms);         /*  an int return is a bug)   */
+
+double (*op)(double, double) = add;                  /* store a function            */
+op = mul;  printf("%f\n", op(3, 4));                 /* re-aim, call through        */</code></pre>
+<p>M2 L3's <code>sorted(runs, key=...)</code> is reborn with explicit machinery: qsort hands your comparator <code>void*</code>s; you restore types and answer −1/0/+1. Function pointers also power dispatch tables (the M2 L4 kernel registry in C: an array of <code>{name, fn}</code> structs), callbacks, and — worth knowing exists — they're the mechanism behind CUDA's kernel launch configuration under the hood. The comparator's subtraction trap is deep-dive-worthy on its own: <code>return x->ms - y->ms;</code> truncates doubles to int (wrong) and overflows for ints (UB) — the two-comparison idiom shown is the professional spelling.</p>
+
+<h2>4. Casting and strict aliasing — the honest version</h2>
+<pre><code>float f = 1.0f;
+uint32_t bits;
+memcpy(&amp;bits, &amp;f, 4);            /* THE sanctioned way to read float bits          */
+printf("0x%08x\n", bits);         /* 0x3f800000 — M1 L8's layout, live!            */
+
+uint32_t *evil = (uint32_t*)&amp;f;   /* compiles… but *evil is UB (strict aliasing):   */
+                                  /* the optimizer may assume float* and uint32_t*  */
+                                  /* never alias, and reorder around your pun       */</code></pre>
+<p>The rule: objects may be read through their own type, a const/qualified version, or <code>char/unsigned char*</code> (byte inspection is always legal). Type-punning through casts is UB even though it "works" constantly — until -O2 reorders (3.2's contract logic, applied to types). Sanctioned tools: <code>memcpy</code> (compiles to a plain register move at -O2 — zero cost, verify with -S), unions (implementation-blessed in practice, explicitly OK in C, murkier in C++), and C++20's <code>bit_cast</code> (3.7's world). You WILL meet the evil cast in real CUDA code (fast inverse sqrt folklore, bit tricks); now you know its legal status and its safe spelling.</p>
+
+<h2>5. Alignment: addresses have shapes</h2>
+<pre><code>_Alignof(double)  == 8            /* doubles want 8-byte-aligned addresses         */
+uintptr_t addr = (uintptr_t)p;    /* pointer → integer for inspection (M1 L1!)     */
+if (addr &amp; 15) { /* not 16-byte aligned */ }          /* the mask test, again      */</code></pre>
+<p>Misaligned access: x86 forgives (slower), other CPUs may trap, GPUs demand alignment for vectorized loads (float4 wants 16 — M2 L5's AoS story, M1 L1's mask). malloc guarantees max_align_t (16 on Linux); cudaMalloc guarantees 256. The practical rule at this stage: keep arrays of T at T's natural alignment (they are, unless you do byte-offset tricks), and when you later slice GPU buffers manually, align the slices — 5.7 will measure why. Note <code>uintptr_t</code>: the integer type FOR addresses; doing arithmetic on pointers-as-integers is inspection-only territory, but it's how allocators and profilers see the world.</p>
+
+<h2>6. Gotchas</h2>
+<div class="gotcha"><strong>Uninitialized pointer.</strong> <code>int *p; *p = 5;</code> — p contains stack garbage (3.2's uninitialized rule); you just wrote SOMEWHERE. Best case crash, worst case silent corruption. Initialize: <code>int *p = NULL;</code> and let the crash be clean.</div>
+<div class="gotcha"><strong>Returning a local's address.</strong> <code>int *f(void){ int x = 5; return &amp;x; }</code> — x dies at return (M2 L3 frames + 3.5's stack); the caller holds a dangling arrow into a recycled frame. gcc warns ("address of local variable returned"); heed it. Fix: out-param, or heap (3.5).</div>
+<div class="gotcha"><strong><code>*p++</code> vs <code>(*p)++</code>.</strong> Precedence: *p++ dereferences then advances the POINTER (idiomatic in copy loops); (*p)++ increments the pointed-at VALUE. Parenthesize until fluent — one misread corrupts a loop invisibly.</div>
+<div class="gotcha"><strong>Comparing/subtracting unrelated pointers.</strong> p &lt; q and p − q are defined only within the same array (+one-past-end — 3.4). Across allocations: UB (and genuinely meaningless under virtual memory).</div>
+<div class="gotcha"><strong>NULL-deref as a "check" for later.</strong> <code>if (!p) return;</code> at function top is defense; sprinkling <code>p-&gt;field</code> BEFORE the check (easy during refactors) is the crash. Modern compilers even delete later NULL-checks after an unconditional deref (UB licensing again — 3.2). Check first, always first.</div>
+<div class="gotcha"><strong>The int*a,b trap.</strong> <code>int* a, b;</code> reads like two pointers; b is an int. One declaration per line, and write <code>int *a</code> (star hugs the name) as a visual reminder of the binding.</div>
+
+<h2>Scenario — the API you could suddenly read</h2>
+<p>Week one of a lab rotation, you're handed a sensor-fusion C library and a failing integration. The old onboarding advice was "spend a week with the docs"; instead you sight-read signatures with this lesson's contract grammar. <code>int sf_init(sf_ctx **ctx_out, const sf_config *cfg)</code> — double pointer: it allocates and fills in your handle (cudaMalloc's shape — you write <code>sf_ctx *ctx = NULL; sf_init(&amp;ctx, &amp;cfg);</code> on the first try, while the previous student's crash, still in git history, passed <code>&amp;ctx</code>'s VALUE via a miscast). <code>int sf_process(sf_ctx *ctx, const float *samples, size_t n, float *out, size_t out_cap)</code> — reads samples (const), writes out (non-const, with a capacity because arrays decay — 3.4's rule visible in the API's own design). The actual bug: their glue code called <code>sf_get_stats(ctx, stats)</code> where the header says <code>sf_stats *stats_out</code> — passing an uninitialized struct pointer (gotcha #1) that "worked" while stack garbage happened to be mapped, then didn't after an unrelated refactor shifted frames. Fix: declare the struct, pass its address: <code>sf_stats s; sf_get_stats(ctx, &amp;s);</code>. Total time: one afternoon, zero documentation pages, one -Wall warning finally read aloud. The professor's comment on your PR — "first student to use this library without a segfault week" — is this lesson, cashed.</p>
+
+<h2>Practice</h2>
+<details><summary>1. Trace on paper, then verify: <code>int v[3] = {10, 20, 30}; int *p = &amp;v[1]; *p += 5; p = p - 1; *p = *(p + 2);</code> — final contents of v?</summary><div class="body">{30, 25, 30}. Step-by-step: p→v[1]; v[1] += 5 → 25; p moves to v[0]; *(p+2) is v[2] (30) assigned into *p (v[0]). Pointer moves vs data writes, interleaved — if you got it right first try on paper, the keystone is set. (p±k arithmetic is formally 3.4's topic; within one array it's exactly what M1 L1 §6 promised: ±k×sizeof.)</div></details>
+<details><summary>2. Write rotate3(double *a, double *b, double *c) that cycles the values a→b→c→a, and call it twice on (1,2,3) — predict the result before running. Why can't this be a function returning something instead?</summary><div class="body"><code>void rotate3(double *a, double *b, double *c){ double t = *c; *c = *b; *b = *a; *a = t; }</code> Twice on (1,2,3): (1,2,3)→(3,1,2)→(2,3,1) ✓. Return-based alternative would need to return three values — a struct (3.6) works, but the caller would then reassign; in-place mutation through pointers is the C idiom when the SEMANTICS are "modify these" (and it's allocation-free — no temporary struct). Note the deliberate order in the body: one temp, three moves, no aliasing hazards for distinct a,b,c — and ask yourself (interview flavor): what happens if a==b==c? Trace it: value preserved. Robust by accident is still worth noticing.</div></details>
+<details><summary>3. Sight-read and explain in one sentence each, without docs: (a) <code>char *fgets(char *s, int size, FILE *stream)</code>; (b) <code>void *memset(void *s, int c, size_t n)</code>; (c) <code>cudaError_t cudaMemcpy(void *dst, const void *src, size_t count, cudaMemcpyKind kind)</code>. Who writes what, and where do errors travel in each?</summary><div class="body">(a) Writes into your buffer s (max size bytes, keeps it terminated — 3.4), reads the stream; returns s or NULL for error/EOF — error in-band via the pointer. (b) Fills n BYTES at s with c (type-blind void* + explicit size — §2's contract); returns s for chaining, "can't fail". (c) Writes dst, reads src (const!), count in BYTES, direction enum; error via the return — the out-of-band cudaError_t convention this whole lesson previews. Three libraries, one grammar — that's the point.</div></details>
+<details><summary>4. The comparator trap: qsort comparators returning <code>a - b</code>. Give a concrete int pair where it inverts the order (hint: M1 L1 ranges), and the double case failure, then write the always-correct idiom.</summary><div class="body">Ints: a = INT_MIN+1 (−2147483647), b = 2 → a−b overflows (UB; typically wraps POSITIVE → "a &gt; b": inverted). Doubles: returning (int)(x−y) truncates −0.4 to 0 → "equal" for close-but-distinct values: unstable garbage ordering. Idiom: <code>return (x &gt; y) - (x &lt; y);</code> — branchless −1/0/+1, overflow-proof, works for all comparable types. Real-world weight: sort-order UB has produced exploitable bugs; this one-liner is the fix reviewers expect on sight.</div></details>
+<details><summary>5. Bit inspection, sanctioned: using the memcpy pattern, print the hex bits of 1.0f, -1.0f, 0.1f, and 16777216.0f, and annotate each against M1 L8's layout (sign/exponent/mantissa). Which pair differs by exactly one bit?</summary><div class="body">0x3f800000 (sign0, exp 127, mantissa 0 → 1.0); 0xbf800000 (sign flipped — the pair differing by ONE bit); 0x3dcccccd (0.1's rounded mantissa — the infinite binary fraction, cut and rounded up: M1 L8's lie, in hex); 0x4b800000 (exp 151 = 127+24 → 2²⁴, mantissa 0 — the absorption cliff's address). You've now SEEN the M1 L8 diagrams in a debugger-ready form; this exact memcpy trick is how you'll inspect NaNs in GPU buffers in 5.4.</div></details>
+<details><summary>6. Build a 4-entry dispatch table: <code>struct op { const char *name; double (*fn)(double, double); };</code> with add/sub/mul/div, a lookup-by-name function returning the function pointer (NULL if absent), and a main that runs "mul 6 7". What M2 L4 design is this, and what does the C version make explicit that Python hid?</summary><div class="body"><code>static double add(double a,double b){return a+b;} ...
+struct op OPS[] = {{"add",add},{"sub",sub},{"mul",mul},{"div",dvd}};
+double (*find(const char *n))(double,double) { for (size_t i=0;i&lt;4;i++) if (!strcmp(n,OPS[i].name)) return OPS[i].fn; return NULL; }</code> — then <code>double (*f)(double,double) = find("mul"); if (f) printf("%g\n", f(6,7));</code> → 42. It's M2 L4 Practice 7's kernel registry, compiled. Explicit now: the table is a real array with real function addresses (print them with %p!); lookup is a linear strcmp scan (a dict was hashing — M2 L4 §2); and the type of "a function taking two doubles" has a spelling. Also note the gnarly declaration of find — returning a function pointer — which §1's typedef advice would tame: <code>typedef double (*binop)(double,double);</code>.</div></details>
+<details><summary>7. Design: the error-handling convention for the course's C projects (3.9 uses it, Module 5 extends it). Specify: return type policy, out-param rules, NULL policy, a CHECK macro for call sites, and the one place errno-style globals are acceptable. Justify each against this lesson + M2 L6.</summary><div class="body">Policy: functions return <code>int</code> status (0 success, negative error codes from a small enum), results via out-params LAST in the signature (readability convention), inputs const-qualified — the min_max shape as law. NULL: out-pointers checked at entry (return -EINVAL-style code, never crash in callee); optional out-params explicitly documented as NULL-OK (count-only mode: min_max(xs,n,&lo,NULL)). Call-site macro: <code>#define CHECK(call) do { int _e = (call); if (_e) { fprintf(stderr, "%s:%d: %s → %d\n", __FILE__, __LINE__, #call, _e); return _e; } } while (0)</code> — the M2 L6 "fail loudly with location" ethic, one line per call; and it is EXACTLY the shape of the CUDA_CHECK macro every CUDA codebase defines in 5.4 (same macro, cudaGetErrorString added). Globals: none for errors — error state in globals breaks purity (M2 L3) and threads (Module 4/5); the single tolerated global-ish channel is stderr for the human. This convention is one page in the repo's CONVENTIONS.md, and every line of it was paid for by a lesson in this module.</div></details>
+
+<div class="pager">
+  <a href="lesson-02.html">← Types, sizes & UB</a>
+  <a href="lesson-04.html">Next: Arrays, strings & pointer arithmetic →</a>
+</div>
+<div class="footer">GPU Mastery · Module 3 · Lesson 3 — works offline · progress saved in your browser</div>
+</div>
+<script src="../assets/diagrams3.js"></script>
+<script src="../assets/app.js"></script>
+</body>
+</html>

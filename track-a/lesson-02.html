@@ -1,0 +1,197 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>A2 PyTorch Internals — GPU Mastery</title>
+<link rel="stylesheet" href="../assets/style.css">
+</head>
+<body data-lesson="al2">
+<nav><div class="inner">
+  <a class="logo" href="../index.html">GPU<span>Mastery</span></a>
+  <a class="item" href="../index.html">Home</a>
+  <a class="item on" href="../curriculum.html">Curriculum</a>
+  <a class="item" href="../labs.html">Labs</a>
+  <a class="item" href="../setup.html">Lab setup</a>
+  <a class="item" href="../prompt.html">Generator prompt</a>
+</div></nav>
+<div class="wrap">
+
+<div class="lesson-top">
+  <div><span class="badge">Track A · Lesson 2</span><span class="badge dim">≈ 3.5 h</span></div>
+  <button id="donebtn" class="donebtn">Mark lesson complete</button>
+</div>
+<h1>PyTorch Internals — you already know this machine; here are its new names</h1>
+<p class="lead">PyTorch (2.11 at this writing) will spend the rest of Track A pretending to be magic. This lesson strips it: a Tensor is M2 L5's strides model, autograd is A1's graph as a recorded tape, CUDA calls are 5.3's async queue, and every "weird PyTorch behavior" you'll ever debug is one of those three leaking through.</p>
+
+<h2>Concept</h2>
+
+<h3>A Tensor is a header pointing at bytes — M2 L5, verbatim</h3>
+<div class="diagram" data-diagram="a2-tensor" data-caption="Header (shape, strides, dtype, device) + flat storage. Views are new headers on old bytes — the exact model you verified with np.shares_memory."></div>
+<pre><code>x = torch.arange(6.).reshape(2, 3)   # shape (2,3), strides (3,1) — row-major
+x.t()          # strides (1,3): SAME storage, axes remapped (M2 L5's .T)
+x[:, ::2]      # strides (3,2): a stride trick, not a copy
+x.t().is_contiguous()      # False — the header says "not dense row-major"
+x.t().contiguous()         # NOW a copy: new storage, strides (2,1)
+# device is part of the header: .to("cuda") = cudaMalloc + H2D (5.3's
+# lifecycle behind one method). Same tensor algebra, different WORLD —
+# and mixing worlds raises errors instead of 5.3's segfaults. Progress.</code></pre>
+
+<h3>Autograd: A1's graph, recorded live</h3>
+<div class="diagram" data-diagram="a2-autograd" data-caption="Every op on a requires_grad tensor appends a node holding its backward formula and saved inputs. loss.backward() walks it in reverse — A1's algorithm, productized."></div>
+<pre><code>w1 = torch.tensor(0.8, requires_grad=True)    # a LEAF: you own it, grads land here
+w2 = torch.tensor(-1.2, requires_grad=True)
+L = (w2*torch.relu(w1*1.5) - 1.0)**2          # forward RECORDS: Mul→Relu→Mul→Sub→Pow
+L.backward()                                   # replay reversed, VJP per node (A1 §1)
+w1.grad, w2.grad                               # 8.784, −5.856 — A1's HAND NUMBERS
+# .grad ACCUMULATES (+=) by design (shared params need it) → zero_grad()
+# every step, or step 2 trains on step1+step2's gradient (Ex.2 measures it).
+# .detach() = cut the tape here · torch.no_grad() = don't record at all
+# (inference: no tape → no activation memory → A1 §3's bill, waived).</code></pre>
+
+<h3>The dispatcher: one op name, a table of kernels</h3>
+<div class="diagram" data-diagram="a2-dispatch" data-caption="torch.matmul consults (device, dtype, layout, autograd?) and lands in cuBLAS, a TC path, or MKL. 'Slow op' debugging = finding which row you actually hit."></div>
+<pre><code>torch.matmul(a, b)
+#  cuda + fp16/bf16 → cuBLAS tensor-core path (A6's shapes rules apply!)
+#  cuda + fp32      → cuBLAS sgemm (5.11's reference, now your daily driver)
+#  cpu              → MKL/oneDNN
+#  + an autograd layer wrapping whichever kernel ran (records the VJP)
+# The profiler (5.10's nsys/torch.profiler) shows the REAL kernel name —
+# 'ampere_sgemm_128x64…' — and that name is your bridge back to Module 5:
+# you can now read it as tile shapes and know which knobs exist (5.5/5.6).</code></pre>
+
+<h3>CUDA semantics: 5.3's queue wearing a Python costume</h3>
+<pre><code>y = model(x)              # returns in MICROSECONDS — kernels are QUEUED (5.3!)
+t0 = time.time(); y = model(x); dt = time.time()-t0   # ← measures the ENQUEUE
+torch.cuda.synchronize()  # 5.3's cudaDeviceSynchronize, importable
+loss.item()               # returns a Python float = D2H copy = IMPLICIT SYNC
+                          #   (5.3 quiz 2's storm, one method call away)
+x = x.to("cuda", non_blocking=True)   # cudaMemcpyAsync — needs PINNED source:
+                          #   DataLoader(pin_memory=True) is 5.9's pool, built in
+torch.cuda.Event          # 5.9's events, importable — the honest GPU stopwatch
+# Nothing here is new machinery. It is 5.3 + 5.9 with better ergonomics and
+# the same failure modes — which is why you learned them on the bare metal.</code></pre>
+
+<h2>Worked example</h2>
+<div class="card">
+<p><strong>Task:</strong> Reproduce A1's hand-derived gradients with autograd, then read the tape it built — proving the framework runs YOUR algorithm, and learning to inspect it when it misbehaves. (Run on Colab; all numbers previously verified numerically in A1.)</p>
+<pre><code>w1 = torch.tensor(0.8, requires_grad=True); w2 = torch.tensor(-1.2, requires_grad=True)
+L = (w2*torch.relu(w1*torch.tensor(1.5)) - 1.0)**2
+L.backward()
+print(w1.grad, w2.grad)          # tensor(8.7840)  tensor(-5.8560)   = A1, exactly
+print(L.grad_fn)                  # &lt;PowBackward0&gt;           ← the tape's last node
+print(L.grad_fn.next_functions)   # (…SubBackward0…)          ← walk it: Pow ← Sub
+                                  #   ← Mul ← Relu ← Mul — A1's graph, as objects
+# the tape's saved tensors are why training holds memory (A1 §3):
+#   PowBackward saved (ŷ−y); ReluBackward saved z's sign; MulBackward saved w2, a1
+# no_grad() proof:  with torch.no_grad(): L2 = (…)**2
+#   L2.grad_fn is None — nothing recorded, nothing saved, no backward possible.</code></pre>
+<p><strong>Why this matters beyond warm feelings:</strong> when a real model's backward explodes ("one of the variables needed for gradient computation has been modified…", or a NaN forty layers deep), the grad_fn chain is your crime scene — the same walk you just did for five nodes works for five thousand (A9's tools automate it). And the exact match with A1's hand numbers is the point of this track's design: <em>the framework is not doing something clever that you can't audit; it is doing the thing you did on paper, at scale, with a tape.</em> Engineers who believe that debug fearlessly; engineers who don't, file superstitious bug reports.</p>
+</div>
+
+<h2>Key points</h2>
+<ul class="keypoints">
+<li>Tensor = header (shape, strides, dtype, device) + flat storage: views are stride tricks on shared bytes, .contiguous() is the honest copy — M2 L5's model with a device field.</li>
+<li>Autograd records a tape of (backward-formula, saved-inputs) per op and replays it reversed: A1's chain-rule-with-memoization, with .grad accumulating by design — zero_grad every step.</li>
+<li>The dispatcher routes each op by (device, dtype, layout) to a real kernel; the profiler's kernel names are the ground truth of what you actually ran (5.10's WHERE, torch edition).</li>
+<li>GPU calls queue and return instantly (5.3): time.time() around model(x) measures the enqueue; sync or use Events (5.9) before believing any number.</li>
+<li>.item()/.cpu()/printing force a device sync — one per training step is a pipeline barrier in torch clothing (5.3 quiz 2 / 5.9's scenario, the single most-shipped torch perf bug).</li>
+<li>In-place ops (x.add_()) trade tape-safety for memory: autograd's version counter detects mutated saved tensors and refuses — respect the refusal, it's protecting your gradients (scenario, A1).</li>
+</ul>
+
+<h2>Quiz</h2>
+<div class="quiz">
+  <div class="q">1. A teammate benchmarks their new model: "forward pass takes 40 µs — 300× faster than the old one!" Their code: <code>t0=time.time(); y=model(x); print(time.time()-t0)</code> on a CUDA tensor. The old model was benchmarked with the same snippet plus a <code>print(y.mean().item())</code> on the next line. Explain BOTH measurements and produce the honest comparison protocol.</div>
+  <button class="opt">The new model really is 300× faster</button>
+  <button class="opt" data-c="1">Neither number is a forward-pass time, but they lie DIFFERENTLY: the new model's 40 µs is pure enqueue (kernels queued, clock read before any ran — 5.3's async model); the old model's number accidentally INCLUDED the full execution, because .item() on the next line forced a device sync inside the timed region... actually before t1? — the sync happened after t1 was read, so the old number is ALSO enqueue-only unless the .item() sat between the calls; either way the 300× compares two differently-contaminated clocks. Protocol: warmup iterations, then torch.cuda.synchronize() before t0 AND before t1 (or torch.cuda.Event pairs — 5.9's stopwatch), median of K (M1 L7), same batch/dtype/device clocks for both models</button>
+  <button class="opt">time.time() lacks resolution below 1 ms</button>
+  <button class="opt">The GPU was still warming up</button>
+  <div class="expl">The correct option's mid-sentence self-check is deliberate — it models the reasoning: WHERE the hidden sync sits relative to the clock reads decides what got measured, and you must trace it, not vibe it (5.3's async model demands line-level reading of timing code). The tell in the wild: any GPU "speedup" over ~50× with time.time() and no visible synchronize is an enqueue measurement until proven otherwise. Events + warmup + medians (5.9 Ex.2's GpuTimer discipline, which torch.utils.benchmark implements for you) is the only protocol that survives review.</div>
+</div>
+<div class="quiz">
+  <div class="q">2. Mid-refactor, someone changes <code>h = torch.relu(z)</code> to <code>h = z.relu_()</code> ("in-place saves memory") inside a training step. Two possible outcomes, depending on the surrounding code: (a) training continues, slightly less memory; (b) backward() raises a RuntimeError about a variable "modified by an inplace operation." Explain the mechanism deciding which — and why outcome (a) is NOT automatically safe to ship.</div>
+  <button class="opt">In-place ops never work with autograd</button>
+  <button class="opt" data-c="1">The version counter: every tensor carries a mutation count; ops that SAVE a tensor for backward record its version at save time and re-check at backward. If some earlier op saved z (needs z's original values for ITS gradient), relu_'s mutation bumps the version → backward detects the stale save → error (b): autograd refusing to compute silently-wrong gradients. If nothing saved z (e.g., z came from an add whose backward needs no inputs), the in-place is legal → (a). Not automatically safe: legality depends on the WHOLE graph's save-set, which the next refactor can change — a distant edit can turn today's (a) into tomorrow's (b), so in-place in autograd code needs a comment justifying it and a gradcheck fixture guarding it (A1's scenario doctrine)</button>
+  <button class="opt">relu_ is deprecated in torch 2.x</button>
+  <button class="opt">(b) only happens in debug builds</button>
+  <div class="expl">The version counter is autograd's ASan (3.8's philosophy: make the invisible corruption LOUD): mutated-after-save would otherwise mean wrong gradients with zero symptoms — A1's scenario as a one-liner. The deep lesson is the coupling: in-place legality is a property of the graph, not the line, so it degrades under maintenance exactly like 5.5's barrier-dependent code did. Frameworks' memory planners (A9's Inductor) do provably-safe in-placing automatically — which is the mature answer to "I want the memory back."</div>
+</div>
+
+<h2>Exercises</h2>
+<details><summary>Exercise 1 — Stride forensics (Colab): for the chain x=torch.arange(24.).reshape(2,3,4); a=x.permute(2,0,1); b=a[::2]; c=b.reshape(6,2) — PREDICT each step's shape, strides, is_contiguous, and whether it shares storage with x (M2 L5's exact drill), THEN verify with .stride()/.data_ptr(). One step behaves differently than the NumPy version of this drill predicted — find it and explain reshape's contract.</summary><div class="body">
+<pre><code>x: (2,3,4) strides (12,4,1) contig ✓        a=permute(2,0,1): (4,2,3) strides (1,12,4) — view ✓
+b=a[::2]: (2,2,3) strides (2,12,4) — view ✓  c=b.reshape(6,2): CANNOT be a view (no
+consistent strides exist for that flattening of non-contiguous bytes) → torch COPIES</code></pre>
+<p>The surprise: reshape SUCCEEDS where .view() would raise — reshape's contract is "view if possible, silent copy otherwise" (verify: c.data_ptr() != x.data_ptr(), while a and b share). That silence is the trap this exercise vaccinates against: a "free" reshape inside a hot loop copying gigabytes per step (the 4.6 audit finds it as mystery H2D... no — device-side copy traffic; 5.10's ncu shows it). House rule worth adopting: .view() when you EXPECT zero-copy (it errors honestly if you're wrong — 3.3's contract style), .reshape() only when you've accepted a possible copy. Your M2 L5 stride arithmetic transferred wholesale — only the failure POLICY differs between libraries.</p>
+</div></details>
+<details><summary>Exercise 2 — The accumulation double-header (Colab): (1) write a 5-step training loop on A1's 2-parameter net with zero_grad DELETED — print w1.grad per step and identify the growth law; (2) then use the SAME mechanism deliberately: micro-batch gradient accumulation (4 micro-batches, step every 4th) and prove it matches the big-batch gradient to fp32 budget (M1 L8). One mechanism, one bug, one feature.</summary><div class="body">
+<pre><code>(1) grads without zero_grad: 8.784, 17.568, 26.352… — LINEAR growth (+= of the
+    same gradient as w barely moves), so training takes ~k× oversized steps and
+    diverges or oscillates; the fix is one line, the SYMPTOM (loss bouncing) is
+    famously misattributed to the learning rate. Signature worth memorizing.
+(2) for i,(xb,yb) in enumerate(micro): (loss(xb,yb)/4).backward()   # ÷k!
+    if i%4==3: opt.step(); opt.zero_grad()
+    assert torch.allclose(accum_grad, bigbatch_grad, rtol=1e-6)   # passes</code></pre>
+<p>The ÷k is the part everyone forgets (mean-of-means vs sum-of-means — M1's Σ bookkeeping): without it you've built quietly-4×-scaled gradients, which "works" until you port the LR schedule elsewhere (A1's forgiving-SGD gotcha again). Accumulation is how 80 GB-scale batches train on 16 GB cards, and it's the conceptual door to A7: DDP is "accumulation across MACHINES," with an allreduce where your += was. Same Σ, wider bus.</p>
+</div></details>
+
+<hr>
+<h1>Go deeper — the machinery under the sugar</h1>
+
+<h2>1. Leaves, .grad, and who gets gradients</h2>
+<pre><code>leaf: a tensor YOU created (parameters, inputs with requires_grad) — .grad lands here
+non-leaf: any op result — its grad flows THROUGH by default and is freed
+  h.retain_grad()        # opt in to keeping an intermediate's gradient
+  torch.autograd.grad(L, [h])   # or ask functionally, no .grad mutation at all
+why the default: storing every intermediate's grad would double the tape's
+memory (A1 §3) for values training never reads. Framework defaults encode
+the memory ledger — most "why is .grad None" confusions are this table.</code></pre>
+
+<h2>2. requires_grad vs no_grad vs inference_mode (the recording dial)</h2>
+<pre><code>requires_grad=False   per-TENSOR: this leaf never wants gradients (frozen layers)
+torch.no_grad()       per-REGION: record nothing inside (eval loops, metric calc)
+torch.inference_mode()  no_grad + skips version-counter bookkeeping too:
+                        faster, but tensors made inside can't join ANY later tape
+freezing a backbone = requires_grad_(False) on its params → ops still RUN,
+tape skips them → their activations aren't saved → fine-tuning's memory win
+comes from the TAPE, not the FLOPs (A1 §3's ledger explaining a daily practice).</code></pre>
+
+<h2>3. torch.profiler: 5.10's loop, in-process</h2>
+<pre><code>with torch.profiler.profile(activities=[CPU, CUDA]) as prof:
+    step()
+prof.key_averages().table(sort_by="cuda_time_total")
+# same discipline as 5.10: WHERE first (which op family eats the time),
+# then WHY (that op's kernel name → its 5.5–5.7 anatomy). The chrome trace
+# export shows 5.9's lanes: gaps = starvation (dataloader? .item()? — the
+# scenario below), dense = go tune kernels. nsys still works on torch too —
+# same program, two probes, one mental model.</code></pre>
+
+<h2>4. Gotchas</h2>
+<div class="gotcha"><strong>time.time() around queued work.</strong> Quiz 1. Sync-bracket or Events, warmup, medians — or your benchmark measured a function call's Python overhead.</div>
+<div class="gotcha"><strong>.item() per step as "logging."</strong> Each is a device drain (5.3 quiz 2); at 5k steps/hour it's the 5.9 scenario in miniature. Log every N steps, or accumulate metrics on-device and read at epoch end.</div>
+<div class="gotcha"><strong>Missing zero_grad — or double-calling backward.</strong> Both corrupt via legitimate += (Ex.2's growth law). The oscillating-loss signature earns a look at grad handling BEFORE the LR gets blamed.</div>
+<div class="gotcha"><strong>Silent copies from reshape/contiguous chains.</strong> Ex.1: reshape copies when strides can't express the result. In hot paths, prefer .view() (honest failure) and fix the layout upstream (M2 L7's SoA thinking).</div>
+<div class="gotcha"><strong>Cross-device tensors in one expression.</strong> cuda_tensor + cpu_tensor raises — the 5.3 world-crossing bug, caught at the API instead of segfaulting. The error is your FRIEND; .to() placement is a design decision, not a sprinkle-until-it-runs activity.</div>
+<div class="gotcha"><strong>Non-determinism blamed on torch.</strong> Same seed, different results: usually 5.8's atomics inside scatter/index ops or cuDNN autotune picking different algorithms. torch.use_deterministic_algorithms(True) names the offending op in its error — the 5.8 registry, built into the framework.</div>
+
+<h2>Scenario — "the GPU is only 60% busy" (a torch remix of old physics)</h2>
+<p>An ML platform team inherits a fine-tuning pipeline: A100, healthy-looking code, GPU utilization stuck at ~60%, epochs 1.7× slower than a colleague's "identical" setup. The senior engineer — core-curriculum literate — refuses to touch hyperparameters and captures one profiler trace (§3). The chrome trace reads like a 5.9 exhibit: kernel bursts, then 40 ms gaps, repeating. Inside each gap: dataloader workers finishing late (CPU-side JPEG decode — the pipeline's max lane isn't the GPU at all, 5.9's law), and a picket fence of tiny D2H syncs — a per-step <code>metrics["loss"].append(loss.item())</code> plus a tqdm bar formatting a GPU scalar every iteration (two .item()-class drains per step, gotcha 2). The fixes are all citations, not inventions: DataLoader workers ×4 with pin_memory=True and non_blocking H2D (5.9's pinned ring, one flag), JPEG decode moved to GPU (nvJPEG via DALI — moving work across the bridge the RIGHT direction, 4.6), loss logged every 50 steps from an on-device accumulator (5.8's privatization idea applied to metrics). Utilization 94%, epoch time −41%, hyperparameters untouched. The colleague's setup was never faster hardware — it was these three habits. Moral for Track A: <em>PyTorch performance work is 80% recognizing Module 5 patterns wearing Python syntax, and the profiler trace is where the costume comes off.</em></p>
+
+<h2>Practice</h2>
+<details><summary>1. For each, view or copy — and the one-word reason: (a) x.t(); (b) x.t().contiguous(); (c) x[3]; (d) x[x&gt;0]; (e) x.reshape(-1) on a contiguous x; (f) x.to("cuda"); (g) x.to(torch.float32) when x is already fp32.</summary><div class="body">(a) view (strides). (b) copy (materialize). (c) view (offset arithmetic — M2 L5 row select). (d) COPY (boolean gather can't be strided — data-dependent addresses, 5.7's gather). (e) view (contiguous flatten = stride math works). (f) copy (world-crossing — bytes must physically move, 5.3). (g) NO-OP returns self (same dtype+device → torch skips it; a pleasant surprise worth knowing for "defensive" .to() calls: free). Score 7/7 and M2 L5 has fully paid its rent in torch.</div></details>
+<details><summary>2. loss.backward() is called twice in a row (no zero_grad between, no retain_graph). What TWO distinct things go wrong, in what order, and what does each protect?</summary><div class="body">First: RuntimeError — the tape's saved buffers are FREED during the first backward (memory reclaim, A1 §3's bill being refunded eagerly); a second replay has no ingredients → "backward through the graph a second time" error. retain_graph=True opts into keeping them (needed for some higher-order/multi-loss patterns — at full tape memory cost). Second (if you retained): the += accumulation doubles grads (Ex.2's law) — correct per contract, wrong per intent, silent. Order matters: the loud failure fires before the quiet one can hurt you — but only because the default frees buffers; retain_graph flips you from protected-by-error to exposed-to-+=. API defaults as safety rails: notice how often torch chooses "error loudly" where raw CUDA (5.3) chose "garbage silently."</div></details>
+<details><summary>3. Explain, mechanism-first, why training memory drops when you freeze a 90%-of-params backbone (requires_grad_(False)) — then compute: 7B params fp16 frozen backbone + 700M trainable head, Adam. What still costs FULL size, and what shrank? (Weights 2 B/param; Adam states 2×4 B/param fp32; activations: assume 20 GB unfrozen.)</summary><div class="body">Weights: full 14 GB regardless (7e9 × 2 B — frozen or not, forward needs them all). Optimizer states: only trainable params carry Adam's two fp32 moments → 700M × 8 B = 5.6 GB instead of 56 GB — the big shrink. Tape/activations: ops inside the frozen backbone still RUN but don't save-for-backward... careful — backward must flow THROUGH the backbone only if trainable params sit UPSTREAM of it; with the head on TOP, backprop stops at the head's inputs: backbone saves nothing → activation memory falls to roughly the head's share (~2 GB of the 20). Total ≈ 14 + 5.6 + ~2 + grads(1.4 GB fp16) ≈ 23 GB vs ~104 GB full fine-tune (14 + 14 + 56 + 20). The mechanism hierarchy (weights vs states vs tape) is THE fine-tuning-economics interview question, and every line of it was A1 §3 + §2's recording dial.</div></details>
+<details><summary>4. torch.use_deterministic_algorithms(True) makes your embedding-heavy model error on index_add_. Translate the error into 5.8 vocabulary, name the two production-grade responses, and say which one A5's world usually picks and why.</summary><div class="body">Translation: index_add's CUDA path uses atomicAdd on float — scheduler-ordered additions, run-to-run last-bit wobble (5.8 quiz 2's exact mechanism); deterministic mode refuses rather than wobble. Responses: (1) accept nondeterminism, document it in the 5.8-style registry, budget-compare in tests (rtol, never bitwise); (2) deterministic implementation — sort-by-index then segmented reduce (5.8's slot-array/fixed-order architecture), costing ~1.3–3×. Frameworks ship both paths for exactly this reason. A5's world (training at scale) usually picks (1): the wobble is far below gradient noise, and the throughput matters — but replay-debugging sessions and regulated deployments flip to (2). Same decision memo you wrote in 5.8 Ex.2; torch just gave it a flag.</div></details>
+<details><summary>5. A custom nn.Module caches a tensor between forward passes ("self.buffer = h" to reuse next step). Predict the three distinct failure modes this invites across training, and the sanctioned alternatives for each intent.</summary><div class="body">(1) Tape leak: h drags its ENTIRE graph history along (grad_fn chain to step k's inputs) → memory grows per step and backward eventually reaches into freed/ancient buffers → OOM or P2-style errors. Intent "carry a value": store h.detach() (cut the tape — §recording dial). (2) Stale-device/dtype drift: after .cuda()/.half() calls, the cached tensor doesn't migrate with the module — register_buffer() exists precisely to join the module's device/dtype lifecycle. (3) In-place mutation of the cache while some tape still references it → version-counter errors at a distance (quiz 2, delayed edition). The meta-rule: tensors that OUTLIVE a step must be explicitly detached and registered — module state is a contract (3.6's struct discipline), not a scratchpad.</div></details>
+<details><summary>6. Using only concepts you now own, explain why torch.compile (A9 preview) CAN'T speed up a model whose steps are dominated by one big cuBLAS matmul, but CAN ~2× a model of many small elementwise ops — cite the two core-curriculum facts doing the work.</summary><div class="body">Fact 1 (5.2/5.9): every kernel launch has a fixed µs cost, and many small ops = launch-bound confetti + the memory round-trip per op (each elementwise op reads+writes its whole tensor — 4.6 trips). Compile's fusion merges them: one launch, one read, one write — the a5-unfused ledger collapsing. Fact 2 (5.11 quiz 1): the big matmul already runs a vendor-tuned kernel at its roofline; a compiler can't beat cuBLAS at its own game, only remove work AROUND it (epilogue fusion, A11's whole project). So compile's win is proportional to how much of your step is glue, not GEMM — the a9-when table, derived from first principles before A9 even teaches the tool. That derivation-before-the-tool is this course's entire theory of education.</div></details>
+<details><summary>7. Interview closer: "Walk me through what happens, end to end, when you call loss.backward()." 90 seconds: tape structure, the reverse walk with VJPs, saved-tensor consumption and freeing, .grad accumulation on leaves, the version-counter guarantee, and the one CUDA-semantics footnote that trips people. Deliver it.</summary><div class="body">Skeleton: "During forward, every op on grad-requiring tensors appended a node to a graph — the node holds the op's backward function and whatever inputs that VJP needs, with a version stamp per saved tensor [quiz 2]. backward() seeds dL/dL=1 at the loss and walks the graph in reverse topological order; each node computes a vector–Jacobian product — matmul's backward is two matmuls [A1 P6] — multiplying the incoming gradient by local derivatives and routing results to its input edges. Saved buffers are consumed and freed as the walk passes (why a second backward errors without retain_graph [P2]); when a path reaches a LEAF, the gradient += into .grad — accumulation by contract, so training zeroes grads each step and micro-batching exploits the same += deliberately [Ex.2]. The version counter re-checks every saved tensor before use — mutated-after-save aborts rather than emit wrong gradients [quiz 2]. Footnote: on CUDA all of this ENQUEUES kernels (5.3) — backward returning doesn't mean gradients exist yet; the optimizer step's ordering in the same stream makes it correct, but your timing/logging must still sync [quiz 1]." Every bracket survives a "go deeper" follow-up — which is the point.</div></details>
+
+<div class="pager">
+  <a href="lesson-01.html">← Calculus for backprop</a>
+  <a href="lesson-03.html">Next: Custom CUDA ops for PyTorch →</a>
+</div>
+<div class="footer">GPU Mastery · Track A · Lesson 2 — works offline · progress saved in your browser</div>
+</div>
+<script src="../assets/diagramsA.js"></script>
+<script src="../assets/app.js"></script>
+</body>
+</html>

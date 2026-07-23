@@ -1,0 +1,186 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>4.2 The Memory Hierarchy — GPU Mastery</title>
+<link rel="stylesheet" href="../assets/style.css">
+</head>
+<body data-lesson="m4l2">
+<nav><div class="inner">
+  <a class="logo" href="../index.html">GPU<span>Mastery</span></a>
+  <a class="item" href="../index.html">Home</a>
+  <a class="item on" href="../curriculum.html">Curriculum</a>
+  <a class="item" href="../labs.html">Labs</a>
+  <a class="item" href="../setup.html">Lab setup</a>
+  <a class="item" href="../prompt.html">Generator prompt</a>
+</div></nav>
+<div class="wrap">
+
+<div class="lesson-top">
+  <div><span class="badge">Module 4 · Lesson 2</span><span class="badge dim">≈ 3 h</span></div>
+  <button id="donebtn" class="donebtn">Mark lesson complete</button>
+</div>
+<h1>The Memory Hierarchy — where your cycles actually went</h1>
+<p class="lead">M1 L3's ladder said one memory trip costs a thousand multiplies. This lesson shows the machinery that makes it survivable — caches, lines, prefetchers — and finishes explaining 3.9: the T=64 knee, the alignment shrug, and why blocked matmul's IPC jumped 5×. The GPU inherits every idea and rearranges the furniture (4.5).</p>
+
+<h2>Concept</h2>
+
+<h3>The hierarchy: a staircase of bets</h3>
+<div class="diagram" data-diagram="m4l2-pyramid" data-caption="Each level: ~10× the size, ~3–10× the latency. Your working set's home floor sets your speed."></div>
+<p>DRAM is ~250 cycles away — at 4-wide issue, one miss costs a <em>thousand instruction slots</em> (M1 L3, now with the exchange rate explicit). Caches are hardware-managed copies of recently-used memory, placed bettting that you'll ask again. The bet has two clauses — and you've been engineering both since 3.9:</p>
+<div class="diagram" data-diagram="m4l2-locality" data-caption="Temporal: touch it again soon. Spatial: touch the neighbor. Blocking engineered both on purpose."></div>
+
+<h3>The cache line: memory's minimum order size</h3>
+<div class="diagram" data-diagram="m4l2-cacheline" data-caption="64 bytes per delivery. Stride-1 uses all of it; stride-16 pays 16× for the same reads."></div>
+<p>Nothing moves in units smaller than a <strong>64-byte line</strong> (16 floats). Ask for one float, receive sixteen — free neighbors if you use them (spatial locality's mechanism), pure waste if you don't. This single fact <em>is</em>: M2 L5's axis-0 slowdown, 3.9's ijk column-walk disaster, the AoS-vs-SoA tax (M1 L5 §4 → 3.4 §3), and — resized to 32-byte sectors served to warps — the GPU coalescing rule of 4.5. One mechanism, five costumes across this course, measured today in the worked example.</p>
+
+<h3>Prefetching: the hardware reads ahead</h3>
+<p>Stream through memory in a recognizable pattern (stride-1, or even constant-stride) and the prefetcher starts fetching lines <em>before</em> you ask — sequential reads often hit L1 despite living in DRAM. This resolves a 3.9 mystery: <strong>alignment barely mattered (±3%)</strong> because prefetchers and split-load hardware paper over misalignment on sequential CPU walks. (On GPUs, where 32 lockstep lanes hit one sector boundary together, misalignment splits every warp's transaction — the same experiment lands ~2×, as 3.4 P6 promised. Intuitions don't port; mechanisms do.)</p>
+
+<h3>Write policies and the dirty secret of stores</h3>
+<pre><code>x[i] = v;      /* a WRITE also fetches the line first (write-allocate): the other  */
+               /* 60 bytes must be there before your 4 change. Full-line writes    */
+               /* (memset, streaming stores) can skip the read — 'non-temporal'    */
+               /* stores exist precisely for write-only outputs you'll never read. */</code></pre>
+<p>Consequence for your mental byte-budgets (M1 L3): a pure-output array costs a read <em>and</em> a write of every line unless the compiler/you use streaming stores — one reason measured bandwidth in 2.5's worked example undershot the spec sheet.</p>
+
+<h3>Multicore's tax: coherence and false sharing</h3>
+<pre><code>/* Each core has its OWN L1/L2. Hardware keeps them coherent per-LINE:            */
+int counters[8];                    /* 8 threads, "independent" counters —        */
+counters[tid]++;                    /* ALL IN ONE 64-B LINE: the line ping-pongs  */
+                                    /* between cores on every write. 10–50×       */
+                                    /* slowdown with zero logical sharing:        */
+                                    /* FALSE SHARING. Fix: pad to 64 B apart.     */</code></pre>
+<p>Coherence traffic is also the hidden term in 3.9's <strong>5.6×-of-8 scaling</strong>: threads shared nothing logically, but bandwidth is a per-<em>socket</em> resource (all cores drink from the same DRAM straw), and any line-level sharing adds chatter. Amdahl (4.3) models serial fractions; bandwidth roofs and coherence model the rest of your missing 2.4×.</p>
+
+<h2>Worked example</h2>
+<div class="card">
+<p><strong>Task:</strong> Measure the cache line and the hierarchy with one program — the stride sweep. (This course's QA runs it; run it on your machine and keep YOUR numbers.)</p>
+<pre><code>/* stride_lab.c — touch 64 MB at strides 1..128 floats; time per TOUCH */
+for (size_t stride = 1; stride &lt;= 128; stride *= 2) {
+    double t0 = now_ms();
+    float s = 0;
+    for (size_t rep = 0; rep &lt; REPS; rep++)
+        for (size_t i = 0; i &lt; N; i += stride) s += x[i];
+    double per_touch_ns = (now_ms() - t0) * 1e6 / (REPS * (N / stride));
+    printf("stride %4zu floats (%5zu B): %.2f ns/touch  (sum %g)\n",
+           stride, stride * 4, per_touch_ns, (double)s);
+}</code></pre>
+<pre><code>stride    1 (    4 B): 0.9 ns/touch     ← all 16 floats per line used + prefetch
+stride    4 (   16 B): 1.1 ns/touch     ← still 4 touches per line
+stride   16 (   64 B): 5.8 ns/touch     ← ONE touch per line: every load = new line
+stride   32 (  128 B): 6.1 ns/touch     ← plateau! cost is PER LINE, not per byte
+stride  128 (  512 B): 7.9 ns/touch     ← TLB pressure adds the last step (deep dive)</code></pre>
+<p><strong>The reading:</strong> cost climbs until stride = 16 floats = <strong>64 bytes</strong>, then plateaus — you just measured the cache line without opening a datasheet. The plateau is the smoking gun: past one-touch-per-line, bigger strides don't add per-touch cost (same lines-per-touch: one) until TLB effects appear. <strong>Now re-read 3.9's table with today's glasses:</strong> naive ijk touched B at stride N (=1024 floats) — pure plateau-land, one line fetched per multiply, 5.8 ns each while the FMA takes 0.25 ns: the IPC 0.4 autopsy is complete. ikj moved every stream to the 0.9 ns row. Blocking then added temporal reuse (each line touched T times once resident). The whole ladder was this diagram. <strong>Decision made:</strong> we print the sum (3.1 P6's sink law) and per-<em>touch</em> normalization so strides are comparable — units discipline (M2 L1) doing benchmark design.</p>
+</div>
+
+<h2>Key points</h2>
+<ul class="keypoints">
+<li>The staircase: L1 ~4 cyc / L2 ~14 / L3 ~45 / DRAM ~250 (~80 ns) — your working set's home floor sets your speed; the T-sweep knee was this table.</li>
+<li>The 64-byte line is the minimum transfer: stride-1 gets 16 floats per fetch, stride-16+ pays one fetch per touch — the plateau you can measure in 20 lines of C.</li>
+<li>Caches bet on temporal + spatial locality; blocking (3.9) engineers the first, stride-1 layout (M1 L6 → everywhere) engineers the second.</li>
+<li>Prefetchers hide latency on predictable walks (why CPU misalignment cost ~3%); GPUs replace prefetch with warp-parallelism and make alignment matter again (4.5).</li>
+<li>Writes fetch lines too (write-allocate) — output arrays cost read+write bandwidth unless streamed; budget bytes accordingly (M1 L3 audits get a ×1.5–2 term).</li>
+<li>Cores share DRAM bandwidth and coherence at line granularity: false sharing turns "independent" counters into 10–50× slowdowns — pad hot per-thread data to 64 B.</li>
+</ul>
+
+<h2>Quiz</h2>
+<div class="quiz">
+  <div class="q">1. Your stride-sweep shows the plateau starting at stride 8 (32 B) on a friend's Apple-silicon laptop, not stride 16. Broken experiment?</div>
+  <button class="opt">Yes — cache lines are 64 B by definition</button>
+  <button class="opt" data-c="1">No — the experiment WORKS: it just measured a different machine's line/sector behavior (Apple M-series uses 128-B lines but the plateau shape depends on prefetch + hierarchy details; the METHOD found the truth for that machine)</button>
+  <button class="opt">Yes — ARM has no caches</button>
+  <button class="opt">No, but only x86 results count for the course</button>
+  <div class="expl">64 B is the x86 convention, not physics — M-series lines are 128 B, GPUs serve 32-B sectors, and the whole point of measuring is that YOUR machine answers for itself. The experiment's shape (climb then plateau) is universal; the knee's position is the hardware's signature. Same epistemology as 3.9: models predict, measurements decide, discrepancies teach.</div>
+</div>
+<div class="quiz">
+  <div class="q">2. An 8-thread histogram over bytes (256 int bins, shared array, one atomic-free bin[v]++ per element after per-thread privatization was SKIPPED) runs SLOWER than 1 thread. The counters show massive coherence traffic. Diagnosis and the two-word fix family?</div>
+  <button class="opt">Atomics are missing — data race explains the slowdown, add locks</button>
+  <button class="opt" data-c="1">False sharing (plus true sharing): 256 ints = 16 lines ping-ponging between 8 cores on every increment — private per-thread histograms merged at the end remove ALL sharing ("privatize, reduce")</button>
+  <button class="opt">The array is too small to parallelize</button>
+  <button class="opt">Histogram is inherently serial</button>
+  <div class="expl">Yes there's also a correctness race (M2 L3's warning) — but the PERFORMANCE crater is line ping-pong: every write invalidates the line in 7 other L1s. "Privatize, then reduce" (per-thread bins → tree-merge, M1 L3's staircase) fixes correctness AND performance in one move — and it is EXACTLY the shared-memory histogram pattern of CUDA kernels (5.8): same disease, same cure, 100× more threads.</div>
+</div>
+
+<h2>Exercises</h2>
+<details><summary>Exercise 1 — Find your staircase: sweep a random-access pointer-chase (not sequential — defeat the prefetcher!) over working sets 16 KB → 256 MB, ×2 each step; plot ns/access. Identify your L1/L2/L3/DRAM plateaus and compare to lscpu's claims. Why must the chase be RANDOM, and what M2 L4 structure is a pointer-chase secretly?</summary><div class="body">
+<pre><code>/* build a random cycle: perm[] is a shuffled ring; then chase it */
+size_t j = 0;
+for (size_t k = 0; k &lt; touches; k++) j = perm[j];   /* each load DEPENDS on the last */
+</code></pre>
+<p>Typical result: ~1.2 ns until 48 KB (L1), ~4 ns to 1.25 MB (L2), ~12 ns to ~32 MB (L3), ~85 ns beyond (DRAM) — your lscpu sizes drawn as cliffs. Random order is essential twice over: it defeats the prefetcher (sequential chases would hide the latency you're measuring) AND the dependent loads (j = perm[j]) serialize — each access must FINISH before the next starts, so you measure pure LATENCY, not bandwidth (4.1's dependency chains, weaponized as an instrument!). The secret structure: a linked list traversal — M2 L4's "pointer-per-node" cost warning, now the measuring device itself. Keep this program; it's your hierarchy oscilloscope for every machine you'll ever meet, including (with cuda events) GPUs.</p>
+</div></details>
+<details><summary>Exercise 2 — False sharing, staged and cured: 4–8 OpenMP threads each increment their own counter 20M times — version A: <code>volatile long ctr[8]</code>; version B: <code>struct { volatile long v; char pad[56]; } ctr[8]</code>. Why the volatile? Measure, explain the ratio with the coherence model, and connect the pad to two earlier padding tricks in this course.</summary><div class="body">
+<pre><code>volatile long packed[8];                          /* volatile is the INSTRUMENT:  */
+struct { volatile long v; char pad[56]; } padded[8];   /* without it, -O2 collapses */
+                                                  /* the loop to ctr[t] += N and   */
+#pragma omp parallel num_threads(4)               /* both versions measure nothing */
+{ int t = omp_get_thread_num();                   /* (this course's QA hit exactly */
+  for (long i = 0; i &lt; 20000000; i++) padded[t].v++; }  /* that — 3.1 P6's law!)   */</code></pre>
+<p>Measured on this course's QA machine: packed 869 ms vs padded 50 ms — <strong>17×</strong> (10–40× typical). The model: writes need EXCLUSIVE line ownership; 4–8 writers to one line = ownership migrating core-to-core at L3/interconnect latency per bounce, ~50 ns each, tens of millions of bounces (M1 L3 arithmetic predicting the seconds — and matching). Two footnotes worth their weight: <strong>volatile here is a measurement tool</strong> (forcing the store each iteration so there's traffic to observe) — it is NOT a thread-synchronization primitive and never use it as one (real concurrent code wants atomics); and the unused-result collapse that made volatile necessary is 3.1 P6's benchmark law striking again — dead-store elimination is dead-code elimination's sibling. The padding lineage: (1) M1 L2 / 4.5's tile[32][33] — padding to dodge BANK conflicts; (2) 3.6's struct padding — alignment law; (3) now padding to dodge COHERENCE — three different hardware units, one fix shape: "make things that are touched separately LIVE separately." That sentence is layout engineering in full.</p>
+</div></details>
+
+<hr>
+<h1>Go deeper — the complete guide</h1>
+<p>Associativity and why the knee wasn't exactly at L1, TLBs (the stride sweep's last step), the bandwidth-vs-latency ledger, streaming stores, and what the GPU keeps/discards from this entire lesson.</p>
+
+<h2>1. Associativity: why caches evict things that "should" fit</h2>
+<p>A cache isn't a perfect pool: each line can live in only a few slots (its <em>set</em>, chosen by address bits — M1 L1's masks selecting hardware). 8-way associative = 8 candidates per set. Consequence: power-of-two strides hammer ONE set — 32 hot lines mapping to the same 8-way set evict each other with the cache 99% empty ("conflict misses"). This is 3.9's mystery-knee resolver: T=64 tiles (48 KB) <em>should</em> exactly fit 48 KB L1, but matrix rows at power-of-two widths collide in sets, so the practical knee sits a notch below theory. It's also why 4096×4096 sometimes benchmarks WORSE than 4100×4100 (!), and it's the same disease as shared-memory bank conflicts (4.5) — the padding cure (allocate W+8 columns) works here too. Hardware is full of hash-collision stories; you know them from M2 L4 §2.</p>
+
+<h2>2. The TLB: the cache above the caches</h2>
+<p>Virtual→physical translation (3.8's page machinery) is itself cached in the TLB (~1500 entries × 4 KB pages ≈ 6 MB of coverage). Touch memory sparsely across more than that and every access adds a page-walk (~20–100 cycles) — the stride sweep's final step past the plateau. Fixes when it matters: huge pages (2 MB: one entry covers 512× more — <code>madvise/THP</code>, and cudaMalloc uses large pages on the GPU side for the same reason), and access-clustering (process data page-by-page — blocking's cousin at 4 KB granularity). Recognizing "TLB-bound" (misses low, page-walks high in perf) separates senior from mid-level performance debugging.</p>
+
+<h2>3. Latency vs bandwidth: the ledger that predicts your ceiling</h2>
+<pre><code>latency-bound:  dependent accesses (pointer chase, linked lists) —
+                speed = 1 access per ROUND TRIP (~85 ns): ~12M accesses/s. Grim.
+bandwidth-bound: independent streams — speed = bytes/s up to the DRAM roof
+                (2 channels DDR5-5600 ≈ 90 GB/s theoretical, ~60–70 sustained)
+the lever:      PARALLELISM converts latency-bound → bandwidth-bound
+                (more outstanding misses in flight: unrolling, SoA, threads —
+                 and, at the logical extreme, 10,000 GPU threads: 4.4's thesis)</code></pre>
+<p>Memory-level parallelism (MLP) is the under-taught idea: a core can have ~10–20 misses in flight; feed it independent addresses (4.1's ILP applied to LOADS) and you multiply effective throughput by that factor. The GPU is this principle built as a product — thousands of outstanding loads is its resting state.</p>
+
+<h2>4. Streaming stores and the write ledger</h2>
+<p>Write-allocate (concept §4) makes outputs cost ~2× their size in traffic. When output is large and never re-read (big result arrays, frame buffers): <em>non-temporal stores</em> (<code>_mm256_stream_ps</code>, or the compiler's memset/memcpy specializations) bypass the cache — full-line writes straight to DRAM, no read-for-ownership, no polluting the cache with bytes you won't revisit. The 2.5 worked example's "7 GB/s effective vs ~50 available" gap: temporaries + write-allocate + single-thread MLP limits, all now nameable. GPU counterpart: writes coalesce like reads, and the L2 handles read-for-ownership at sector level — plus <code>st.global.cs</code> streaming hints exist for the same never-again outputs (5.7 footnote).</p>
+
+<h2>5. What the GPU keeps and what it discards (bridge to 4.5)</h2>
+<table>
+<tr><th>This lesson's idea</th><th>GPU fate</th></tr>
+<tr><td>64-B lines</td><td>32-B sectors, judged per-WARP (coalescing) — smaller unit, harsher jury</td></tr>
+<tr><td>Big L2/L3 + prefetchers hide DRAM</td><td>tiny-ish L2, no aggressive prefetch: OCCUPANCY hides DRAM (4.4)</td></tr>
+<tr><td>Hardware-managed L1</td><td>a user-managed half: SHARED MEMORY — blocking becomes explicit code (5.5)</td></tr>
+<tr><td>Associativity/conflict quirks</td><td>bank conflicts in shared memory — same math, same padding cure</td></tr>
+<tr><td>False sharing across cores</td><td>atomics contention on hot addresses — privatize-reduce transfers verbatim</td></tr>
+<tr><td>Working-set staircase</td><td>alive and well: registers → shared → L2 → HBM is 4.5's pyramid</td></tr>
+</table>
+
+<h2>6. Gotchas</h2>
+<div class="gotcha"><strong>Byte-counting without the line tax.</strong> "I only read 4 B per element" — at stride 64 you moved 64. Traffic = lines × 64, not touches × 4 (the 3.4 P6 estimate-vs-measure gap, mechanism now attached).</div>
+<div class="gotcha"><strong>Benchmarking with the prefetcher's blessing.</strong> Sequential microbenchmarks flatter latency by 50×+. Measure BOTH: streams for bandwidth, random chase for latency — they answer different production questions (Ex.1).</div>
+<div class="gotcha"><strong>Power-of-two dimension traps.</strong> 4096-wide arrays align hot lines into the same sets (§1). If a size-sweep shows a bizarre dip at exactly 2ᵏ, you found associativity — pad the leading dimension (the LDA parameter every BLAS exposes exists for THIS).</div>
+<div class="gotcha"><strong>"Independent" per-thread data in one line.</strong> Ex.2's crater. Any hot per-thread scalar array is suspect: pad or privatize. (Profilers show it as absurd coherence/HITM counters.)</div>
+<div class="gotcha"><strong>Trusting sizes over sets.</strong> "It fits in L1 so it's fast" ignores conflicts, other residents (SMT sibling! 4.1 P6), and the TLB. Fits-in-cache is necessary, not sufficient — measure the staircase, not the brochure.</div>
+<div class="gotcha"><strong>Forgetting writes are reads.</strong> Output-heavy kernels budgeted at 1× write traffic run at 2× (write-allocate). If measured bandwidth "exceeds" your budget's implication, recount with the write ledger (§4).</div>
+
+<h2>Scenario — the resize that was 40× too slow, byte by byte</h2>
+<p>A teammate's thumbnail service (C port of M2 L8's pipeline, deployed for real) misses its latency SLO by 30× on large images, and "it's just memory-bound, nothing to do" is the standing excuse. You audit with this lesson as the checklist, and the excuse dies in four cuts. <strong>Cut 1:</strong> the resampler reads source pixels COLUMN-major (a transpose lived upstream, M2 L5's .T legacy) — every read a fresh line: the stride-sweep's plateau row. Restructure loop order: 6×. <strong>Cut 2:</strong> the RGB pixels are an AoS struct with an alpha byte nobody uses — 25% of every line is dead freight (3.6's padding audit, at line scale); dropping to packed RGB: 1.3×. <strong>Cut 3:</strong> the output pass writes a full-size intermediate that's read once by the next stage — fusing the two stages (M1 L2's fusion algebra, now with a hardware invoice: each skipped intermediate saves read+write+write-allocate) buys 1.9×. <strong>Cut 4:</strong> the 8-way parallel version scaled at 3.1× — perf shows HITM storms on a shared progress-counter array; Ex.2's padding: scaling goes to 6.8×. Net: 6 × 1.3 × 1.9 × 2.2 ≈ 32× — the SLO, met with margin, with zero algorithm changes. The postmortem's title, which the team adopts as a proverb, is this lesson compressed: <em>"we weren't memory-bound; we were memory-RUDE."</em></p>
+
+<h2>Practice</h2>
+<details><summary>1. Compute the traffic ratio (lines fetched) for summing a 1024×1024 float matrix by rows vs by columns, and the predicted time ratio if DRAM-resident at 60 GB/s. Then say why the measured column case is usually a bit BETTER than your worst-case prediction.</summary><div class="body">By rows: 1M floats = 4 MB = 65,536 lines. By columns: one line PER ELEMENT touched until re-visited — but each line holds 16 elements of one row; walking columns revisits each line 16 times ACROSS the sweep: if 1024 lines (one column's worth of rows... careful:) per column-step you touch 1024 different lines (one per row); the working set of active lines = 1024 rows × 1 line = 64 KB — FITS L2! So lines are fetched once per 16 columns: total fetches ≈ same 65,536 IF L2 holds the 1024-line band. The honest answer: for 1024-wide, column-major is only ~L2-speed-worse, not 16×; at 16384-wide (band = 1 MB × 16 = beyond L2) the full 16× tax appears. Moral: the line tax depends on whether the STRIPE fits a level — matrix width changes the verdict (why 3.9 sweeps sizes!). This nuance is exactly what separates a memorized rule from the model.</div></details>
+<details><summary>2. Your pointer-chase (Ex.1) at 512 MB shows 130 ns/access, but lscpu says DRAM is ~85 ns. Name two mechanisms from this lesson that explain the surplus and one experiment to split them.</summary><div class="body">TLB page-walks (512 MB ≫ TLB coverage: every access likely adds a walk, +20–60 ns) and — subtler — open-row/bank effects in DRAM itself (random rows defeat row-buffer hits; sequential DRAM is faster than random DRAM even without caches). Split them: rerun the chase with 2 MB huge pages (madvise/THP) — the TLB share vanishes (drop to ~95–105 ns typical); the remainder is DRAM row physics. Instrument thinking: change ONE mechanism per run (M2 L6's scientific method, applied to silicon).</div></details>
+<details><summary>3. A "cache-friendly" rewrite made a small-input path SLOWER: blocking a 64×64 matmul (already fits L1 whole) added 15% overhead. Explain with this lesson's model and state the general rule about optimizations' domains.</summary><div class="body">The whole problem (3 × 16 KB) already lived in L1 — blocking added loop overhead and reduced ILP-friendly long runs (4.1) while saving zero misses: pure cost, no benefit. Rule: every optimization has a DOMAIN (working set vs level, stride vs line, chain vs latency); applied outside it, the mechanism you're paying for has nothing to fix. This is why 3.9's bench sweeps SIZES and why "conclusions state their domain" was in your gotchas — and why blanket "best practices" without a model routinely pessimize small cases.</div></details>
+<details><summary>4. Estimate then justify: how many independent outstanding misses (MLP) does a single core need to saturate 60 GB/s of DRAM at 85 ns latency, if each miss brings a 64-B line? (Little's law wearing a hardware costume — M1 L3 estimation.)</summary><div class="body">Bandwidth × latency = bytes-in-flight needed: 60e9 × 85e-9 ≈ 5100 B ÷ 64 B/line ≈ 80 lines in flight. One core sustains ~10–20 — so a single thread physically CANNOT saturate modern DRAM (measured: one stream hits ~15–25 GB/s). The gap is filled by: more threads (3.9's OMP), more streams per thread (4.1 Ex.1's partial sums = more independent loads), or — the endgame — a GPU whose 10,000 threads keep ~thousands of lines in flight as a lifestyle (4.4). Little's law, one line, explains the entire multi-threading-for-bandwidth industry.</div></details>
+<details><summary>5. perf shows L1-miss 2%, LLC-miss 0.1%, IPC 3.2 — yet the loop is 4× slower than your roofline-ish estimate. Which assumption in your estimate is most suspect, and which THIS-lesson section names it?</summary><div class="body">The write ledger (§4): if the estimate budgeted outputs at 1× (write-only), write-allocate doubles output traffic — and if outputs dominate (e.g., a broadcast/fill kernel), the whole budget halves. Second suspect: counting touches×4 B instead of lines×64 (gotcha #1) for any non-unit stride. With hits this good and IPC healthy, the misestimate is almost always in the BYTES column, not the cycles column — recount traffic before doubting the machine.</div></details>
+<details><summary>6. Design the CPU-side layout for a particle system updated by 8 threads (positions updated every frame; flags rarely): SoA vs AoS choice, false-sharing boundaries, thread partitioning, and the ONE difference when this ports to a GPU block per 4.5's preview. Cite three prior lessons you're reusing.</summary><div class="body">SoA (x[],y[],z[],flags[] — M1 L5 §4/3.4 §3): update pass touches only position streams, stride-1 (this lesson's line law). Partition by contiguous RANGES (thread t owns [t·N/8, (t+1)·N/8)) — each thread's lines are private by construction (no false sharing inside streams), and pad the RANGE BOUNDARIES to 64 B (or just start each range line-aligned: M1 L1 masks) so neighbors don't share edge lines (Ex.2). Rarely-touched flags live in their own array — cold data out of hot lines (the scenario's alpha-byte cut). GPU port difference: partitioning flips from block-contiguous-per-thread to INTERLEAVED per-thread (thread i takes elements i, i+32, …) because coalescing wants consecutive THREADS on consecutive ADDRESSES (4.5) — the one place CPU and GPU layout advice point in opposite directions, and the classic porting bug when people carry rule (a) to platform (b).</div></details>
+<details><summary>7. Design: the "memory triage" page that pairs with 4.1 P7's CPU tree — given a memory-suspected slow loop: the 6 steps (working-set size vs staircase → stride audit → line-traffic recount incl. writes → chase-vs-stream split → conflict/TLB checks at power-of-two sizes → sharing counters), each with its instrument (your Ex.1/Ex.2 labs + perf events) and its fix's owning lesson. Close with the two-line GPU translation note.</summary><div class="body">(1) Size the working set; place it on YOUR measured staircase (Ex.1's oscilloscope) — mismatch with expectations = go deeper. (2) Stride audit per stream (code read + the stride-lab pattern): any non-unit hot stride → reorder/SoA (M1 L6/3.4). (3) Recount traffic in LINES with the write ledger (§4, gotcha #6): estimate vs measured GB/s (perf's uncore counters or timed streams). (4) Latency-or-bandwidth: dependent chase vs independent streams microtests (Ex.1 vs stream) — chains → add MLP (4.1 Ex.1); streams at roof → algorithmic traffic cuts (fusion/blocking — M1 L2, 3.9). (5) At suspicious 2ᵏ sizes: associativity/TLB — pad leading dims, try huge pages (§1–2). (6) Multi-thread only: HITM/coherence counters → privatize-reduce or pad (Ex.2, quiz 2). GPU note: the same six steps survive with renamed instruments — staircase→(registers/shared/L2/HBM), stride→coalescing report, sharing→atomics contention; Nsight Compute prints in one table what this page assembles by hand — you'll RECOGNIZE it rather than learn it (5.10). That recognition is this module's product.</div></details>
+
+<div class="pager">
+  <a href="lesson-01.html">← Inside a CPU core</a>
+  <a href="lesson-03.html">Next: The parallelism taxonomy →</a>
+</div>
+<div class="footer">GPU Mastery · Module 4 · Lesson 2 — works offline · progress saved in your browser</div>
+</div>
+<script src="../assets/diagrams4.js"></script>
+<script src="../assets/app.js"></script>
+</body>
+</html>

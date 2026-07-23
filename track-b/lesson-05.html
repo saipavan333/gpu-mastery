@@ -1,0 +1,209 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>B5 MPI + CUDA, NCCL & GPUDirect — GPU Mastery</title>
+<link rel="stylesheet" href="../assets/style.css">
+</head>
+<body data-lesson="bl5">
+<nav><div class="inner">
+  <a class="logo" href="../index.html">GPU<span>Mastery</span></a>
+  <a class="item" href="../index.html">Home</a>
+  <a class="item on" href="../curriculum.html">Curriculum</a>
+  <a class="item" href="../labs.html">Labs</a>
+  <a class="item" href="../setup.html">Lab setup</a>
+  <a class="item" href="../prompt.html">Generator prompt</a>
+</div></nav>
+<div class="wrap">
+
+<div class="lesson-top">
+  <div><span class="badge">Track B · Lesson 5</span><span class="badge dim">≈ 3.5 h</span></div>
+  <button id="donebtn" class="donebtn">Mark lesson complete</button>
+</div>
+<h1>MPI + CUDA — many machines, explicit messages, and the audit that predicts scaling</h1>
+<p class="lead">MPI is 5.3's discipline at datacenter scale: N processes, N private memories, and NOTHING moves unless you say so. This lesson gives you the rank model, the CUDA-aware path (and how to verify you're actually ON it), the halo exchange your B3 harness was built for — and the two-lane arithmetic that predicted a 99%-vs-50% scaling split before any cluster time was burned.</p>
+
+<h2>Concept</h2>
+
+<h3>The rank model: SPMD, private worlds</h3>
+<div class="diagram" data-diagram="b5-ranks" data-caption="srun -n4 launches four copies of the same program; rank ID branches the work. Each rank owns its memory and (typically) one GPU — 5.2's identity at process scale."></div>
+<pre><code>MPI_Comm_rank(MPI_COMM_WORLD, &rank);   // who am I   (5.2's identity)
+MPI_Comm_size(MPI_COMM_WORLD, &size);   // of how many
+cudaSetDevice(rank % gpus_per_node);    // ONE GPU per rank — the standard
+                                        // marriage (and gotcha 6's bug when
+                                        // forgotten: all ranks on device 0)
+MPI_Send(buf, n, MPI_DOUBLE, dest, tag, comm);   // explicit, message-shaped
+MPI_Recv(buf, n, MPI_DOUBLE, src,  tag, comm, &st);
+// blocking semantics: Send MAY wait for the receiver (buffering is the
+// library's choice, not your right) — which is why naive exchange patterns
+// deadlock (quiz 1) and why the nonblocking forms exist:
+MPI_Isend/Irecv(..., &request);   MPI_Wait(&request, &st);
+// the 5.3 async law verbatim: between Isend and Wait, the buffer is NOT
+// yours to touch — same contract, new spelling.</code></pre>
+
+<h3>CUDA-aware MPI and GPUDirect: device pointers on the wire</h3>
+<div class="diagram" data-diagram="b5-aware" data-caption="Staged: GPU→host→network→host→GPU, four hops. CUDA-aware with GPUDirect RDMA: GPU→NIC→GPU — the staging tax (4.6) deleted by the fabric."></div>
+<pre><code>MPI_Send(d_halo, n, MPI_DOUBLE, …)     // yes, a DEVICE pointer — CUDA-aware
+                                        // builds (OpenMPI 5.x + UCX) accept it
+what happens underneath, best→worst:
+  GPUDirect RDMA: NIC reads GPU memory directly — no host copy, ~full fabric BW
+  pipelined staging: chunked D2H→send overlap — decent, not free
+  naive staging: full D2H, send, H2D — the 4-hop path (and what you silently
+  get when the build/module isn't CUDA-aware: gotcha 3's whole scenario)
+THE VERIFY RITUAL (before believing anything): osu_bw-style benchmark with
+  device buffers, compare to the fabric spec — 3 GB/s on a 25 GB/s link means
+  you're staging; fix the MODULE, not your code (5.1's toolchain literacy).</code></pre>
+
+<h3>The halo exchange, distributed — and its two-lane audit</h3>
+<pre><code>per step, per rank (B3's harness, now over MPI):
+  post Irecv (4 neighbors) → post Isend (my edges) → COMPUTE INTERIOR
+  → MPI_Waitall → compute the 4 edge strips → swap buffers
+the audit (course ledger: T4-class compute, IB ~25 GB/s, ~5 µs latency):
+WEAK scaling, 4096² per rank (B3's r2: 1.4 ms/step compute):
+  halo = 4·4096·8 B = 131 KB → wire ~5 µs + latency ~2·5 µs ≈ 15 µs
+  → comm/compute ≈ 1% → predicted efficiency ≈ 99% — scale to thousands
+STRONG scaling, 4096² TOTAL split 64 ways (512² per rank):
+  compute = 1.4 ms/64 ≈ 22 µs; halo = 4·512·8 = 16 KB ≈ 5.6 µs + 10 µs lat
+  → comm/compute ≈ 70%… overlapped: max-lane still ~50% efficiency cliff
+same code, same cluster: 99% vs 50% — the LABEL (weak/strong) and the
+surface/volume arithmetic decide, before any allocation burns (A7's law,
+now with B3's numbers plugged in).</code></pre>
+
+<h3>NCCL vs MPI: two tools, one app</h3>
+<pre><code>NCCL: GPU-resident COLLECTIVES (allreduce/bcast/…) — topology-tuned rings/
+  trees over NVLink+IB (A7's machinery); stream-ordered (5.9-native)
+MPI:  point-to-point (halos!), control plane, CPU data, the launcher itself
+the standard marriage in 2026 science codes: MPI owns ranks/halos/control;
+  NCCL owns dense GPU collectives when they dominate (spectral sums, global
+  reductions every step). Halo exchange stays MPI: 4 small point-to-point
+  messages is MPI's home turf; NCCL has no Send/Recv-shaped sweet spot there
+  (it has p2p, but the ecosystem default stands). Don't religion this —
+  benchmark the ONE collective that dominates and pick per-call.</code></pre>
+
+<h2>Worked example</h2>
+<div class="card">
+<p><strong>Task:</strong> The distributed correctness ladder for B3's heat stepper — how a pro takes a working single-GPU code to 64 ranks WITHOUT a debugging season. Every rung is a fixture from a prior lesson, re-aimed.</p>
+<pre><code>r0  single-GPU split-domain oracle (B3 Ex.2): 2 subdomains in ONE memory,
+    explicit halo copies, BITWISE equal to unsplit — the decomposition
+    debugged where printf works and ranks don't exist
+r1  2 ranks, same node, SYNCHRONOUS exchange (Sendrecv): bitwise vs r0
+    (same arithmetic order → same bits, 5.11's doctrine — any diff is
+    indexing, and the ramp-pattern trick names the guilty cell)
+r2  2 ranks + NONBLOCKING overlap: bitwise vs r1 (overlap changes TIMING,
+    not values — if bits change, you touched a buffer before Wait: the
+    5.3 law's fingerprint)
+r3  4→64 ranks, 2D decomposition: conservation ledger + symmetry fixture
+    per scale (B3's suite); corners now cross FOUR ranks — the diagonal
+    neighbor exchange everyone forgets (gotcha 4)
+r4  the audit vs reality: predicted 99% weak efficiency; measured 97.2%
+    (representative) — gap attributed (jitter + Waitall tails), FILED
+each rung took ~an hour; teams that skip to r3 spend the week that
+"parallel debugging" is famous for — in a 64-rank hang with no stack.</code></pre>
+<p><strong>What to internalize:</strong> distributed correctness is built INCREMENTALLY on bitwise oracles — split-without-MPI, then sync-MPI, then async, then scale — so every new failure has exactly ONE new suspect. The two-lane audit meanwhile predicts the performance endgame before rung r1. Ladders and arithmetic: the same two instruments as every other lesson, pointed at a cluster.</p>
+</div>
+
+<h2>Key points</h2>
+<ul class="keypoints">
+<li>MPI is SPMD over private memories: rank branches the work, one GPU per rank (set it explicitly!), and nothing moves without a message — 5.3's explicitness at fleet scale.</li>
+<li>Blocking Send/Recv can deadlock in cycles (buffering is a favor, not a contract); nonblocking Isend/Irecv + Wait is the idiom, and the buffer-hands-off rule between them is 5.3's async law verbatim.</li>
+<li>CUDA-aware MPI takes device pointers; GPUDirect RDMA makes them fast — but the PATH is a build/module property you VERIFY with a device-buffer bandwidth test, never assume (3 GB/s on a 25 GB/s fabric = you're staging).</li>
+<li>The halo audit is two lanes and a label: weak scaling at 4096²/rank predicts ~99%; strong scaling to 512²/rank predicts ~50% — surface/volume arithmetic decides before cluster time burns.</li>
+<li>NCCL owns GPU-resident collectives, MPI owns point-to-point/control — the standard marriage; pick per dominant call by benchmark, not religion.</li>
+<li>Distributed correctness climbs a bitwise ladder: split-domain oracle → sync-MPI → async → scale, each rung adding ONE suspect — the alternative is the 64-rank hang with no stack.</li>
+</ul>
+
+<h2>Quiz</h2>
+<div class="quiz">
+  <div class="q">1. A student's 2D halo code works on 4 ranks, hangs on 16 — sometimes. Pattern: every rank does MPI_Send(north) then MPI_Send(south)… then the Recvs. On 4 ranks (2×2, periodic) it "always worked." Explain the deadlock mechanism, why 4 ranks got lucky, why 16 is INTERMITTENT, and the three standard fixes ranked by robustness.</div>
+  <button class="opt">16 ranks exceeds the MPI buffer pool — raise it</button>
+  <button class="opt" data-c="1">All ranks Send before any Recv: if Sends block (no buffer space / rendezvous protocol for larger messages), everyone waits for a receiver who's also sending — a dependency cycle (5.5's barrier law as a graph: A7 gotcha 3's shape). 4 ranks got lucky because small halos rode the EAGER protocol (library buffers small messages and returns — a favor, not a contract); at 16 ranks the 2D domain's halos may cross the eager/rendezvous threshold OR buffer pools fill under more simultaneous messages — and "sometimes" is exactly what protocol-threshold luck looks like (message size, timing, and pool state vary run to run). Fixes, by robustness: (1) Isend/Irecv all, then Waitall — no ordering assumptions at all, and it's the overlap idiom you want anyway; (2) MPI_Sendrecv — the library pairs the exchange deadlock-free; (3) odd-even ordering (evens send first) — correct but fragile under refactor (a discipline, not a structure). Raising buffers (option 1) converts a deterministic design bug into a rarer one — the worst trade in debugging</button>
+  <button class="opt">A 16-rank NCCL topology conflict — use MPI only</button>
+  <button class="opt">The network dropped packets — add retries</button>
+  <div class="expl">"Works small, hangs big, intermittently" is THE eager-threshold signature — one of a handful of distributed fingerprints worth memorizing (with A7 P4's stuck-collective and B3 quiz 2's seam). The deeper law: correctness that depends on library BUFFERING is luck wearing a green test suite; the Isend/Irecv+Waitall idiom removes the assumption class entirely, which is why the worked example's r2 rung standardizes it. Fingerprint + mechanism + idiom — that's the whole distributed-debugging trade in one quiz.</div>
+</div>
+<div class="quiz">
+  <div class="q">2. Your CUDA-aware halo exchange benchmarks at 2.8 GB/s on nodes with 25 GB/s InfiniBand and NVLink'd GPUs. MPI_Send with device pointers "works fine" (correct results). Rank the four hypotheses, give each one's 60-second test, and state which single command settles most of them.</div>
+  <button class="opt">InfiniBand is broken — file a fabric ticket</button>
+  <button class="opt" data-c="1">Ranked: (1) the MPI module isn't CUDA-aware/UCX-CUDA built → silent host staging (correct-but-4-hop — b5-aware's fallback): test with ompi_info / ucx_info -d for CUDA transports, or the killer: the SAME benchmark with HOST buffers — if host hits 22 GB/s and device hits 2.8, staging is convicted; (2) GPUDirect RDMA unavailable (driver/nv_peer_mem/fabric config) → pipelined staging: better than naive but far from wire — ucx_info shows gdr_copy/cuda_ipc presence; (3) affinity: rank's GPU and NIC on different NUMA/PCIe domains → every byte crosses the socket (4.6's topology tax): test with binding report (--report-bindings) + nvidia-smi topo -m; (4) actual fabric issue — LAST (fabrics fail loudly; misconfigs fail quietly at 2.8 GB/s). The settling command: the device-vs-host osu_bw pair — two numbers that partition the whole hypothesis space in one minute</button>
+  <button class="opt">Device pointers are always slower — stage manually</button>
+  <button class="opt">The halos are too small to reach bandwidth</button>
+  <div class="expl">"Works fine (correct) but slow" is the CUDA-aware trap's signature: the API contract is honored either way, the PATH is the variable — exactly like A3 quiz 1's default-stream op (fast standalone, poison in context): correctness tests can't see path bugs; bandwidth tests are the fixture. Option 4 is checkable in the same sweep (bandwidth-vs-size curve: small messages are latency-bound — 4.6's tolls — but 2.8 GB/s FLAT across sizes is a path ceiling, not a toll). The topology check (option 3's nvidia-smi topo -m) becomes routine on every new cluster — 10 seconds that explain years of mysteries.</div>
+</div>
+
+<h2>Exercises</h2>
+<details><summary>Exercise 1 — The ladder's r0–r2 on any machine (mpi4py, pip-installable; Colab or laptop, ranks share one GPU or run CPU): implement the 1D-decomposed heat stepper — r0 split-in-one-process oracle, r1 Sendrecv version, r2 Isend/Irecv+overlap version — asserting BITWISE equality up the ladder and conservation/symmetry throughout (B3's suite). Then stage quiz 1's deadlock deliberately (all-Send-first with a message size above the eager threshold — find it!) and document the hang's anatomy.</summary><div class="body">
+<pre><code>expected: bitwise green across r0→r2 (same order, same bits); the staged
+deadlock — grow the halo until Send blocks: mpi4py + OpenMPI's eager
+threshold is typically ~KB-scale for shared-memory transport: at 16 B halos
+all-Send-first "works" (eager luck, LIVED), at 1 MB it hangs solid —
+Ctrl-C and read the stack: every rank inside Send. That screenshot is
+quiz 1's mechanism, self-administered, and the permanent cure for trusting
+buffering. Bonus: time r1 vs r2 with an artificial compute load and watch
+overlap earn its keep even on localhost.</code></pre>
+</div></details>
+<details><summary>Exercise 2 — The audit workbook (no cluster needed; THE pre-purchase artifact): for grids {1024², 4096², 16384²} × ranks {4, 64, 1024} × fabrics {Ethernet 1.2 GB/s + 50 µs, IB 25 GB/s + 5 µs, NVLink-island 200 GB/s + 2 µs}, compute per-cell-count compute time (B3's 220 GB/s bandwidth model), halo bytes, comm time, and overlapped efficiency — 27 cells, then: which cells are weak-scaling paradise, which are strong-scaling cliffs, and the one-sentence purchasing advice per fabric.</summary><div class="body">
+<pre><code>expected landmarks: 16384²/rank on anything ≥ IB → 99%+ (surface/volume
+paradise); 1024² TOTAL across 1024 ranks (32² per rank!) → comm-dominated
+everywhere: latency × 4 msgs vs ~90 ns of compute — efficiency &lt;1%:
+the absolute strong-scaling wall (some problems CANNOT use 1024 ranks —
+saying so with arithmetic is the deliverable); Ethernet's 50 µs latency
+makes SMALL-rank counts viable only with big tiles → "Ethernet clusters
+are for weak scaling or embarrassing parallelism (B4!), never fine-grained
+halos" — one sentence, defensible forever.</code></pre>
+<p>This workbook — literally 27 rows of two-lane arithmetic — is the artifact that cancels bad purchase orders (A7's scenario) and bad paper claims (B10's report). Keep the spreadsheet.</p>
+</div></details>
+
+<hr>
+<h1>Go deeper — the distributed craft sheet</h1>
+
+<h2>1. Nonblocking semantics: the contract, precisely</h2>
+<pre><code>MPI_Isend(buf, …, &req):  returns immediately; buf is UNTOUCHABLE until
+  MPI_Wait(&req) completes it (read OR write — the library may still be
+  reading it: 5.3's async-buffer law, federal edition)
+MPI_Irecv + Wait: buf undefined until Wait returns
+overlap pattern (the only one you need):
+  Irecv×4 → Isend×4 → interior compute → Waitall(8) → edges → swap
+progress caveat: some MPI stacks progress messages only INSIDE MPI calls —
+  a long kernel between Isend and Wait may stall the wire (test with a
+  probe/Test loop or enable async-progress threads; fabric-dependent, and
+  the 5.10-style timeline shows it as comm hiding that... doesn't)</code></pre>
+
+<h2>2. Communicators, topology, and placement</h2>
+<pre><code>MPI_Comm_split: sub-teams (e.g., per-node comms for hierarchical reductions —
+  A7's scenario fix: reduce intra-node over NVLink, inter-node over IB)
+MPI_Cart_create: the 2D/3D grid communicator — neighbor ranks by
+  MPI_Cart_shift instead of hand-rolled index math (fewer B3-seam bugs)
+placement flags (mpirun --map-by ppr:4:node --bind-to numa): rank→core→GPU→
+  NIC affinity — quiz 2's hypothesis 3; on modern nodes the difference
+  between aligned and crossed NUMA paths is 2–3× on the wire (4.6, again)</code></pre>
+
+<h2>3. Gotchas</h2>
+<div class="gotcha"><strong>All ranks, device 0.</strong> Forgetting cudaSetDevice(rank%N) — four ranks time-slicing one GPU while three idle: "MPI scaling is terrible" reports that are one line from greatness. nvidia-smi during a run is the 10-second audit.</div>
+<div class="gotcha"><strong>Touching buffers before Wait.</strong> r2's bitwise rung catches it; in the wild it's intermittent halo corruption that LOOKS like B3 quiz 2's indexing bug — the ladder exists to separate the suspects.</div>
+<div class="gotcha"><strong>Assuming CUDA-aware.</strong> Quiz 2. The module system offers five OpenMPIs; one is UCX-CUDA. The device-buffer bandwidth test runs on every new cluster, day one, before any science.</div>
+<div class="gotcha"><strong>Forgotten diagonal neighbors.</strong> 2D corners need the 4 diagonal exchanges (or a two-phase trick: exchange X, THEN Y — corners ride for free through the second phase: know WHICH your code does). The symmetry fixture on a diagonal-symmetric input convicts (B3 P3's corner graveyard, distributed).</div>
+<div class="gotcha"><strong>Tag/count mismatches.</strong> Recv with the wrong tag waits forever; count smaller than the send TRUNCATES silently on some paths (check MPI_Get_count in fixtures). Tags are contracts — name them with enums, not literals.</div>
+<div class="gotcha"><strong>Collective order divergence.</strong> One rank's early-exit path skips an Allreduce → fleet hang, no stack (A7 gotcha 3, MPI spelling). Collectives are structurally unconditional; the per-rank-log diff (A7 P4's protocol) names the deviant.</div>
+
+<h2>Scenario — the "MPI is slow on GPUs" verdict, overturned in an afternoon</h2>
+<p>A CFD group inherits cluster time on a new machine and ports their B3-style multi-GPU solver. First scaling run: 34% efficiency at 16 nodes where the old cluster gave 91%. The group's write-up draft blames "immature CUDA-aware MPI on the new system" and proposes a месяц of hand-staged communication rewrites. A B-track-literate postdoc runs the lesson's rituals first. Ritual one, the device-vs-host bandwidth pair: host buffers 23.1 GB/s, device buffers 2.9 GB/s — staging convicted in ninety seconds; ucx_info shows the default module lacks CUDA transports; module swap to the ucx-cuda build → device 21.8 GB/s. Efficiency: 61%. Ritual two, the binding report: ranks bound round-robin to cores but ALL claiming GPU 0 on each node (the port dropped one cudaSetDevice line — gotcha 1) — nvidia-smi shows one saturated GPU and three tourists. Fix: one line. Efficiency: 88%. Ritual three, the two-lane audit against the remaining 3%: predicted Waitall tails at their strong-scaling tile size — matches, filed as expected, documented in the report per b10-report's standard. Total time: one afternoon; lines of communication code rewritten: one. The draft's conclusion was inverted before it embarrassed anyone: <em>the paradigm was fine; the PATH and the PLACEMENT were misconfigured — and both are testable in minutes by rituals, not rewrites.</em> The postdoc's afternoon became the group's onboarding checklist, which is how ritual knowledge is supposed to propagate.</p>
+
+<h2>Practice</h2>
+<details><summary>1. Write the byte-and-latency budget for one halo step of a 3D 512³-per-rank decomposition (6 faces, fp64, 25 GB/s + 5 µs), compare to its compute lane (7-point stencil at 220 GB/s effective), and verdict the weak-scaling health — then find the tile size where efficiency crosses 90%.</summary><div class="body">Faces: 6 × 512² × 8 B = 12.6 MB → wire 0.50 ms + 6 latencies ≈ 0.53 ms. Compute: 512³ cells × 2 fields' round-trip ≈ 2×(512³×8)/220e9 ≈ 9.8 ms. Ratio ≈ 5.4% → overlapped efficiency ~97–99% (comm hides under a 9.8 ms interior easily): healthy. Crossing 90% unoverlapped: need comm ≤ 11% of compute; comm/compute ∝ 6n²·8/(2·n³·8/220e9 ... ) scales as 1/n → solve: n ≈ 512×(0.054/0.11) ≈ 250³-class tiles. The 3D surface/volume ratio (6/n vs 2D's 4/n) makes 3D MORE communication-hungry at equal n — the dimension tax every 3D code pays (and why 3D strong scaling cliffs earlier than Ex.2's 2D cells suggested).</div></details>
+<details><summary>2. Design the hierarchical allreduce for 8 nodes × 4 GPUs (NVLink intra, IB inter) using comm-splitting (§2): the three phases, the bytes each phase moves per GPU, and the speedup vs a flat 32-rank ring over IB (A7's formula both ways).</summary><div class="body">Phases: (1) intra-node reduce (NCCL over NVLink, 4 GPUs): 2·(3/4)·S per GPU at 200 GB/s; (2) inter-node ring over the 8 node-leaders (IB): 2·(7/8)·S at 25 GB/s — the only IB-touching phase, and only leaders pay it; (3) intra-node bcast: ~S at NVLink speed. Flat 32-ring over IB: 2·(31/32)·S ≈ 2S at 25 GB/s for EVERY GPU. Per-GPU IB bytes: hierarchical ≈ 2S×(1/4 of GPUs participate... per-GPU averaged: leaders move 1.75S over IB, others 0) vs flat 2S each → aggregate IB traffic ÷4 → wall-clock ≈ 3–4× faster when IB is the bottleneck (it is). MPI_Comm_split(node_id) + split(local_rank==0) — six lines of communicator surgery for the A7-scenario fix; NCCL does this internally given correct topology, which is WHY topology hints matter (quiz 2's hypothesis 3 at the collective layer).</div></details>
+<details><summary>3. Your r2 (overlap) rung FAILS bitwise vs r1 only when the interior kernel runs longer than ~10 ms. Using §1's progress caveat + the 5.3 buffer law, give the two candidate mechanisms, the discriminating experiment, and the fix for each.</summary><div class="body">Candidates: (1) buffer touched before Wait — the edge computation (or a prefetch) reads halo cells while Irecv is still landing: timing-dependent (long kernel = recv lands late = the race window opens): discriminate by moving Waitall BEFORE any edge access (already the pattern? then audit for aliased views — M2's shares_memory drill on the halo slices); (2) progress stall — the wire doesn't move during the long kernel (no async progress thread), so recvs complete only INSIDE Waitall: that's SLOW but not wrong — it can't corrupt bits... unless the code polls MPI_Test and proceeds on a stale flag: audit the completion logic. Discriminator: run with MPI async progress enabled / a Test-loop that logs completion times — if corruption tracks completion-after-access, it's (1); if bits are fine and only overlap efficiency died, it's (2). Fixes: (1) restore the Waitall fence (and the bitwise rung to CI — it just paid for itself); (2) enable progress threads or split the interior kernel to create MPI call points. The drill's meta: bitwise rungs turn timing races into reproducible experiments — the whole reason the ladder insists on them.</div></details>
+<details><summary>4. Translate A7's bucket-tuning quiz to halo world: your code sends each of 4 halos as 40 separate row-messages ("it was easier with the old data layout"). At 5 µs latency, price the damage for 512² tiles, name the M2 L5 concept that fixes it, and the MPI feature that fixes it WITHOUT changing the layout.</summary><div class="body">Damage: 160 messages × 5 µs = 800 µs of pure latency vs the 22 µs compute lane (strong-scaling tile) — comm-dominated by tolls alone, 36× over the single-message-per-face cost (4.6's toll law: same bytes, 40× the messages). Fix 1 (layout): make each halo face CONTIGUOUS — the M2 L5 stride insight: store boundary strips packed, or pack/unpack kernels (one D2D gather into a send buffer: 5.7's way-station, message edition — this is what production codes do, on-GPU pack kernels). Fix 2 (no layout change): MPI Derived Datatypes (MPI_Type_vector describing the strided rows) — ONE message per face, library packs; with CUDA-aware + datatype support the pack may even run on-GPU. Toll arithmetic → layout-or-datatype: the entire message-aggregation doctrine in one drill (A7's buckets, B5's faces, same law).</div></details>
+<details><summary>5. Fault reality: at 512 ranks × 40 hours, SOMETHING will fail. Contrast MPI's default failure model with the checkpoint/restart discipline (B7 preview), and compute the sweet-spot checkpoint interval for: ckpt write 90 s, node MTBF such that P(job sees a failure) ≈ 30% per 40 h run (Young's formula from b7-checkpoint).</summary><div class="body">MPI default: one rank dies → the job dies (collectives can't complete — A7 P4's hang, then the watchdog kills all): fault tolerance is YOUR responsibility via checkpoint/restart (ULFM-style recoverable MPI exists but isn't the 2026 default in practice). Young: interval ≈ √(2·write·MTBF). Effective MTBF for the JOB: 30% per 40 h → ~1 failure per 133 h ≈ 4.8e5 s. Interval ≈ √(2·90·4.8e5) ≈ 9,300 s ≈ 2.6 h → overhead 90/9300 ≈ 1%, expected loss per failure ≈ 1.3 h ≈ 3% of the run amortized: total fault tax ~4% — versus losing 40 h × 30% probability = 12 h expected without checkpoints. The arithmetic that turns "checkpointing is annoying" into "checkpointing is a 3× expected-value trade" — B7 operationalizes it with the SIGTERM trap.</div></details>
+<details><summary>6. Write the six-line "new cluster, day one" ritual (the scenario's onboarding checklist) — each line a command-level action with the failure it pre-empts and its lesson citation.</summary><div class="body">(1) Device-vs-host bandwidth pair (osu_bw or 20-line equivalent) vs fabric spec — staging/path bugs (quiz 2, scenario ritual 1). (2) nvidia-smi topo -m + --report-bindings on a test job — NUMA/NIC affinity crossings (quiz 2 h3). (3) The all-ranks-GPU audit: nvidia-smi during a 4-rank smoke run — device-0 pileup (gotcha 1, scenario ritual 2). (4) Eager-threshold probe: all-Send-first toy at growing sizes — know YOUR threshold before it knows you (quiz 1, Ex.1). (5) The r0→r2 ladder on the heat toy — bitwise green establishes the harness on THIS stack (worked ex). (6) One weak + one strong scaling point vs the Ex.2 workbook's prediction — a 20% gap on day one means a config problem TODAY, not a mystery in the paper's reviews (B10). Six commands, one morning, and every classic first-month incident is pre-empted — rituals are how afternoons stay afternoons.</div></details>
+<details><summary>7. Interview closer: "Take your single-GPU PDE solver to 500 GPUs" — 90 seconds: decomposition + halo mechanics with the surface/volume law, the bitwise correctness ladder, CUDA-aware path verification, overlap idiom + progress caveat, the two-lane audit with weak/strong honesty, hierarchical collectives if needed, and the fault-tax arithmetic.</summary><div class="body">Skeleton: "Decompose 2D/3D with a Cart communicator, one rank per GPU — set explicitly, audited with nvidia-smi day one [gotcha 1]. Correctness climbs a bitwise ladder: split-domain oracle in one memory, then synchronous MPI, then nonblocking overlap, then scale — each rung adds one suspect, and the ramp-pattern + symmetry fixtures name guilty cells [worked ex]. Communication path is verified, not assumed: device-vs-host bandwidth pair on day one — 3 GB/s on a 25 GB/s fabric means the module's staging, a one-line fix worth 2× [quiz 2, scenario]. The exchange idiom: Irecv, Isend, interior compute, Waitall, edges — buffers untouchable till Wait (5.3's law), with the progress caveat checked for long kernels [§1]. Scaling is predicted before it's purchased: halo bytes over fabric vs interior over 220 GB/s — my workbook says 4096²-per-rank weak-scales at 99% while 512² strong-scales at 50%: I present both curves LABELED, with the model overlaid [Ex.2, b5-scaling]. Global reductions go hierarchical — NVLink inside nodes, IB between — via comm-split or NCCL with topology hints [P2]. And at 500 GPUs × days, failure is scheduled: Young's-formula checkpoints put the fault tax at ~4% versus double-digit expected loss without [P5]. Every claim in that plan is an arithmetic line or a fixture — which is what makes it a plan and not a hope."</div></details>
+
+<div class="pager">
+  <a href="lesson-04.html">← Monte Carlo & cuRAND</a>
+  <a href="lesson-06.html">Next: OpenMP & OpenACC offload →</a>
+</div>
+<div class="footer">GPU Mastery · Track B · Lesson 5 — works offline · progress saved in your browser</div>
+</div>
+<script src="../assets/diagramsB.js"></script>
+<script src="../assets/app.js"></script>
+</body>
+</html>

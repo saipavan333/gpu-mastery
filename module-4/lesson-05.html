@@ -1,0 +1,193 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>4.5 The GPU Memory System — GPU Mastery</title>
+<link rel="stylesheet" href="../assets/style.css">
+</head>
+<body data-lesson="m4l5">
+<nav><div class="inner">
+  <a class="logo" href="../index.html">GPU<span>Mastery</span></a>
+  <a class="item" href="../index.html">Home</a>
+  <a class="item on" href="../curriculum.html">Curriculum</a>
+  <a class="item" href="../labs.html">Labs</a>
+  <a class="item" href="../setup.html">Lab setup</a>
+  <a class="item" href="../prompt.html">Generator prompt</a>
+</div></nav>
+<div class="wrap">
+
+<div class="lesson-top">
+  <div><span class="badge">Module 4 · Lesson 5</span><span class="badge dim">≈ 3 h</span></div>
+  <button id="donebtn" class="donebtn">Mark lesson complete</button>
+</div>
+<h1>The GPU Memory System — the hierarchy you drive by hand</h1>
+<p class="lead">Same staircase as 4.2, three renovations: the fast level is <em>yours to manage</em> (shared memory), the line is judged <em>per-warp</em> (coalescing), and the whole thing is sized for ten thousand tenants. Every Module 5 optimization is a move on this board.</p>
+
+<h2>Concept</h2>
+
+<h3>The board: six levels, bandwidth-first</h3>
+<div class="diagram" data-diagram="m4l5-gpumem" data-caption="Read the bandwidth column: ~40 TB/s registers → 8 TB/s HBM → 64 GB/s PCIe. Placement is performance."></div>
+<table>
+<tr><th>Level</th><th>Who controls it</th><th>The Module-5 verb</th></tr>
+<tr><td>Registers (255/thread)</td><td>the compiler (you influence: 4.4 Ex.1)</td><td>keep hot scalars local; watch spills (5.6)</td></tr>
+<tr><td>Shared memory (228 KB/SM)</td><td><strong>YOU</strong> — an explicitly addressed scratchpad</td><td>stage tiles, cooperate within a block (5.5)</td></tr>
+<tr><td>L2 (50–126 MB)</td><td>hardware (hints exist)</td><td>free reuse across blocks; persistence windows</td></tr>
+<tr><td>HBM3e (80–192 GB, 3.35–8 TB/s)</td><td>you, via access PATTERNS</td><td>coalesce or crawl (5.7)</td></tr>
+<tr><td>Peer GPUs (NVLink 1.8 TB/s)</td><td>you/NCCL</td><td>Track A7/B5's collectives</td></tr>
+<tr><td>Host (PCIe 64 GB/s)</td><td>you, reluctantly</td><td>4.6: cross rarely, overlap always</td></tr>
+</table>
+<p>The renovation that changes your job description: 4.2's L1 was a hardware-managed bet; <strong>shared memory is a scratchpad with an address</strong> — blocking (3.9) stops being a cache-friendly <em>hope</em> and becomes explicit code: load tile, <code>__syncthreads()</code>, compute, repeat. The same 228 KB also serves as ordinary L1 — you choose the split, kernel by kernel.</p>
+
+<h3>Coalescing: the warp-sized cache line, quantified</h3>
+<div class="diagram" data-diagram="m4l5-coalesce" data-caption="One warp, one verdict: 4 sectors (perfect) to 32 sectors (8× traffic)."></div>
+<pre><code>the rule:   thread i of a warp should touch address base + i·4  (consecutive)
+the unit:   32-byte sectors, judged per warp-instruction
+perfect:    32 threads × 4 B consecutive = 128 B = 4 sectors   → 100%
+stride-2:   spans 256 B = 8 sectors                            → 50%   (4.4 P3!)
+stride-32:  32 different sectors                               → 12.5% (8× traffic)
+random:     up to 32 sectors, no prefetcher to save you        → the crawl</code></pre>
+<p>This is 4.2's line-tax with two edits: the unit is 32 B (finer — kinder to moderate strides) and the jury convenes <em>per warp</em>, synchronously — no prefetcher papers over misalignment (the 3.4 P6 / 4.2 alignment asymmetry, finally fully explained). The design consequence you've met four times: <strong>consecutive threads ↔ consecutive addresses</strong>, which for 2D data means <code>x = blockIdx.x*blockDim.x + threadIdx.x</code> indexes the <em>fastest-moving</em> dimension (M1 L2's linearization, now a hardware contract).</p>
+
+<h3>Shared memory banks: 32 tellers, one queue each</h3>
+<div class="diagram" data-diagram="m4l5-banks" data-caption="Distinct banks: one cycle. Same bank, different addresses: serialized. The +1 pad fixes columns."></div>
+<p>Shared memory is 32 banks, 4-byte words interleaved (word w lives in bank w mod 32 — M1 L2's modulo as floor plan). A warp reading 32 <em>distinct banks</em> completes in one go; N threads hitting one bank serialize ×N. The classic collision: reading a <em>column</em> of a 32-wide tile (stride 32 words = all one bank, 32-way conflict). The classic fix you learned in M1 L2 §Exercise-2 before you knew why: <code>tile[32][33]</code> — the phantom column rotates each row one bank over. (Broadcast is the exception: all lanes reading the SAME address is one transaction — constants are free.)</p>
+
+<h3>Atomics: the histogram problem, GPU edition</h3>
+<pre><code>atomicAdd(&amp;bins[v], 1);          /* correct under 100k concurrent threads — and    */
+                                 /* a hot bin serializes: 4.2's false-sharing       */
+                                 /* cousin at address granularity. The cure is      */
+                                 /* the one you already know: privatize per block   */
+                                 /* (shared-memory bins) → tree-merge (5.8).        */</code></pre>
+
+<h2>Worked example</h2>
+<div class="card">
+<p><strong>Task:</strong> Price the matrix-transpose kernel — the drosophila of GPU memory — three ways, using only this lesson's arithmetic. (5.7 measures it; today predicts it.)</p>
+<pre><code>problem: out[c][r] = in[r][c], 4096² floats (64 MB in, 64 MB out; zero FLOPs —
+         a PURE memory-system exam). RTX 5090-class: 1.79 TB/s roof.
+floor:   128 MB of unavoidable traffic / 1.79 TB/s ≈ 72 µs. Can we get it?
+
+v1 naive: thread (x,y) does out[x*H + y] = in[y*W + x]
+  reads  in: consecutive x → consecutive columns?? in[y*W + x]: x is the fast
+             index → CONSECUTIVE ✓ 4 sectors/warp
+  writes out: out[x*H + y]: consecutive x jumps H floats → 32 sectors/warp ✗
+  verdict: writes cost 8× → traffic ≈ 64 + 512 MB ≈ 4.5× floor ≈ 320 µs
+
+v2 tiled via shared memory: block loads a 32×32 tile (coalesced rows),
+  __syncthreads(), writes the TRANSPOSED tile out in coalesced rows.
+  both sides now 4 sectors/warp ✓ — but the shared-memory column read is a
+  32-way BANK CONFLICT: tile[32][32] serializes ×32 internally…
+
+v3 = v2 + the pad: __shared__ float tile[32][33];
+  conflicts gone (the M1 L2 phantom column). traffic ≈ 128 MB → ~75–90 µs
+  predicted: within ~15% of the floor. THE canonical CUDA optimization story.</code></pre>
+<p><strong>What to notice:</strong> zero arithmetic changed across versions — 4.4× predicted speedup purely from <em>where bytes sat and who asked for them together</em>. And every move was old knowledge wearing hardware: coalescing = M1 L6 layout + M1 L2 linearization; the tile = 3.9's blocking made explicit; the pad = M1 L2's 17-wide tile, at last justified to the bank. <strong>Decision made:</strong> we computed the floor FIRST (traffic ÷ roof — the M1 L3 ritual) so every version has an absolute grade, not just a relative one. "Percent of floor" is how memory kernels are judged for the rest of your career.</p>
+</div>
+
+<h2>Key points</h2>
+<ul class="keypoints">
+<li>The GPU staircase: registers → shared (yours!) → L2 → HBM → NVLink → PCIe, with bandwidth falling ~2–100× per step — placement is the performance decision.</li>
+<li>Coalescing: warps are judged per-instruction in 32-B sectors — consecutive threads on consecutive addresses = 4 sectors; strides multiply traffic up to 8–32×.</li>
+<li>No prefetcher rescues GPU misalignment or strides: the 4.2 CPU forgiveness does not port (the alignment asymmetry, resolved).</li>
+<li>Shared memory = a 32-banked scratchpad: distinct banks or broadcast = fast; same-bank strides serialize; tile[32][33]'s pad is the canonical cure.</li>
+<li>Atomics are correct but serialize on hot addresses — privatize per block, then tree-merge (the 4.2 histogram cure, verbatim).</li>
+<li>Judge memory kernels as % of the traffic÷roof floor — compute the floor before the kernel, always.</li>
+</ul>
+
+<h2>Quiz</h2>
+<div class="quiz">
+  <div class="q">1. A kernel reads <code>float4</code>s (16 B per thread, consecutive). How many sectors per warp, and why do vectorized loads help at ALL if the total bytes are identical to four float loads?</div>
+  <button class="opt">4 sectors either way — no benefit, it's marketing</button>
+  <button class="opt" data-c="1">32×16 B = 512 B = 16 sectors either way — the TRAFFIC is identical; the win is fewer INSTRUCTIONS (1 load vs 4: issue slots, address math — 4.4 §1's instruction-mix budget) and a 16-B alignment guarantee that keeps sectors tight</button>
+  <button class="opt">1 sector — float4 compresses the data</button>
+  <button class="opt">64 sectors — wider loads split</button>
+  <div class="expl">Bytes are bytes: bandwidth-bound kernels don't speed up from vectorization alone. What improves: 4× fewer load instructions (scheduler slots for latency hiding — 4.4), less index arithmetic, and alignment-by-construction (M1 L1's masks, guaranteed by the type — the 3.4 §4 float3-breaks-alignment warning, inverted into a tool). This distinction — traffic vs instruction economy — is a favorite senior-interview probe.</div>
+</div>
+<div class="quiz">
+  <div class="q">2. Two proposals to fix a hot-bin histogram (80% of values hit bin 42): (a) shared-memory per-block bins then merge; (b) keep global atomics but have each thread accumulate a private count for bin 42 in a REGISTER and flush once. Evaluate both with this lesson's model.</div>
+  <button class="opt">Only (a) works — registers can't help atomics</button>
+  <button class="opt" data-c="1">Both attack serialization at different levels and COMPOSE: (a) moves contention from one global address to per-SM copies (~132× relief) but the hot bin still serializes within each block's shared atomic; (b) collapses each thread's 80% of hits into ONE atomic (⚡ the big win for skew); (a)+(b) together is the production pattern</button>
+  <button class="opt">Only (b) — shared memory is too small for 256 bins</button>
+  <button class="opt">Neither — histograms can't skew</button>
+  <div class="expl">The register is level 0 of the privatization staircase (register → shared → global — the memory board AS a contention strategy). Skewed data makes (b) enormous: 80% of atomics vanish into a local counter (M2 L2's count pattern, promoted to a concurrency tool). The compositional habit — privatize at EVERY level the hierarchy offers — is exactly how fast histogram/reduction libraries are actually written (5.8).</div>
+</div>
+
+<h2>Exercises</h2>
+<details><summary>Exercise 1 — Sector accounting drill (paper, five minutes, permanent skill): for a warp executing each access below, count sectors touched and efficiency. (a) <code>x[i]</code>, x float, i = global id; (b) <code>x[i]</code> but x is float and the allocation starts at byte offset 16 (misaligned kernel arg); (c) <code>m[i*8]</code> (stride-8 floats); (d) <code>s[threadIdx.x % 4]</code> in shared memory; (e) AoS: <code>p[i].y</code> where struct {float x,y,z;} (12 B).</summary><div class="body">
+<p>(a) 128 B span, aligned → <strong>4 sectors, 100%</strong>. (b) 128 B spanning offset 16..144 → crosses into a 5th sector: <strong>5 sectors, 80%</strong> — a permanent 25% traffic tax from ONE misaligned base (why cudaMalloc's 256-B alignment and your 3.5 §5 aligned_alloc habits matter; the CPU forgave this, the warp does not). (c) 32 threads × 32 B apart span 1024 B = <strong>32 sectors, 12.5%</strong>. (d) Shared memory: lanes hit words 0–3 = 4 banks, but each bank serves 8 lanes wanting the SAME address per bank → broadcast within each bank group: <strong>1 transaction-ish, fine</strong> (multicast is free; conflict needs same-bank DIFFERENT addresses — the distinction that trips everyone once). (e) 12-B stride → warp spans 384 B = 12 sectors for 128 B wanted, and the y's are never 4-aligned to sector starts... <strong>~33% efficiency</strong>: the M1 L5 §4 float3 verdict, now computed by you. SoA fixes it to (a). Five patterns, five verdicts, no GPU required — this drill IS 5.7's profiler output, pre-computed.</p>
+</div></details>
+<details><summary>Exercise 2 — Design the shared-memory stencil: a 5-point stencil (out[i][j] = weighted sum of N/S/E/W/center) on a 4096² grid. Naive: each thread reads 5 globals (neighbors re-read ~5× across threads). Design the tiled version: block 32×32, tile size WITH halo, the load choreography (who fetches the halo?), bank-conflict audit of the compute phase, and the traffic ratio vs naive. Then name the M2 L8 ancestor.</summary><div class="body">
+<p>Tile: 34×34 floats (32×32 + 1-cell halo each side) = 4.6 KB — trivially fits shared (228 KB budget: could run 8+ blocks — 4.4 Ex.1's calculator says occupancy safe). Load: each of the 1024 threads fetches its own cell; halo cells (132 of them) go to edge threads with boundary guards (divergence audit: edge-condition ifs are warp-coherent on row-edges, mildly divergent on column-edges — acceptable per 4.4 P6's verdict style). __syncthreads(). Compute phase reads: center + 4 neighbors from shared — row neighbors are adjacent words (different banks ✓), column neighbors are ±34 words → 34 mod 32 = bank shift of 2 ✓ no conflict (34 happens to be conflict-free; a 32-wide tile WOULD have needed the pad — check per tile width, don't cargo-cult). Traffic: naive ≈ 5 reads + 1 write per cell = 24 B/cell; tiled ≈ (34²/32²) ≈ 1.13 reads + 1 write ≈ 8.5 B/cell → <strong>2.8× traffic reduction</strong>, predicted time ≈ floor × 1.13. Ancestor: M2 L8's blur — the 9-view trick was THIS tile pattern in NumPy clothing (the halo was the shrinking-edge policy!). Track B3 industrializes exactly this design.</p>
+</div></details>
+
+<hr>
+<h1>Go deeper — the complete guide</h1>
+<p>The L2's quiet powers, constant/texture paths, occupancy-vs-shared economics, unified memory previewed honestly, and the full CPU↔GPU memory translation table.</p>
+
+<h2>1. The L2: the level nobody programs and everybody uses</h2>
+<p>All SMs share the L2 (50 MB H100 / 126 MB Blackwell-class); every HBM transaction passes through it. Free gifts: inter-block reuse (adjacent blocks touching adjacent data hit L2 without any coordination — part of why naive kernels aren't 32× slower than tiled ones in practice), atomics resolution (global atomics execute AT the L2 — one reason they're merely slow rather than catastrophic), and write coalescing across warps. The knob that exists: <em>persistence windows</em> (pin a hot region — an embedding table's hottest rows — into a set-aside L2 slice; an A8-era serving trick). Mental model: HBM's bouncer, not your scratchpad — you arrange patterns so it CAN help (locality across blocks), you don't command it.</p>
+
+<h2>2. Constant memory and the read-only path</h2>
+<pre><code>__constant__ float params[256];    /* 64 KB window, cached per-SM, BROADCAST-      */
+                                   /* optimized: all 32 lanes reading the same     */
+                                   /* address = 1 cycle (quiz on banks' exception, */
+                                   /* institutionalized). Kernel coefficients,     */
+                                   /* filter weights (M2 L8's LUMA!), config —     */
+                                   /* the M2 L3 hoisting rule's final home.        */
+const float *__restrict__ x        /* read-only global: eligible for the texture/  */
+                                   /* RO cache path — 3.9's restrict promise,      */
+                                   /* now unlocking actual hardware               */</code></pre>
+
+<h2>3. The occupancy-vs-shared exchange rate (the real 5.5 negotiation)</h2>
+<pre><code>shared per block  → blocks/SM (228 KB budget) → warps resident → stall coverage
+tile 32×33 floats = 4.3 KB  → 50+ blocks by smem: registers bind first — free lunch
+tile 128×129      = 66 KB   → 3 blocks/SM = 24 warps = 37% occupancy: NOW it costs
+the ledger: bigger tiles = more reuse per byte (M1 L3 AI ↑) but fewer warps
+            (4.4 hiding ↓). The optimum is empirical PER KERNEL — which is why
+            3.9's T-sweep discipline (predict, sweep, annotate the knee) returns
+            in 5.5 with shared-memory sizes on the x-axis. Same experiment,
+            same table format, new currency.</code></pre>
+
+<h2>4. Unified memory: the honest preview</h2>
+<p><code>cudaMallocManaged</code> gives one pointer valid on both CPU and GPU; pages migrate on demand (3.8's page machinery, now with a chauffeur). The honest ledger: <strong>prototyping gold</strong> (no explicit copies — 5.3 uses it to defer plumbing), <strong>fine when access is phase-separated</strong> (CPU writes, then GPU reads: prefetch hints make it near-explicit-copy speed), <strong>treacherous under ping-pong</strong> (alternating CPU/GPU touches = page-fault storms at PCIe latency each — 1000× slowdowns documented). Grown-up usage: managed + <code>cudaMemPrefetchAsync</code> as self-documenting explicit copies, or plain cudaMalloc + cudaMemcpy once you know your phases (4.6's whole subject). It removes typing, not the topology (the 4.6 bridge is still 64 GB/s wide no matter who drives).</p>
+
+<h2>5. The translation table, completed</h2>
+<table>
+<tr><th>4.2 (CPU)</th><th>This lesson (GPU)</th><th>Delta that changes your code</th></tr>
+<tr><td>64-B line, per-thread</td><td>32-B sector, per-WARP</td><td>layout must align across 32 lanes (SoA wins harder)</td></tr>
+<tr><td>hardware L1 bets on locality</td><td>shared memory: locality by APPOINTMENT</td><td>blocking becomes explicit code + __syncthreads</td></tr>
+<tr><td>prefetchers forgive</td><td>occupancy forgives (differently)</td><td>misalignment/strides cost their sticker price</td></tr>
+<tr><td>associativity conflicts</td><td>bank conflicts</td><td>same modulo math, same padding cure, faster jury</td></tr>
+<tr><td>false sharing (coherence)</td><td>atomic contention (L2 serialization)</td><td>privatize-reduce, now with a register level (quiz 2)</td></tr>
+<tr><td>write-allocate ledger</td><td>sectors on writes too</td><td>the M1 L3 byte-budget audits carry over intact</td></tr>
+</table>
+
+<h2>6. Gotchas</h2>
+<div class="gotcha"><strong>Auditing loads, forgetting stores.</strong> The transpose's naive sin was on the WRITE side. Every index expression in the kernel gets the sector drill (Ex.1) — reads and writes alike.</div>
+<div class="gotcha"><strong>float3 arrays on device.</strong> 12-B stride = permanent ~33% coalescing (Ex.1e). float4-pad or SoA — the M1 L5/3.4 warning, now with a hardware invoice attached.</div>
+<div class="gotcha"><strong>Bank-conflict folklore without the modulo.</strong> "Pad every tile" — Ex.2's 34-wide tile needed none. Compute (stride mod 32), pad when it's 0 (or a small even divisor); cargo-cult padding wastes shared budget, which is occupancy (§3).</div>
+<div class="gotcha"><strong>Hot atomics diagnosed as 'atomics are slow'.</strong> Uniform-random atomics at L2 are surprisingly fine; SKEWED ones serialize (quiz 2). Measure the distribution before rewriting the world — M1 L7's histogram thinking about your histogram.</div>
+<div class="gotcha"><strong>Shared memory as a cure-all.</strong> Staging helps only when data is REUSED (AI ↑) or access needs RESHAPING (transpose). Streaming kernels (saxpy) gain nothing and pay occupancy — the 4.2 P3 "domain of the optimization" rule, GPU edition.</div>
+<div class="gotcha"><strong>Managed memory in the hot loop.</strong> §4's ping-pong storm: prototype with it, ship with explicit transfers or prefetch — and NEVER benchmark managed-memory first-touch as steady-state (the M1 L7 warmup rule catching a new species of cold start).</div>
+
+<h2>Scenario — the embedding-table serving fire</h2>
+<p>Six months into a Track-A-shaped job: the recommendation model's GPU serving p99 spikes 40× on Black Friday traffic, and the on-call channel is guessing ("PCIe? driver? cosmic rays?"). You ask for one artifact: the access histogram of the embedding table (M1 L7 instinct). It's brutally skewed — 0.1% of rows (trending items) take 60% of lookups. Now the memory board plays itself: the 80 GB table lives in HBM (fine — capacity row), but gather kernels for hot rows are ALSO fighting atomic-increment popularity counters on those same rows — quiz 2's skew serialization, live, at the L2. Three moves, three levels: <strong>(1)</strong> popularity counters → per-block shared privatization + end-of-batch merge (the register/shared staircase — contention vanishes); <strong>(2)</strong> hottest 4 MB of rows pinned via L2 persistence window (§1's knob — trending reads stop touching HBM at all); <strong>(3)</strong> the gather's index buffer, arriving via managed memory and ping-ponging (§4's storm — it was ALSO on the flame graph), switched to pinned + async copy (4.6's tools, previewed). p99 restored, and the postmortem's architecture section is literally this lesson's table with three rows highlighted. The senior engineer's review comment — "who taught you L2 persistence windows?" — has the answer this course was designed to produce: <em>the same person who taught me the histogram that found it.</em></p>
+
+<h2>Practice</h2>
+<details><summary>1. Floor drills (M1 L3 ritual, GPU edition): compute the traffic floor and time floor at 8 TB/s for — (a) saxpy on 1B floats; (b) the 4096² transpose; (c) summing 1B floats (reduction); (d) matmul 8192³ fp16 assuming perfect tiling (only compulsory traffic).</summary><div class="body">(a) 12 GB → 1.5 ms. (b) 128 MB → 16 µs (the 5090 example ×4.5 bandwidth). (c) read 4 GB, write ~nothing → 0.5 ms (output is one number — reductions are pure-read floors). (d) compulsory: read A+B once, write C: 3×8192²×2 B = 402 MB → 50 µs; compute at 838 TF dense fp16: 2×8192³/838e12 ≈ 1.3 ms → COMPUTE-bound 26:1 (the roofline verdict without the chart — matmul earns its tensor cores). Four floors in four minutes; every kernel review you'll ever do starts this way.</div></details>
+<details><summary>2. Why does reversing an array (out[i] = in[n-1-i]) coalesce PERFECTLY despite "backwards" access, while transposing doesn't? Sector-arithmetic both, and state the general principle about direction vs stride.</summary><div class="body">Reverse: thread i writes out[i] (consecutive ✓) and reads in[n-1-i] — consecutive threads read consecutive DESCENDING addresses: the warp's 32 reads still span one contiguous 128-B window = 4 sectors (order within the window is irrelevant to the transaction!). Transpose: consecutive threads hit addresses H×4 B apart — 32 windows. Principle: coalescing cares about the warp's address SET (compactness), not the direction or per-lane order. Corollaries: shuffled-within-a-window gathers are free; "reverse iteration is slow" is CPU-prefetcher folklore (4.2) that does NOT port — mechanisms, not intuitions, travel (the module's refrain).</div></details>
+<details><summary>3. A block uses tile[64][64] floats of shared memory. Compute: bytes, max blocks/SM by the 228 KB budget, occupancy at 256 threads/block, and whether the column read tile[i][tid] conflicts. Two fixes if it does; costs of each.</summary><div class="body">64×64×4 = 16 KB → 228/16 = 14 blocks by smem; threads bind first (2048/256 = 8) → smem NOT binding, 100% occupancy available ✓. Column read: stride 64 words → 64 mod 32 = 0 → all lanes same bank: 32-way conflict ✗. Fix A: tile[64][65] (+1 KB/block, still not binding — free here). Fix B: swap the access pattern (transpose roles of load/compute phases so columns are only ever WRITTEN once, read as rows). A is one character; B is a redesign that sometimes ALSO fixes global-side coalescing (the transpose kernel does exactly this). Compute the budgets BEFORE choosing — here A is free, so A.</div></details>
+<details><summary>4. Your kernel's Nsight-style report (previewed): "global load efficiency 25%, shared bank conflicts 0, occupancy 92%, memory throughput 41% of peak." Write the two-line diagnosis and the fix family, citing the lesson section per clause.</summary><div class="body">Diagnosis: access-pattern problem, not residency — 25% load efficiency = warps touching ~4× the sectors their payload needs (stride or misalignment — concept §2/Ex.1), while occupancy 92% says latency-hiding supply is fine (4.4) and banks are clean. The 41% throughput is the SYMPTOM: the memory system is moving 4× traffic to deliver 1× payload. Fix family: index-expression surgery — make threadIdx.x multiply the stride-1 dimension (M1 L2), SoA-ify any struct gathers (Ex.1e), check the base alignment (Ex.1b). Reports are this lesson's drills with percentages attached — you've already done the hard part.</div></details>
+<details><summary>5. Compare the three privatization levels for a 256-bin histogram over 1B uniform bytes: pure global atomics, shared-per-block + merge, register-run-length (quiz 2b) + shared + merge. Estimate the atomic counts reaching each level and predict the ranking (uniform data — does the register level still pay?).</summary><div class="body">Global-only: 10⁹ atomics at L2 — uniform spread over 256 addresses ≈ 4M per address, heavily serialized per hot cache line: slow. Shared+merge: 10⁹ shared-memory atomics (fast, banked, spread over 256 words ≈ manageable) + only 132-ish SMs × 256 global adds at the end ≈ 34K global atomics: the big win (~10–50×). Register level on UNIFORM data: runs of equal values are rare (P(next==this)=1/256) → the private counter almost never batches: adds ~nothing (unlike quiz 2's 80%-skew case where it was the whole ballgame). Ranking here: shared ≫ global; register-layer ≈ shared alone. Moral: privatization levels pay proportionally to the DISTRIBUTION's skew at that level — measure the data before buying the machinery (M1 L7, forever and always).</div></details>
+<details><summary>6. Unified-memory triage: an intern's prototype (managed everywhere) runs the training step 30× slower than the teammate's explicit-copy version, but ONLY after they added a Python-side metrics callback reading two scalars from the model's device tensors every step. Explain the storm, the one-line managed-memory fix, and the architectural fix.</summary><div class="body">The callback's CPU reads touch managed pages → pages migrate GPU→CPU; next kernel touches them → migrate back: a ping-pong page storm at PCIe+fault latency, thousands per step (§4's treachery, textbook instance). One-liner: cudaMemPrefetchAsync the tensors back to the GPU after the read (or read via explicit tiny cudaMemcpy of just the scalars — 8 bytes crossing the bridge instead of pages). Architectural: metrics live in a device-side buffer, copied out ONCE per N steps asynchronously (4.6's overlap) — callbacks never touch hot tensors. The interview-ready summary: managed memory made a topology problem look like a language feature; the bridge (4.6) was always there.</div></details>
+<details><summary>7. Design: the "memory placement decision card" for Module 5 — for each data class in a typical kernel (per-thread scalars, block-shared tiles, kernel coefficients, big streamed arrays, cross-block accumulators, host-visible results), the home level, the access-pattern contract it must honor, the budget it debits (occupancy/smem/traffic), and the lesson that owns its failure mode. One screen; pairs with 4.4 P7's launch ritual.</summary><div class="body">Per-thread scalars → registers (compiler): contract = bounded count (watch 32/thread waterline — 4.4 Ex.1); debit = residency; failure = spills (5.6). Tiles/cooperation → shared: contract = bank-audited access (mod-32 math — §banks) + __syncthreads discipline; debit = smem budget → occupancy (§3); failure = conflicts/over-allocation. Coefficients/config → __constant__: contract = warp-uniform reads (broadcast — §2); debit = 64 KB window; failure = divergent indexing (falls off the fast path). Streamed arrays → global/HBM: contract = coalesced per-warp sets (Ex.1 drill on EVERY index); debit = traffic vs floor; failure = sector multiplication (the transpose story). Cross-block accumulators → global atomics with the privatization staircase (quiz 2/P5): debit = contention; failure = skew serialization. Host-visible results → explicit copies or prefetched-managed (§4), NEVER hot-loop ping-pong; debit = the 4.6 bridge; failure = P6's storm. Six rows, six contracts, six named failure modes — laminate it: 5.2 through 5.11 is this card, executed.</div></details>
+
+<div class="pager">
+  <a href="lesson-04.html">← Inside the GPU</a>
+  <a href="lesson-06.html">Next: The host-device bridge →</a>
+</div>
+<div class="footer">GPU Mastery · Module 4 · Lesson 5 — works offline · progress saved in your browser</div>
+</div>
+<script src="../assets/diagrams4.js"></script>
+<script src="../assets/app.js"></script>
+</body>
+</html>

@@ -1,0 +1,172 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>C1 Graphics Math — GPU Mastery</title>
+<link rel="stylesheet" href="../assets/style.css">
+</head>
+<body data-lesson="cl1">
+<nav><div class="inner">
+  <a class="logo" href="../index.html">GPU<span>Mastery</span></a>
+  <a class="item" href="../index.html">Home</a>
+  <a class="item on" href="../curriculum.html">Curriculum</a>
+  <a class="item" href="../labs.html">Labs</a>
+  <a class="item" href="../setup.html">Lab setup</a>
+  <a class="item" href="../prompt.html">Generator prompt</a>
+</div></nav>
+<div class="wrap">
+
+<div class="lesson-top">
+  <div><span class="badge">Track C · Lesson 1</span><span class="badge dim">≈ 3.5 h</span></div>
+  <button id="donebtn" class="donebtn">Mark lesson complete</button>
+</div>
+<h1>Graphics Math — the coordinate machinery that puts pixels on screen</h1>
+<p class="lead">Track C is throughput engineering with a new consumer: an eyeball, not a fixture. A frame is a 16.6 ms budget (5.9's max-lane law, where the pipeline IS the GPU), and "correct" becomes "measurably plausible" — a reference image within a PSNR budget, not a bitwise match. It all rests on four pieces of linear algebra, and this track's promise is that you'll never take them on faith: every formula here is executed in NumPy, and you'll re-run them all.</p>
+
+<p class="small dim">Lab note: this course's sandbox can't open a window, so Track C's rendering exercises target YOUR machine (any GPU vendor works for C1–C8; ray tracing in C9/C11 needs an RTX or RDNA2+ GPU). But all the MATH is verifiable with nothing but NumPy — which is exactly what C1 is.</p>
+
+<h2>Concept</h2>
+
+<h3>Homogeneous coordinates: why every point carries a 4th number</h3>
+<div class="diagram" data-diagram="c1-spaces" data-caption="A vertex walks five spaces via four transforms and one divide: model → world → view → clip → NDC → screen. The whole of 3D graphics is this chain."></div>
+<p>A 3D point is three numbers, so why does graphics carry a fourth, <code>w</code>? Because translation — sliding a point by a fixed offset — is <em>not</em> a linear operation on 3 numbers (it can't be written as a matrix multiply), and the entire GPU pipeline is built on matrix multiplies. Adding a 4th coordinate fixes this: a point becomes <code>(x, y, z, 1)</code>, and now a 4×4 matrix can both rotate/scale (the upper 3×3) AND translate (the last column), in one multiply. This is M1's matrix machinery closing its arc — the linear algebra you learned becomes the literal transform every vertex undergoes. Model, view, and projection are each a 4×4 matrix; a vertex is transformed by their product, walking from its own local space to the screen (the diagram's chain).</p>
+
+<h3>The perspective divide, by hand</h3>
+<div class="diagram" data-diagram="c1-divide" data-caption="After the projection matrix, dividing x,y,z by w is the one nonlinear step — and it's what makes distant things small. w carries camera-space depth."></div>
+<p>The projection matrix does something clever: it puts camera-space depth into <code>w</code>. Then the "perspective divide" — dividing everything by <code>w</code> — is what makes far objects small. It's the one nonlinear step in the pipeline, and it's worth doing by hand. Executed:</p>
+<pre><code>clip point (x,y,z,w)  →  NDC = (x/w, y/w, z/w)
+  near vertex (2, 1, 3,  1) → (2.00, 1.00, 3.00)   x survives: 2/1
+  far  vertex (2, 1, 24, 8) → (0.25, 0.125, 3.00)  x shrinks: 2/8
+Same x-coordinate, 8× the w → 1/8 the screen size. That ratio IS perspective:
+w encodes how far the vertex is, and dividing by it shrinks distant geometry.</code></pre>
+<p>Two consequences you'll cash in later. First, because <code>1/w</code> is linear in screen space (even though <code>w</code> isn't), the hardware interpolates <code>1/w</code> across a triangle and divides per-pixel — that's perspective-correct interpolation (C2). Second, the way depth gets packed into the divide is why the z-buffer has uneven precision (C2's reverse-Z). The humble divide echoes through the whole track.</p>
+
+<h3>Quaternions vs Euler angles: why rotation isn't three numbers</h3>
+<div class="diagram" data-diagram="c1-quaternion" data-caption="Euler angles gimbal-lock (two axes align at 90°, losing a degree of freedom) and interpolate along ugly paths; quaternions avoid both. The industry default."></div>
+<p>Rotation feels like it should be three numbers (yaw, pitch, roll) — and it can be stored that way, but composing and interpolating Euler angles is a trap. At pitch = 90°, the yaw and roll axes align, and two of your three gimbals now rotate the object the same way: you've lost a degree of freedom (gimbal lock), and no combination of the three angles can produce certain rotations. Worse, interpolating between two Euler triples takes a wobbling, non-shortest path — bad for animation. Quaternions — four numbers on the unit 4-sphere — have no axis that can align with another (no gimbal lock) and interpolate along the shortest constant-speed arc (slerp), which is exactly what animation wants. You compose them by multiplication and re-normalize to fight drift. Every engine uses quaternions for rotation internally, converting to matrices only to feed the GPU.</p>
+
+<h3>Normals need the inverse-transpose (and it's not obvious)</h3>
+<div class="diagram" data-diagram="c1-normal" data-caption="Under a non-uniform scale or shear, transforming a normal by the model matrix breaks perpendicularity; the inverse-transpose is the matrix that preserves it. Proven, not asserted."></div>
+<p>Here's the subtle one, and the reason this track executes its math. A surface normal is perpendicular to the surface. Transform the surface by the model matrix <code>M</code> and — surprisingly — transforming the normal by the same <code>M</code> generally breaks that perpendicularity, unless <code>M</code> is a pure rotation. The correct transform is <code>(M⁻¹)ᵀ</code>, the inverse-transpose. This isn't folklore; it falls out of the requirement that the transformed normal stay perpendicular to the transformed surface, and you can watch it happen in numbers (the worked example). Get it wrong and your lighting is subtly, pervasively incorrect on any non-uniformly-scaled object — a bug that looks like "the shading is just a bit off" and hides for months.</p>
+
+<h2>Worked example</h2>
+<div class="card">
+<p><strong>Task:</strong> Prove the inverse-transpose is necessary by executing it. Take a surface with a tangent direction and its perpendicular normal, apply a non-uniform scale, and check whether perpendicularity survives. Prediction first: if we scale x by 2× and transform the normal by that same scale, will the normal still be perpendicular to the scaled surface?</p>
+<pre><code>surface tangent t = (1, 1),  normal n = (1, -1)     [t·n = 0, perpendicular ✓]
+scale M = diag(2, 1)   [stretch x by 2×]
+transformed tangent: M·t = (2, 1)
+
+Prediction: scaling the normal by M too will NOT keep it perpendicular
+  (intuition: stretching x tilts the surface, but the naive normal tilts the wrong way).
+Executed:
+  naive  n' = M·n         = (2, -1);  (M·n)·(M·t) = 4 - 1 = 3   → NOT 0, WRONG
+  correct n' = (M⁻¹)ᵀ·n   = (0.5,-1); ((M⁻¹)ᵀn)·(M·t) = 1 - 1 = 0 → 0, CORRECT</code></pre>
+<p><strong>What to internalize:</strong> the naive transform gives a dot product of 3 where it must be 0 — the "normal" is no longer normal, so every lighting calculation using it is wrong by an amount that grows with the scale. The inverse-transpose gives exactly 0, restoring perpendicularity, and the two-line proof (want <code>n'·(Mt) = 0</code> for all <code>t</code>; substitute <code>n' = (M⁻¹)ᵀn</code>; get <code>nᵀM⁻¹Mt = n·t = 0</code>) shows <em>why</em> rather than asking you to memorize a rule. This is the track's method in miniature: graphics math is full of "just use this matrix" incantations, and every one of them is a short NumPy experiment away from being understood instead of cargo-culted. For pure rotations (the common case) <code>M⁻¹ᵀ = M</code>, which is why the bug hides — it only bites when someone adds a non-uniform scale.</p>
+</div>
+
+<h2>Key points</h2>
+<ul class="keypoints">
+<li>The 4th coordinate w exists so translation becomes a matrix multiply: a point (x,y,z,1) times a 4×4 matrix both rotates/scales and translates — M1's linear algebra as the literal vertex transform.</li>
+<li>The projection matrix packs camera-space depth into w; the perspective divide (÷w) is the one nonlinear step and is what shrinks distant geometry (executed: same x, 8× w → 1/8 screen size).</li>
+<li>1/w is linear in screen space, so hardware interpolates 1/w for perspective-correct attributes (C2), and the depth-in-w packing is why the z-buffer has uneven precision (C2's reverse-Z).</li>
+<li>Rotation is not safely three numbers: Euler angles gimbal-lock at 90° (lost degree of freedom) and interpolate badly; quaternions (4 numbers, slerp) avoid both and are the engine default.</li>
+<li>Normals transform by the inverse-transpose (M⁻¹)ᵀ, not M — executed proof: under a 2× x-scale the naive normal gives dot 3 (wrong), the inverse-transpose gives 0 (correct).</li>
+<li>The inverse-transpose bug hides because (M⁻¹)ᵀ = M for pure rotations — it only corrupts lighting once a non-uniform scale or shear enters, then it's a pervasive, subtle shading error.</li>
+</ul>
+
+<h2>Quiz</h2>
+<div class="quiz">
+  <div class="q">1. An artist reports that a stretched crate (scaled 3× along one axis) looks "weirdly lit" — highlights point the wrong way — while unstretched crates look fine. A programmer says "lighting is lighting, the model matrix is applied to everything correctly." Diagnose it.</div>
+  <button class="opt">The artist's normals are wrong in the model file; re-export the crate</button>
+  <button class="opt" data-c="1">The normals are being transformed by the model matrix M instead of its inverse-transpose (M⁻¹)ᵀ. For pure rotations/translations M⁻¹ᵀ = M so unstretched objects look fine, which is why the bug hid — but a non-uniform scale makes M·normal no longer perpendicular to the surface (executed: dot = 3, not 0), so the shading normal points wrong and highlights drift. Fix: build a separate normal matrix = (M⁻¹)ᵀ and use it for normals in the shader</button>
+  <button class="opt">The GPU can't light non-uniformly scaled objects; bake the scale into the mesh</button>
+  <button class="opt">It's a gamma/sRGB issue; the stretch changes perceived brightness</button>
+  <div class="expl">Option 1 blames the asset, but the same mesh lights correctly when unstretched — so the data is fine and the transform is the culprit. Option 3 invents a hardware limit that doesn't exist. Option 4 confuses two unrelated bugs (sRGB is C5). The correct answer names the exact mechanism (normals need (M⁻¹)ᵀ) and, crucially, explains why it only appears under non-uniform scale — the "it works on some objects" clue is the fingerprint of the inverse-transpose bug, because M⁻¹ᵀ = M for rotations. This is the worked example as a field diagnosis.</div>
+</div>
+<div class="quiz">
+  <div class="q">2. A junior engineer stores all rotations as Euler angles (yaw, pitch, roll) and animates a camera by lerping the three angles between keyframes. Near straight-up shots the camera "snaps" and spins oddly. What's happening and what's the fix?</div>
+  <button class="opt">Floating-point error in the angle lerp; use doubles</button>
+  <button class="opt" data-c="1">Gimbal lock: near pitch = 90° (looking straight up) two of the three rotation axes align, collapsing a degree of freedom, so small changes produce large unexpected spins — and lerping Euler triples takes a non-shortest, wobbling path through orientation space. Fix: store rotations as quaternions and interpolate with slerp, which has no gimbal lock and follows the shortest constant-speed arc. Convert to a matrix only to hand the GPU the transform</button>
+  <button class="opt">The camera's near plane is too close; increase it</button>
+  <button class="opt">Nothing is wrong; cameras always behave this way looking up</button>
+  <div class="expl">Option 1 misattributes a structural problem to precision — the snap happens even in exact arithmetic. Options 3/4 are unrelated or defeatist. The correct answer identifies gimbal lock (the aligned-axis degeneracy at 90°) plus the bad interpolation path, and gives the standard fix (quaternions + slerp). The tell is "near straight-up" — the pitch=90° singularity is exactly where Euler angles fail, which is why every camera and skeletal-animation system stores orientation as quaternions and only converts to a matrix at the last moment.</div>
+</div>
+
+<h2>Exercises</h2>
+<details><summary>Exercise 1 — In NumPy, build a model (translate+rotate+scale), view (look-at), and projection matrix, transform a few vertices through all three, and do the perspective divide by hand. Verify that a vertex twice as far (double the resulting w) lands at half the NDC x/y. Then feed a degenerate w=0 vertex and observe what happens.</summary><div class="body">
+<p>Expected: the vertex chain reproduces the pipeline; doubling depth doubles w and halves screen position (the executed 2/1 vs 2/8 result, generalized). The w=0 case (a point on the camera plane / at infinity) produces a divide-by-zero — which is exactly why clipping happens BEFORE the divide in real hardware (vertices behind or on the near plane are clipped so w never hits 0 at divide time). Deliverable: your matrices, the NDC coordinates, and a one-line note on why near-plane clipping is not optional. This makes the abstract "clip space" concrete — it's the space where clipping is cheap because w is still around to test against.</p>
+</div></details>
+<details><summary>Exercise 2 — Reproduce the inverse-transpose proof numerically: pick a non-uniform scale AND a shear, a surface tangent and its normal, and confirm that M·normal breaks perpendicularity (dot ≠ 0) while (M⁻¹)ᵀ·normal preserves it (dot = 0). Then confirm that for a pure rotation, M and (M⁻¹)ᵀ give the SAME result.</summary><div class="body">
+<pre><code>scale diag(2,1): (M·n)·(M·t) = 3 (WRONG), ((M⁻¹)ᵀn)·(M·t) = 0 (CORRECT) — executed
+pure rotation R: (M⁻¹)ᵀ = R exactly, so both agree — the bug is invisible here
+</code></pre>
+<p>The second half is the important half: it shows precisely why this bug survives code review. On a scene of rotated-and-translated objects (the common case) the naive normal transform is correct, so tests pass and everything looks right — until someone scales an object non-uniformly and the shading quietly breaks. Deliverable: the two dot products for the scale/shear case and the demonstration that rotation makes them equal. Now you'll recognize "lighting looks off on stretched objects" instantly as the inverse-transpose bug (quiz 1).</p>
+</div></details>
+
+<hr>
+<h1>Go deeper — the algebra behind the pixels</h1>
+
+<h2>1. The transform stack, one matrix at a time</h2>
+<pre><code>space      matrix       what it does
+─────────  ───────────  ──────────────────────────────────────────
+model      M            place a mesh in the world (rotate/scale/translate)
+world→view V (look-at)  move the camera to the origin looking down -z
+view→clip  P (proj)     apply the frustum; pack depth into w
+clip→NDC   ÷w           the perspective divide (the nonlinear step)
+NDC→screen viewport      map [-1,1] to pixel coordinates
+one vertex: screen = viewport( (P · V · M · vertex) then ÷w )
+key insight: it's ONE matrix product per vertex (P·V·M precomputed), so the
+GPU transforms millions of vertices as millions of independent 4×4 multiplies —
+embarrassingly parallel (4.4), which is why the vertex shader is a SIMT kernel.</code></pre>
+
+<h2>2. Why 1/w is the magic quantity</h2>
+<pre><code>w is NOT linear across a triangle in screen space, but 1/w IS.
+so the hardware, per vertex, computes 1/w and (attribute/w); interpolates BOTH
+linearly across the triangle (cheap); then per-pixel divides to recover the
+perspective-correct attribute:  attr(pixel) = (attr/w interpolated) / (1/w interpolated).
+skip this and you get affine interpolation — the PS1-era texture "swim"/wobble (C2).
+this is the single most important consequence of homogeneous coordinates for
+rasterization, and it's why depth buffers store something like 1/w-ish, not z.</code></pre>
+
+<h2>3. Rotations: the representations and when to use each</h2>
+<pre><code>representation   good for                         bad for
+───────────────  ───────────────────────────────  ────────────────────────
+Euler (3 angles) human authoring, simple UI       composing, interpolating (gimbal lock)
+matrix (3×3/4×4) feeding the GPU, composing xforms storage (9 numbers), interpolation
+quaternion (4)   interpolation (slerp), storage    reading by eye, direct GPU use
+axis-angle       intuition, single rotations       composing
+the pipeline: author in Euler → store/interpolate as quaternion → convert to
+matrix to send to the shader. Each representation earns its place; the mistake
+is using one everywhere (Euler for animation → gimbal lock; quaternion for the
+GPU → needs conversion anyway).</code></pre>
+
+<h2>Gotchas</h2>
+<div class="gotcha"><strong>Transforming normals with the model matrix.</strong> Correct only for pure rotations; a non-uniform scale/shear breaks perpendicularity (executed dot = 3). Use a dedicated normal matrix (M⁻¹)ᵀ. The bug hides until someone stretches an object.</div>
+<div class="gotcha"><strong>Forgetting to re-normalize transformed normals.</strong> Even the correct inverse-transpose changes a unit normal's length; you must normalize in the shader before lighting, or brightness scales with the transform.</div>
+<div class="gotcha"><strong>Euler angles for animation or camera.</strong> Gimbal lock at 90° plus wobbling interpolation. Store orientation as quaternions; convert to a matrix only for the GPU.</div>
+<div class="gotcha"><strong>Dividing by w before clipping.</strong> Vertices at/behind the near plane have w ≤ 0; dividing produces garbage or infinities. Clip in clip space (where w is still available) first — that's the whole point of having a clip space.</div>
+<div class="gotcha"><strong>Row-major vs column-major matrix confusion.</strong> OpenGL/GLSL are column-major; many math libraries are row-major. A transposed matrix silently applies the wrong transform (or the multiply order flips). Fix the convention once and assert it.</div>
+<div class="gotcha"><strong>Assuming affine interpolation is fine.</strong> Interpolating attributes without the perspective (1/w) correction gives the classic texture swim on large triangles (C2). Perspective-correct interpolation is not optional for anything textured.</div>
+
+<h2>Scenario — the shading bug that only appeared on Tuesdays</h2>
+<p>A small studio ships a game where most objects look great, but a handful — a stretched banner, a squashed barrel, an elongated character shadow-caster — have subtly wrong lighting: highlights sit slightly off, and the objects look faintly "plasticky" or "inside-out" under moving lights. The bug is maddening because it's intermittent across objects and invisible on the majority, so it survives playtests and code review for weeks. The graphics lead finally does what this lesson insists on: reduces it to numbers. He takes one broken object's model matrix, a surface tangent and normal, and computes both transforms in a scratch script — and there it is, the naive <code>M·normal</code> giving a non-zero dot with the transformed tangent (the executed 3, not 0), while <code>(M⁻¹)ᵀ·normal</code> gives 0. The shader was transforming normals with the model matrix. Every object with a pure rotation/translation (the vast majority) was fine, so nothing looked wrong in review; only the non-uniformly-scaled few were corrupted. The fix is three lines: compute a normal matrix <code>(M⁻¹)ᵀ</code> on the CPU, pass it alongside the model matrix, and use it for normals in the shader. The morals are the track's spine. First, the "works on most objects" symptom is diagnostic, not reassuring — it's the exact signature of the inverse-transpose bug, because the incorrect and correct transforms coincide for rotations. Second, and this is why C1 executes everything: a graphics bug that's invisible to the eye on 90% of cases and subtle on the rest is nearly impossible to catch by looking, but trivial to catch by computing one dot product. The engineers who reach for NumPy when the pixels look "a little off" fix in an afternoon what the ones who only stare at the screen chase for a month.</p>
+
+<h2>Practice</h2>
+<details><summary>1. Why can't translation be represented as a 3×3 matrix acting on (x,y,z), and how does the homogeneous 4th coordinate fix it?</summary><div class="body">A 3×3 matrix multiply maps the origin to the origin (M·0 = 0), but translation must move the origin — so no 3×3 matrix can translate. Translation is affine, not linear. The fix: embed the point as (x,y,z,1) and use a 4×4 matrix whose last column holds the translation; the multiply then adds the translation via the 1 in the 4th slot, while the upper-left 3×3 still does rotation/scale. So a single 4×4 handles rotate+scale+translate together — which is why the whole pipeline uses 4-vectors and 4×4 matrices, and why w starts at 1 for points (and 0 for directions, which shouldn't translate).</div></details>
+<details><summary>2. A clip-space vertex is (6, 3, 9, 3). Give its NDC coordinates and explain what w = 3 tells you.</summary><div class="body">NDC = (6/3, 3/3, 9/3) = (2, 1, 3) — actually outside the [-1,1] cube in x and z, so this vertex would be clipped (it's off-screen / beyond the far plane). w = 3 tells you the vertex's camera-space depth scaled it: a larger w means farther away and more shrinkage under the divide. The divide by 3 is the perspective effect (a vertex at w=1 with the same x=6 would land at NDC x=6, even further out). The exercise: NDC outside [-1,1] means clipped, which is why clipping tests happen in clip space against w before the divide (gotcha 4).</div></details>
+<details><summary>3. For a pure rotation R, show that the normal matrix (R⁻¹)ᵀ equals R, and explain why this makes the inverse-transpose bug so hard to catch.</summary><div class="body">A rotation is orthogonal: R⁻¹ = Rᵀ. So (R⁻¹)ᵀ = (Rᵀ)ᵀ = R. Thus for any rotation (and rotation+translation, since the 3×3 rotation block is what transforms directions), transforming a normal by R and by the "correct" normal matrix give identical results. Consequence: on a scene of rotated/translated objects — the overwhelming majority in most content — the naive normal transform is correct, so the bug produces no visible error and passes all tests. It only manifests under non-uniform scale or shear, where R⁻¹ᵀ ≠ R. That "invisible until a specific, uncommon transform" behavior is exactly why it hides for months (the scenario).</div></details>
+<details><summary>4. Explain perspective-correct interpolation: why interpolate 1/w and attribute/w rather than the attribute directly?</summary><div class="body">Because a vertex attribute (UV, color) is linear in 3D/world space but NOT linear in 2D screen space after the perspective divide — the divide warps it. However, 1/w IS linear in screen space, and so is attribute/w. So the hardware interpolates both linearly across the triangle (cheap, per-pixel), then recovers the true attribute as (attribute/w) / (1/w) at each pixel. Interpolating the attribute directly (affine) ignores depth and produces the swimming/warping texture artifact on large or steeply-angled triangles (the PS1 look). This is the practical payoff of homogeneous coordinates: 1/w is the quantity that makes correct interpolation a linear operation.</div></details>
+<details><summary>5. You're handed a matrix library and a shader; textures on a big floor plane "swim" as the camera moves. What's the likely cause and where do you look?</summary><div class="body">Affine (non-perspective-correct) interpolation of texture coordinates. On a large plane viewed at a grazing angle, the perspective distortion across each triangle is severe, so interpolating UVs without the 1/w correction makes the texture warp/swim — the classic PS1 artifact. Where to look: whether the rasterizer/shader path is doing perspective-correct interpolation (in modern APIs it's the default for varyings, but a hand-rolled software rasterizer, a deliberately "noperspective" qualifier, or interpolating a value you computed yourself in the vertex shader can bypass it). Fix: let the hardware interpolate the raw UV (perspective-correct by default) rather than pre-dividing, or explicitly carry attribute/w and 1/w. It's C1's 1/w lesson showing up as a visible bug.</div></details>
+<details><summary>6. When is it correct to transform a normal with the plain model matrix, and why might a team deliberately do so as an optimization?</summary><div class="body">It's correct whenever the model matrix contains only rotations, translations, and UNIFORM scale (uniform scale only changes the normal's length, fixed by re-normalizing). In that case (M⁻¹)ᵀ and M agree up to a scalar, so transforming by M and normalizing gives the right direction. Teams exploit this: if they guarantee no non-uniform scale in their content pipeline (a common art constraint), they skip computing and passing a separate normal matrix, saving CPU work and a shader uniform — using M for both positions and normals. The trade is a content restriction (no non-uniform scale) for a small perf/simplicity win; break the restriction and you get the scenario's bug. Knowing WHEN the shortcut is valid is the point.</div></details>
+<details><summary>7. The interview closer: "Walk me through what happens to a single vertex from the model file to a pixel on screen, and name one place people get the math wrong." Deliver the spoken skeleton.</summary><div class="body">"A vertex starts in model space — coordinates relative to its own mesh. I multiply by the model matrix M to place it in world space, then by the view matrix V to bring it into camera space (camera at the origin looking down -z), then by the projection matrix P, which applies the frustum and — the key trick — packs camera-space depth into the w component. Those three are usually pre-multiplied into one MVP matrix, so it's one 4×4 multiply per vertex, which is why the vertex shader is an embarrassingly parallel SIMT kernel. The result is a clip-space (x,y,z,w) point; I clip against w here (before dividing, so I never divide by zero on near-plane vertices). Then the perspective divide — x,y,z all divided by w — gives normalized device coordinates in a [-1,1] cube, and that divide is what makes distant things small. A viewport transform maps that to pixel coordinates, the triangle is rasterized into fragments, and attributes are interpolated perspective-correctly by carrying 1/w. The place people get it wrong: transforming NORMALS with the model matrix instead of its inverse-transpose. It's correct for rotations, so it passes on most objects, but any non-uniform scale breaks perpendicularity and the lighting goes subtly wrong — I've seen that bug hide for weeks, and it's one dot product to catch. So I always build a separate normal matrix, (M⁻¹)ᵀ.' Naming the inverse-transpose gotcha unprompted is the signal that I've actually shipped graphics, not just read about it."</div></details>
+
+<div class="pager">
+  <a href="../curriculum.html">← Back to curriculum</a>
+  <a href="lesson-02.html">Next: The Rasterization Pipeline →</a>
+</div>
+<div class="footer">GPU Mastery · Track C · Lesson 1 — works offline · progress saved in your browser</div>
+</div>
+<script src="../assets/diagramsC.js"></script>
+<script src="../assets/app.js"></script>
+</body>
+</html>

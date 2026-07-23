@@ -1,0 +1,204 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>A6 Mixed Precision & Tensor Cores — GPU Mastery</title>
+<link rel="stylesheet" href="../assets/style.css">
+</head>
+<body data-lesson="al6">
+<nav><div class="inner">
+  <a class="logo" href="../index.html">GPU<span>Mastery</span></a>
+  <a class="item" href="../index.html">Home</a>
+  <a class="item on" href="../curriculum.html">Curriculum</a>
+  <a class="item" href="../labs.html">Labs</a>
+  <a class="item" href="../setup.html">Lab setup</a>
+  <a class="item" href="../prompt.html">Generator prompt</a>
+</div></nav>
+<div class="wrap">
+
+<div class="lesson-top">
+  <div><span class="badge">Track A · Lesson 6</span><span class="badge dim">≈ 3.5 h</span></div>
+  <button id="donebtn" class="donebtn">Mark lesson complete</button>
+</div>
+<h1>Mixed Precision & Tensor Cores — buying speed with bits, without buying regret</h1>
+<p class="lead">Halving your dtype halves every byte on 4.6's ledger and unlocks the matrix units that do most of a modern GPU's work. The price is paid in M1 L8's currency — range and precision — and this lesson makes every line of that price list MEASURED: where fp16 flushes to zero, where sums silently stall at 4% of their true value, and which shapes the tensor cores refuse to eat.</p>
+
+<h2>Concept</h2>
+
+<h3>The format menu: range vs precision, on one axis</h3>
+<div class="diagram" data-diagram="a6-formats" data-caption="Exponent bits buy RANGE, mantissa bits buy PRECISION. Every format is a different answer to the same budget question — M1 L8's table, industrialized."></div>
+<pre><code>format   exp/mant   eps (rel step)   max        the one-line character
+fp32      8 / 23     1.2e-7          3.4e38     the reference
+tf32      8 / 10     ~1e-3           3.4e38     fp32 range, TC speed (Ampere+
+                                                 default INSIDE matmuls only)
+bf16      8 / 7      7.8e-3          3.4e38     fp32's range, 2 decimal digits —
+                                                 training's favorite
+fp16      5 / 10     9.8e-4          65504      3 digits, TINY range: flush
+                                                 below 2⁻²⁴≈6e-8, inf above 65504
+fp8 e4m3  4 / 3      ~0.06           448        weights/activations (Hopper+)
+fp8 e5m2  5 / 2      ~0.13           57344      gradients (range over precision)
+# all measured/spec — memorize eps and max for bf16 and fp16; they explain
+# 90% of mixed-precision incidents you'll ever debug.</code></pre>
+
+<h3>The two failure modes, measured</h3>
+<pre><code>RANGE failure (fp16's specialty):  grads below 2⁻²⁴ ≈ 6e-8 flush to ZERO
+  (executed: fp16(2e-8) = 0.0; fp16(1e-6) survives as a subnormal) — small
+  gradients simply cease to exist → dead learning signal.
+PRECISION failure (everyone's):  absorption — S + g rounds to S once
+  g &lt; S·eps/2 (M1 L8's law). Executed: summing 65,536 grads of 1e-4 in
+  pure fp16 STALLS at 0.25 vs true 6.55 — 96% of the mass silently lost,
+  stall point exactly where eps predicts (1e-4 ÷ (eps/2) ≈ 0.2).
+# The two failures have two different antidotes — scaling for range,
+# wide accumulation for precision — and confusing them is the classic
+# debugging dead-end (quiz 1).</code></pre>
+
+<h3>The mixed-precision recipe (what torch.amp actually does)</h3>
+<div class="diagram" data-diagram="a6-scale" data-caption="Scale the loss up so gradients clear fp16's flush line; unscale before stepping; check for inf and skip+shrink when the scale overshoots. bf16's fp32-range mostly retires the whole loop."></div>
+<pre><code>storage/matmuls in half precision (fp16 or bf16)  ← speed + memory
+master weights + optimizer states in fp32          ← updates ~1e-6·w must not
+                                                     absorb into w (the §2 law!)
+accumulations in fp32 (matmul acc, reductions)     ← A3 quiz 2 / 5.11's law
+fp16 only: LOSS SCALING — multiply loss by S (~2¹⁶) → grads shift above the
+  flush line → unscale before optimizer → if any inf/nan: skip step, S /= 2;
+  every ~2k clean steps: S ×= 2 (dynamic scaling = an autotuner for range)
+bf16: same recipe MINUS the scaler — 8 exponent bits mean nothing flushes;
+  you pay in eps (7.8e-3): bf16 needs the fp32-acc discipline even harder.</code></pre>
+
+<h3>Tensor cores: the units your dtypes unlock</h3>
+<div class="diagram" data-diagram="a6-tc" data-caption="A TC instruction consumes a whole tile (e.g. 16×16) per cycle-ish: inputs half-precision, accumulate fp32. Ragged shapes fall off the fast path — feed the unit or lose it."></div>
+<pre><code>what runs on TCs: matmuls/convs with fp16/bf16/tf32/fp8 inputs, dims
+  friendly to the unit's tiles (multiples of 8/16; pad 1000→1024 and WIN —
+  5.7 P2's pitch economics at model scale)
+what doesn't: fp32-in/fp32-acc GEMMs on pre-Ampere (T4: fp16 TCs only —
+  your Colab card accelerates fp16 matmuls ~4×, nothing else), elementwise
+  anything (TCs are matmul furniture; your A5 fused kernels run on the
+  regular ALUs regardless of dtype)
+accumulate: ALWAYS fp32 in the MMA (the hardware offers it; tl.dot's
+  acc dtype and cuBLAS's compute type are where you SAY it — 5.11's law
+  has been hardware-assisted all along).</code></pre>
+
+<h2>Worked example</h2>
+<div class="card">
+<p><strong>Task:</strong> The precision audit of one training step of a 1B-param model in fp16-with-scaler vs bf16 — every row measured or spec-derived, the decision defensible to a review. (The measured rows come from this lesson's executed experiments; reproduce them in Ex.1.)</p>
+<pre><code>concern                     fp16 + dynamic scaling         bf16, no scaler
+weights/activations         2 B/param ✓ same               2 B/param ✓ same
+grad flush (range)          RESCUED by S≈2¹⁶ (grads        never flushes (fp32
+                            6e-8→scaled 4e-3 &gt; 2⁻²⁴ ✓)      range) ✓
+optimizer update absorb     fp32 master weights ✓           fp32 master weights ✓
+  (lr·g ≈ 1e-7·w vs eps)    (in fp16 masters: update &lt;      (bf16 masters would
+                             w·eps/2=4.9e-4·w → VANISHES)    lose at 3.9e-3·w!)
+long reductions             fp32 acc ✓ (pure-fp16 acc       fp32 acc MANDATORY
+                            measured: 96% mass lost)        (bf16 eps 8× worse)
+step-skip machinery         needed (inf detection + S       none — simpler loop,
+                            backoff: occasional dead steps)  no skipped steps
+verdict: bf16 where hardware has it (Ampere+) — simpler and unflushable;
+fp16+scaler on T4-class (your Colab!) — and EITHER way the fp32 spine
+(masters + accumulations) is non-negotiable: it's where the correctness lives.</code></pre>
+<p><strong>The one number to internalize:</strong> an optimizer update is typically lr·g ≈ 1e-6…1e-8 of the weight's magnitude, while half-precision eps/2 is 5e-4 (fp16) or 4e-3 (bf16). Updates are 100–10,000× SMALLER than the absorption threshold — training in pure half precision doesn't "lose a little accuracy," it silently applies ZERO update to most weights (§2's stalled sum, per-parameter). The fp32 master copy isn't conservatism; it's the difference between training and an expensive random-noise generator.</p>
+</div>
+
+<h2>Key points</h2>
+<ul class="keypoints">
+<li>Exponent bits buy range, mantissa bits buy precision: bf16 = fp32's range with 2 digits; fp16 = 3 digits with a 6e-8…65504 window — memorize both eps values (7.8e-3, 9.8e-4).</li>
+<li>Two distinct failure modes: FLUSH (fp16 grads below 2⁻²⁴ become zero — fixed by loss scaling) and ABSORPTION (S+g rounds to S at g&lt;S·eps/2 — fixed by fp32 accumulation); measured: 96% of a 65k-grad sum lost to pure-fp16 accumulation.</li>
+<li>The recipe: half-precision storage/matmuls, fp32 master weights + optimizer states + accumulations, dynamic loss scaling for fp16 only — every line exists because of a measured failure, not superstition.</li>
+<li>Optimizer updates (≈1e-6·w) sit far below half-precision absorption thresholds (5e-4·w / 4e-3·w) — fp32 masters are what make training actually update weights.</li>
+<li>Tensor cores eat half-precision TILES with fp32 accumulate: feed them aligned dims (pad to ×8/16 — a net win), know your hardware's menu (T4: fp16 only; Ampere+: +bf16/tf32; Hopper+: +fp8 with per-tensor scaling).</li>
+<li>bf16 simplifies (no scaler, no skipped steps) but sharpens the accumulation discipline — its eps is 8× coarser than fp16's; the fp32 spine matters MORE, not less.</li>
+</ul>
+
+<h2>Quiz</h2>
+<div class="quiz">
+  <div class="q">1. A team moves training from fp32 to fp16+amp. Loss curves match for 3k steps, then their run plateaus visibly above the fp32 baseline. GradScaler logs show a healthy scale (~2¹⁵, occasional backoffs). A teammate says "loss scaling is failing — raise the scale cap." Diagnose with the two-failure-mode framework and name the two most likely true culprits.</div>
+  <button class="opt">Agree — the scale cap is too low</button>
+  <button class="opt" data-c="1">The scaler is HEALTHY (stable scale, occasional backoff = working as designed) — scaling fixes RANGE, and range isn't the symptom's shape. A plateau-above-baseline is the ABSORPTION signature: something is accumulating in half precision. Culprits, in base-rate order: (1) a custom op/kernel accumulating in fp16 (A3 quiz 2's bug — the fused thing someone wrote last month; audit acc dtypes), (2) optimizer state or master weights accidentally cast to half (a sweeping .half() on the whole module, or a checkpoint reloaded through a half-casting path) — updates below w·eps/2 apply as zero (worked example's law), so training crawls exactly on the smallest-gradient weights. Raising the scale does nothing for either: they're precision failures, and scale is a range knob</button>
+  <button class="opt">fp16 fundamentally can't match fp32 quality</button>
+  <button class="opt">The learning rate needs re-tuning for fp16</button>
+  <div class="expl">Diagnosis-by-failure-mode is the lesson's whole point: flush symptoms (early divergence, zero grads, inf storms) vs absorption symptoms (quiet plateaus, stalled small-weight learning) are as different as 5.4's sticky vs non-sticky errors — and each has its own instrument (grad-zero-fraction histograms for flush; an fp32-shadow comparison run for absorption). Option 3 is refuted by a decade of fp16-trained models; option 4 is the eternal scapegoat (A2 Ex.2's oscillation lesson: exhaust the mechanism hypotheses before touching hyperparameters).</div>
+</div>
+<div class="quiz">
+  <div class="q">2. Same model, two runs on an A100: hidden size 4096 → 51 ms/step; a researcher's "tiny tweak" to hidden 4100 ("only 0.1% more parameters!") → 68 ms/step. Explain the 33% cliff, the general law, and the fix that costs nothing.</div>
+  <button class="opt">4100 doesn't fit in L2 cache anymore</button>
+  <button class="opt" data-c="1">4100 = 4·1025 breaks tensor-core tiling: TC paths want dims in multiples of 8/16 (a6-tc — the MMA unit consumes fixed tiles); 4096 feeds clean 16-tiles, 4100 leaves ragged edges that fall back to slower paths and misaligned accesses (5.7 P2's alignment tax joins in — 4100·2B rows aren't 32B-aligned either). The law: matmul time is a STAIRCASE in dimensions, not a line — cost jumps at tile boundaries, so "0.1% more math" can buy 30% more time. Free fix: pad to 4104 (×8) or 4112 (×16) — or just use 4096: dimensions are KERNEL-ECONOMICS choices (A5 P4's closing lesson), and every production transformer's suspiciously-round sizes are this law, obeyed</button>
+  <button class="opt">More parameters = proportionally more FLOPs</button>
+  <button class="opt">cuBLAS has a bug at odd sizes</button>
+  <div class="expl">The staircase model replaces the linear-cost intuition everyone imports from complexity class: hardware charges per TILE, and a tile is charged whether full or ragged (5.2's tail threads, at matmul scale). torch exposes the check (dims % 8) and profilers show the kernel-name change (a2-dispatch: the slow row got dispatched). The "suspiciously round numbers" observation turns this from trivia into reading skill: model configs are full of frozen kernel-economics decisions — now you can see them.</div>
+</div>
+
+<h2>Exercises</h2>
+<details><summary>Exercise 1 — Reproduce this lesson's two measured failures in NumPy (runs anywhere, no GPU): (a) the flush table — np.float16 of {1e-6, 1e-7, 6e-8, 3e-8, 2e-8} with the 2⁻²⁴ line explained; (b) the absorption stall — sum 65,536 × 1e-4 in pure fp16 (expect ~0.25 vs 6.55) and find the stall point's dependence on the increment size (try 1e-3, 1e-5); then (c) fix (b) three ways and rank them: fp32 accumulator, pairwise/tree summation in fp16, Kahan compensation in fp16.</summary><div class="body">
+<pre><code>(a) 1e-6 → 1.01e-6 (subnormal — representable but only ~4 significant bits!),
+    2e-8 → 0.0 (below 2⁻²⁵ rounds to zero). Flush is a LINE, blur included.
+(b) stalls at S ≈ increment/(eps/2): 1e-4→~0.2; 1e-3→~2.0; 1e-5→~0.02 —
+    the stall point SCALES with increment: absorption is relative (M1 L8).
+(c) fp32 acc: exact-ish (6.5547) — cost: one register wider — WINNER, always
+    available in kernels (acc_type, A3 §1). pairwise fp16: ~6.55 ± last-bits —
+    error grows O(log n) not O(n) (5.8 P7's tree argument) — good when the
+    accumulator must stay half (rare). Kahan fp16: recovers most digits at
+    2–4× the adds — the B8 preview; overkill here, vital in fp64-poor science.</code></pre>
+<p>Ranking rationale is the deliverable: fp32-acc wins on cost/benefit because the hardware GIVES you the wide accumulator (TCs accumulate fp32 natively — §TC); the exotic fixes matter only where that's not true. You have now personally generated every number in §2 — which is the difference between citing a rule and owning it.</p>
+</div></details>
+<details><summary>Exercise 2 — Colab (T4, fp16 amp): train a small MLP on synthetic data twice — with torch.amp (autocast + GradScaler) and in pure fp16 (model.half(), no scaler, fp16 optimizer states — deliberately wrong). Log: scale evolution, fraction of exactly-zero grads per step, and final loss. Then ONE more run: pure fp16 but with lr artificially ×1000. Explain all three outcomes with §2's two failure modes.</summary><div class="body">
+<pre><code>expected: amp run — scale climbs 2¹⁶±, zero-grad fraction ~0%, loss matches
+fp32 reference; pure-fp16 — zero-grad fraction grows (small grads flush) AND
+loss plateaus early (updates absorb into fp16 weights: BOTH failure modes,
+compounding — the worked example's "noise generator"); pure-fp16 + lr×1000 —
+updates now EXCEED the absorption threshold so weights DO move (plateau
+later/lower!) but training is unstable/lossy: you "fixed" absorption by
+breaking optimization — a diagnostic contrast, not a remedy.</code></pre>
+<p>The lr×1000 run is the teaching move: it experimentally SEPARATES the two failure modes (it cures absorption while flush remains → whatever improvement you see quantifies absorption's share). Design-of-experiments on numerics — M1 L7's controlled-variable ritual aimed inward. Log the zero-grad histogram; it's the production monitoring metric for flush (quiz 1's instrument), and you've now built it once by hand.</p>
+</div></details>
+
+<hr>
+<h1>Go deeper — the precision engineer's fine print</h1>
+
+<h2>1. fp8 and the scaling-factor era (Hopper/Blackwell)</h2>
+<pre><code>fp8's 3 (e4m3) or 2 (e5m2) mantissa bits can't span a tensor's dynamic range
+alone → every fp8 tensor travels WITH a scale: value ≈ fp8_code × scale,
+scales chosen per-tensor (or per-block on Blackwell's nvfp4/mx formats —
+finer scales, tighter fit). Training recipes keep amax histories to set
+scales predictively (a rolling autotuner for range — a6-scale's idea,
+per-tensor). The recipe's spine is UNCHANGED: fp32 accumulate in the MMA,
+fp32 masters. fp8 halves bf16's traffic again — 4.6's ledger keeps paying —
+at the cost of scale-management machinery (Transformer Engine et al. exist
+to hide exactly that bookkeeping).</code></pre>
+
+<h2>2. Stochastic rounding (why fp8-era optimizers survive)</h2>
+<pre><code>round-to-nearest ALWAYS drops an update &lt; ulp/2 → absorption (§2).
+stochastic rounding: round UP with probability (update/ulp) → E[applied] =
+update — individual steps are noisy, the EXPECTATION is exact: absorption
+becomes unbiased noise instead of systematic zero (a Monte Carlo fix — B4's
+philosophy smuggled into arithmetic). Hardware support arrives with the
+fp8 optimizers; know the term — it's the answer to "how can 8-bit Adam
+possibly work?"</code></pre>
+
+<h2>3. Gotchas</h2>
+<div class="gotcha"><strong>model.half() as "mixed precision."</strong> That's PURE half — masters, states, accumulations all degraded (Ex.2's broken run). Mixed precision is a RECIPE (autocast regions + fp32 spine), not a cast.</div>
+<div class="gotcha"><strong>Scaler state not checkpointed.</strong> Resume without the GradScaler's state → scale restarts at default → a burst of inf-skipped or flushed steps distorts the curve right after every resume. scaler.state_dict() belongs in the checkpoint (tiny, forgotten weekly).</div>
+<div class="gotcha"><strong>Judging fp16 by early loss.</strong> Flush/absorption bite the SMALL gradients — early training (big grads) looks identical; divergence appears mid-run (quiz 1's 3k steps). Precision A/Bs need full-length runs or shadow-fp32 comparisons, not smoke tests.</div>
+<div class="gotcha"><strong>bf16 checkpoint round-trips.</strong> Saving fp32 masters through a bf16-casting serialization path quantizes them (eps 7.8e-3!) — resumed training limps mysteriously. Assert checkpoint dtypes in the save/load fixture (M2 L6 for files).</div>
+<div class="gotcha"><strong>Softmax/norms autocast in half.</strong> autocast keeps risky ops (softmax, norms, exp) in fp32 by POLICY — hand-written kernels bypass that policy: your A5 fused ops must re-implement it (fp32 acc + shifts) or quietly reintroduce the failures autocast was hiding (A3 quiz 2's whole arc).</div>
+<div class="gotcha"><strong>Padding shame.</strong> Refusing to pad 4100→4112 "wastes 0.3% memory" while eating quiz 2's 33% staircase penalty. Padding is not waste; it's the cheapest performance purchase in the catalog (5.7 P2, a6-tc, one more time with feeling).</div>
+
+<h2>Scenario — the 4 a.m. inf storm and the two-knob confusion</h2>
+<p>A training run on 64 GPUs (fp16 + dynamic scaling, because the fleet still has V100s) dies at 4 a.m., step 71,204: loss = inf, then NaN cascade. The on-call's first instinct — "lower the learning rate" — is the eternal wrong first move (quiz 1's scapegoat). A course-literate engineer walks the failure-mode tree instead: inf appeared FIRST in the loss (not grads) → forward-pass range problem → which op can exceed 65504 in fp16? The attention logits: this run had just crossed into a longer-sequence curriculum phase at step 71k (config archaeology), and with ALiBi biases at the new length, pre-softmax scores pushed past fp16's ceiling BEFORE the max-shift could save them (A5 P3's flagged interaction, live: the shift happens after S is materialized in fp16). The fix menu, ranked: compute S in fp32 inside the fused kernel (the autocast policy, restored — one line in the Triton dot's acc dtype), or scale Q by 1/√d earlier (algebraically identical, range-cheaper — M1 L8 thinking), or clamp logits (a hack that changes the model; rejected). One-line fix, run resumed from checkpoint, and the postmortem's title is the lesson: <em>"Loss scaling manages GRADIENT range; it cannot save a FORWARD pass that overflows — know which knob owns which failure."</em> The monitoring add: an amax histogram on attention scores (the fp8-era tool from §1, deployed early), which would have shown the ceiling approach 10k steps in advance.</p>
+
+<h2>Practice</h2>
+<details><summary>1. For each tensor in an amp training step, name its correct dtype and the failure if you get it wrong: weights (compute copy), master weights, activations, attention logits, gradients in flight, Adam's m and v, the loss scalar.</summary><div class="body">Compute weights: bf16/fp16 (speed; wrong→slow only). Masters: fp32 (else updates absorb — worked ex). Activations: half (memory; risky ops' internals fp32 by policy). Attention logits: fp32 acc or scaled early (scenario's inf storm). In-flight grads: half + scaled (fp16) — flush if unscaled. Adam m: half-able with care; v: fp32 or carefully-scaled — v is a sum of SQUARES of small numbers: squares of 1e-4 are 1e-8, right at flush territory, and v feeds a sqrt+divide (error amplifier). Loss: fp32 (it's one number; scaling machinery reads it). The v-answer is the interview separator: precision policy is per-TENSOR-ROLE, driven by each tensor's value distribution — not per-model.</div></details>
+<details><summary>2. Derive the loss-scale window for a model whose smallest useful grads are ~1e-7 and largest are ~10: which scales S keep everything alive in fp16, and what does the window's WIDTH tell you about when dynamic scaling starts skipping steps?</summary><div class="body">Lower bound: 1e-7·S &gt; 2⁻²⁴ ≈ 6e-8 → S &gt; 0.6 — trivially met. Real lower bound is subnormal-precision, not flush: want 1e-7·S above the NORMAL threshold 6.1e-5 for full mantissa → S &gt; 610. Upper: 10·S &lt; 65504 → S &lt; 6550. Window ≈ [2¹⁰, 2¹²] — narrow! Dynamic scaling probes upward ×2 until inf (backoff): with a 3-octave window it hovers near the top, and any gradient-spike event (batch outlier) overflows → skip+halve → re-climb: the scale TRAJECTORY is a seismograph of your gradient distribution's tails. A wide-tailed model (unstable) skips often — scale logs are a training-health metric, not plumbing noise (quiz 1 read them exactly this way).</div></details>
+<details><summary>3. tf32 gives matmuls a 10-bit mantissa silently on Ampere+ (torch's default for fp32 GEMMs). Construct the case FOR leaving it on and the case for torch.backends.cuda.matmul.allow_tf32=False, and name the two workload classes where the answer flips.</summary><div class="body">For ON: ~3–8× matmul speed at eps 1e-3 per-op — deep nets are noise-tolerant (gradient noise ≫ 1e-3 rounding), a decade of models trained fine. For OFF: per-op relative error 1e-3 compounds in ill-conditioned chains; anything doing LINEAR ALGEBRA as the product (B-track solvers, computing physical quantities, gradcheck baselines!, unit-test oracles) needs true fp32. Flips: (1) scientific/HPC workloads embedded in torch (off — B8's reproducibility world); (2) fixture/oracle computation — your A3 reference-vs-kernel tests must pin the flag or "failures" appear when the REFERENCE silently ran tf32 (a real CI heisenbug class: the fixture changed, not the kernel). Meta-lesson: defaults encode a workload assumption; know when you're not the assumed workload.</div></details>
+<details><summary>4. Your fp8 (e4m3) linear layer shows amax = 380 on activations (format max 448). The scale-setter proposes headroom via scale ÷2 "to be safe." Price the proposal in mantissa terms and give the correct policy (delayed scaling), with the failure it actually protects against.</summary><div class="body">e4m3 has 3 mantissa bits: values live on a grid of ~6% relative spacing. Halving the scale halves every represented magnitude's precision usage — you spend ONE of your ~3 effective bits on headroom (values now top out at 190/448: the top octave unused = wasted code space; quantization RMS roughly doubles). Correct policy: scales from a rolling amax HISTORY (delayed scaling — set next step's scale from recent maxima + small margin), so codes fill the range; the failure it guards is an amax SPIKE overflowing to inf mid-step (then: per-tensor skip or clamp-with-flag, logged like scaler backoffs). fp8 engineering is 90% this bookkeeping — §1's Transformer-Engine reason — and the octave-costs-a-bit arithmetic is the fastest way to sound fluent in it.</div></details>
+<details><summary>5. Quantify quiz 2's staircase for a (4096×4100)·(4100×4096) bf16 GEMM on TC hardware: how much of the work runs on the ragged path vs padded (4096×4112), and why does the measured penalty (~30%) exceed the naive ragged-fraction estimate? (Two mechanisms.)</summary><div class="body">Ragged fraction naive estimate: only the K-dim's last 4 columns of 4100 (4100 = 256·16 + 4) → 4/4100 ≈ 0.1% of MACs — yet the penalty is ~30%: the fraction model is wrong because (1) the FALLBACK is kernel-wide, not edge-wide: an unfriendly K often demotes the ENTIRE GEMM to a different kernel (dispatcher picks per-shape, not per-tile — a2-dispatch), and (2) alignment: 4100·2B = 8200B rows misalign every row start (5.7 P2's sector tax on ALL loads, not just edge tiles). Padding to 4112 restores both: TC kernel + aligned rows, at 0.4% extra memory. The general audit: when a small shape change causes a big time change, diff the PROFILER'S KERNEL NAMES first (5.10) — the staircase is usually a dispatch cliff, not gradual raggedness.</div></details>
+<details><summary>6. Design the "precision regression" CI for a training codebase (A3 §CI's sibling): the three cheap per-commit checks and the one expensive weekly run that together catch quiz 1's plateau, the scenario's inf storm, and gotcha 4's checkpoint quantization BEFORE they reach a real run.</summary><div class="body">Per-commit: (1) dtype-audit walk — assert every parameter/optimizer-state/buffer dtype against a declared manifest (catches stray .half()/bf16 checkpoint paths — gotcha 4, quiz 1 culprit 2); (2) acc-dtype grep+test on custom kernels — the A3 fixture asserting fp32 accumulation via a mean-1e3 adversarial row (A5 Ex.1's family); (3) amax smoke test — one forward at max configured sequence length asserting attention scores fit the compute dtype's range with 2× margin (the scenario, pre-caught at PR time). Weekly: a 2k-step shadow run — half-precision config vs fp32 reference on fixed data/seed, asserting loss-curve divergence under a budget and zero-grad-fraction under a threshold (the only test that sees ABSORPTION-class drift — quiz 1's instrument, scheduled). Cost: minutes + one GPU-hour weekly; the incidents it pre-empts each cost engineer-weeks (every one of them appears in this lesson because it happened to someone at 4 a.m.).</div></details>
+<details><summary>7. Interview closer: "Why does mixed-precision training work, and what breaks when it doesn't?" — 90 seconds: the two-failure-mode framework with one measured number each, the recipe's four lines and which failure each line answers, the bf16-vs-fp16 decision, the TC shape law, and the closing sentence about where correctness actually lives.</summary><div class="body">Skeleton: "Half precision halves memory traffic and unlocks tensor cores — but floats fail two distinct ways, and the recipe answers both. Range: fp16 flushes below 2⁻²⁴ — I've measured 2e-8 becoming exactly zero — so small gradients vanish; loss scaling shifts them into the live window, dynamically probing the ceiling [a6-scale]. Precision: absorption — adding a small number to a big accumulator rounds to nothing; I've measured a 65k-element fp16 sum stalling at 4% of its true value — so accumulations and master weights stay fp32: an optimizer update is ~1e-6 of a weight, a hundred times below half-precision's rounding step, so without fp32 masters most updates apply as zero [worked ex]. bf16 trades mantissa for fp32's exponent range — no flushing, no scaler, simpler loop — at 8× coarser eps, which makes the fp32 spine MORE critical, not less. Tensor cores want half-precision tiles at multiple-of-8/16 dims — matmul cost is a staircase, so pad 4100 to 4112 and win 30% [quiz 2]. When mixed precision 'breaks,' I diagnose by failure mode — inf storms are range (forward or unscaled grads), quiet plateaus are absorption (an fp16 accumulator hiding somewhere) — because each has different knobs, and turning the wrong one is a week of 4 a.m. [scenario]. The one-liner: speed lives in the half-precision bytes; correctness lives in the fp32 spine — mixed precision is the discipline of never confusing the two."</div></details>
+
+<div class="pager">
+  <a href="lesson-05.html">← ML kernel patterns</a>
+  <a href="lesson-07.html">Next: Multi-GPU — NCCL, DDP, FSDP →</a>
+</div>
+<div class="footer">GPU Mastery · Track A · Lesson 6 — works offline · progress saved in your browser</div>
+</div>
+<script src="../assets/diagramsA.js"></script>
+<script src="../assets/app.js"></script>
+</body>
+</html>

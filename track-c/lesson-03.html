@@ -1,0 +1,165 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>C3 First Triangle: OpenGL to Vulkan — GPU Mastery</title>
+<link rel="stylesheet" href="../assets/style.css">
+</head>
+<body data-lesson="cl3">
+<nav><div class="inner">
+  <a class="logo" href="../index.html">GPU<span>Mastery</span></a>
+  <a class="item" href="../index.html">Home</a>
+  <a class="item on" href="../curriculum.html">Curriculum</a>
+  <a class="item" href="../labs.html">Labs</a>
+  <a class="item" href="../setup.html">Lab setup</a>
+  <a class="item" href="../prompt.html">Generator prompt</a>
+</div></nav>
+<div class="wrap">
+
+<div class="lesson-top">
+  <div><span class="badge">Track C · Lesson 3</span><span class="badge dim">≈ 3.5 h</span></div>
+  <button id="donebtn" class="donebtn">Mark lesson complete</button>
+</div>
+<h1>First Triangle — from OpenGL's 50 lines to Vulkan's explicit machine</h1>
+<p class="lead">Every graphics programmer draws a first triangle. In OpenGL it's ~50 lines because the driver makes every hard decision for you; in Vulkan 1.4 it's ~1000 lines because you make them. That verbosity is not bureaucracy — it's the driver guesswork from 5.9's world (streams, sync, memory) turned into objects you own. Today you'll see that every intimidating Vulkan object is a core concept you already learned, and that dynamic rendering (now core) cuts the worst of the ceremony.</p>
+
+<p class="small dim">Lab note: the sandbox can't open a window, so build the triangle on YOUR machine (any GPU + the LunarG Vulkan SDK 1.4). If you can't, wgpu/Dawn (Track D5) renders offscreen headlessly as a fallback, and the concepts below are the same. Every API fact here is checked against the Vulkan 1.4 docs.</p>
+
+<h2>Concept</h2>
+
+<h3>The same triangle, two philosophies</h3>
+<div class="diagram" data-diagram="c3-triangle" data-caption="OpenGL hides memory, sync, and scheduling behind a global state machine (fast to learn, opaque); Vulkan makes all of it explicit (verbose, predictable, multithreadable). Same triangle, opposite trades."></div>
+<p>OpenGL is a global state machine: you bind a buffer, set some state, call <code>glDrawArrays</code>, and the driver decides where memory lives, when to synchronize, and how to schedule — globally, heuristically, differently on every vendor. That's why the triangle is short and why OpenGL is still the best way to <em>learn</em> to see pixels. It's also why OpenGL hit a wall in the 2010s: the hidden decisions cost performance you can't control, and the global state machine can't be driven from multiple threads. Vulkan 1.4 inverts every choice: you allocate memory, you record commands, you declare synchronization, you compile pipeline state ahead of time. The triangle balloons to ~1000 lines, but the payoff is predictable performance, multithreaded command recording, and no hidden driver magic. The honest one-liner: Vulkan is verbose because <em>explicit is the driver guesswork you now own</em> — it's 5.9's synchronization lesson promoted from a runtime concern to the API's core design.</p>
+
+<h3>Every Vulkan object is a concept you already learned</h3>
+<div class="diagram" data-diagram="c3-vkgraph" data-caption="VkQueue is a stream, VkCommandBuffer is recorded launches, VkDeviceMemory is the two worlds, VkPipeline is compiled state, semaphores/fences are events — Vulkan is your CUDA mental model as explicit objects."></div>
+<p>Vulkan's object list looks overwhelming until you map it onto Module 5. A <code>VkQueue</code> is a stream (5.9) — where you submit work. A <code>VkCommandBuffer</code> is recorded launches (5.2): you record draw/dispatch commands once and replay them on submit, which is why command recording multithreads cleanly. <code>VkDeviceMemory</code> and memory heaps are 5.3's two worlds made explicit — you choose device-local vs host-visible memory and manage the transfers yourself. A <code>VkPipeline</code> is compiled state (5.1): shaders plus all the fixed-function configuration baked into one immutable object, so there's no per-draw state validation. <code>VkSemaphore</code> and <code>VkFence</code> are events (5.9) — GPU↔GPU and GPU↔CPU synchronization. A descriptor set is kernel arguments — the bundle of buffers and textures a shader can see. Once you see the mapping, Vulkan stops being a new world and becomes your CUDA mental model with the plumbing exposed. That's the whole conceptual leap; the rest is API surface.</p>
+
+<h3>Dynamic rendering: skipping the renderpass ceremony</h3>
+<div class="diagram" data-diagram="c3-dynrender" data-caption="Legacy Vulkan required declaring a VkRenderPass and VkFramebuffer up front; dynamic rendering (core in 1.4) replaces the ceremony with vkCmdBeginRendering, matching what modern tutorials teach."></div>
+<p>Early Vulkan made you declare a <code>VkRenderPass</code> — every attachment, subpass, and dependency, up front — plus a <code>VkFramebuffer</code> binding images to it, then begin/next/end subpass ceremony around your draws. That design pays off on mobile tiler GPUs (which benefit from knowing the whole pass ahead of time), but for the common desktop case — a single pass to the screen — it's painful boilerplate. <strong>Dynamic rendering</strong>, promoted to core in Vulkan 1.4 (with synchronization2 and other 1.3 features), replaces it: you call <code>vkCmdBeginRendering</code> with your color/depth attachments inline, draw, and call <code>vkCmdEndRendering</code> — no <code>VkRenderPass</code> or <code>VkFramebuffer</code> object at all. Modern tutorials (and your C3 exercise) start here, because it removes hundreds of lines of the least-illuminating ceremony while keeping everything explicit that actually matters. It's a good example of the API maturing: the explicitness that earns its keep stays; the explicitness that was just tax gets a shortcut.</p>
+
+<h2>Worked example</h2>
+<div class="card">
+<p><strong>Task:</strong> Enumerate what the OpenGL triangle hides, and map each hidden decision to the Vulkan object that exposes it — the translation that makes Vulkan's verbosity legible. Prediction first: of OpenGL's hidden work, how much is genuinely new in Vulkan versus concepts you already own from CUDA?</p>
+<pre><code>OpenGL hides it          Vulkan exposes it         you learned it as
+──────────────────────   ───────────────────────   ────────────────────────
+"where does the buffer   VkDeviceMemory + heaps    5.3 two worlds (device vs host)
+ live?"                   (you pick, you copy)
+"when is it safe to      pipeline barriers,        5.9 events/streams
+ read what I wrote?"      semaphores, fences
+"what state is bound?"   VkPipeline (baked         5.1 compiled kernels / state
+                          ahead of time)
+"replay these draws?"    VkCommandBuffer           5.2 recorded launches
+"which GPU queue?"       VkQueue                   5.9 streams
+Prediction: ~0% is conceptually new — it's your Module 5 model, made explicit.
+Result: confirmed. The 1000 lines are typing, not new ideas. The ONE new skill
+is doing the bookkeeping yourself instead of trusting the driver.</code></pre>
+<p><strong>What to internalize:</strong> the reason Vulkan intimidates newcomers is that it presents all of this at once, as unfamiliar API names, so it <em>feels</em> like a thousand new concepts. But laid against Module 5, it's five ideas you already own — streams, recorded launches, two memory worlds, compiled state, events — with the driver's automatic decisions handed to you as explicit objects. The skill Vulkan actually demands isn't new knowledge; it's discipline: you now own the memory management (5.3), the synchronization (5.9), and the state, so a forgotten barrier is a real race (5.4) instead of a driver's silent fix. That's why the validation layers exist (they're 5.4's sanitizer for graphics, C8) and why the payoff is control: predictable, multithreaded, vendor-consistent performance. Learn the triangle in OpenGL to see pixels fast; learn it in Vulkan to own the machine — and know that the second is your CUDA mental model wearing a lot of struct definitions.</p>
+</div>
+
+<h2>Key points</h2>
+<ul class="keypoints">
+<li>OpenGL is a global state machine that hides memory/sync/scheduling (great for learning, opaque and single-threaded); Vulkan 1.4 makes all of it explicit (verbose, predictable, multithreadable).</li>
+<li>Vulkan's verbosity IS 5.9's driver guesswork turned into objects you own — explicit because you now control what OpenGL decided heuristically.</li>
+<li>The object model maps onto Module 5: VkQueue = stream (5.9), VkCommandBuffer = recorded launches (5.2), VkDeviceMemory = two worlds (5.3), VkPipeline = compiled state (5.1), semaphore/fence = events (5.9).</li>
+<li>A VkPipeline bakes shaders + fixed-function state into one immutable object, eliminating per-draw state validation — compiled once, replayed cheaply.</li>
+<li>Dynamic rendering (core in Vulkan 1.4) replaces the VkRenderPass/VkFramebuffer ceremony with vkCmdBeginRendering/EndRendering — hundreds of fewer lines for the common single-pass case.</li>
+<li>The one genuinely new skill is ownership: you manage memory (5.3) and synchronization (5.9) yourself, so a forgotten barrier is a real race (5.4) — which is why validation layers exist (C8).</li>
+</ul>
+
+<h2>Quiz</h2>
+<div class="quiz">
+  <div class="q">1. A CUDA engineer new to graphics says "Vulkan looks like a thousand new concepts — I don't have time to learn all this." What's the reframing that makes it tractable, and what's the ONE thing that's actually new?</div>
+  <button class="opt">They're right; Vulkan is unrelated to CUDA and must be learned from scratch</button>
+  <button class="opt" data-c="1">Vulkan's objects map almost one-to-one onto the Module 5 CUDA model: VkQueue is a stream, VkCommandBuffer is recorded launches, VkDeviceMemory is the two host/device worlds, VkPipeline is compiled state, semaphores/fences are events. So the concepts aren't new — it's the same mental model with the driver's automatic decisions exposed as explicit objects. The one genuinely new skill is ownership: doing the memory and synchronization bookkeeping yourself instead of trusting the driver, which is why a forgotten barrier becomes a real race and validation layers exist</button>
+  <button class="opt">Skip Vulkan and use OpenGL forever; the extra control is never worth it</button>
+  <button class="opt">Vulkan is only for mobile; desktop should use OpenGL</button>
+  <div class="expl">Options 3 and 4 dodge rather than reframe (and are factually off — Vulkan is the modern desktop and cross-platform standard). The correct answer is the worked example as an onboarding strategy: map the scary object names onto the CUDA concepts the engineer already owns, which collapses "a thousand concepts" into "five familiar ideas plus one new discipline (ownership)." This is the fastest path for a compute person into graphics — the physics transfers; only the bookkeeping responsibility is new.</div>
+</div>
+<div class="quiz">
+  <div class="q">2. A tutorial from 2018 has the reader write ~200 lines of VkRenderPass and VkFramebuffer setup before the first triangle. A 2026 tutorial skips almost all of it. What changed, and is the new way "less correct"?</div>
+  <button class="opt">The new tutorial is cutting corners and will produce buggy code</button>
+  <button class="opt" data-c="1">Dynamic rendering (a Vulkan 1.3 feature, core in 1.4) replaced the VkRenderPass/VkFramebuffer ceremony with inline vkCmdBeginRendering/EndRendering. It's not less correct — it's the same explicit control over attachments and load/store operations without the separate up-front objects, which were mostly boilerplate for the common single-pass case (the renderpass design still helps mobile tilers, so it remains available). The 2026 tutorial removes hundreds of lines of the least-illuminating ceremony while keeping what matters explicit</button>
+  <button class="opt">Nothing changed; the 2026 tutorial is just incomplete</button>
+  <button class="opt">Vulkan removed renderpasses entirely, breaking old code</button>
+  <div class="expl">Option 1 assumes brevity means bugs, but dynamic rendering is a spec feature, not a shortcut. Option 4 overstates it — renderpasses still exist and matter for tiler GPUs. The correct answer names the actual change (dynamic rendering, core in 1.4) and correctly frames it: the ceremony that was pure tax for the desktop single-pass case got a first-class replacement, while the explicitness that earns its keep (attachments, load/store ops) stays. This is the API maturing — a good signal to prefer current tutorials, and a reminder to verify against the version you're targeting.</div>
+</div>
+
+<h2>Exercises</h2>
+<details><summary>Exercise 1 — On your machine, build the Vulkan 1.4 triangle using dynamic rendering (many current tutorials and the LunarG SDK samples do this). As you go, keep a two-column note: each Vulkan object you create, and the Module 5 concept it corresponds to. If you lack a Vulkan setup, do the same mapping from a reference tutorial's code, or render offscreen with wgpu (D5).</summary><div class="body">
+<p>Expected: your notes reconstruct the c3-vkgraph diagram from your own code — instance/device (the GPU handle), queue (a stream, 5.9), swapchain (the presentable images), command pool/buffer (recorded launches, 5.2), pipeline (compiled state, 5.1), semaphores/fences (events, 5.9). The value is doing the mapping in your own words while the API is fresh — it converts "a pile of vkCreate calls" into "my CUDA model, typed out." Deliverable: the two-column table for a complete triangle. Keep it; it's the Rosetta stone you'll reach for every time Vulkan feels alien again.</p>
+</div></details>
+<details><summary>Exercise 2 — Compare the two eras: find (or write) a triangle with legacy renderpass and one with dynamic rendering, and diff the setup. Count the lines dynamic rendering removes and identify which removed lines were genuinely load-bearing vs pure ceremony. Then articulate when you WOULD still use a renderpass.</summary><div class="body">
+<p>Expected: dynamic rendering removes the VkRenderPass creation (attachment descriptions, subpass, dependencies) and the VkFramebuffer — often 100–200 lines — replaced by a small VkRenderingInfo at draw time. The load-bearing parts (which attachments, load/store ops, clear values) survive inline; the pure ceremony (the separate objects, subpass indices for a single subpass) vanishes. You'd still use a renderpass on mobile/tiler GPUs, where the up-front knowledge lets the driver keep attachments in fast on-chip tile memory across a pass — a real perf win there. Deliverable: the line-count diff and a one-sentence rule for when each is right. This teaches that "newer" is context-dependent: dynamic rendering for desktop simplicity, renderpasses where the tiler payoff exists.</p>
+</div></details>
+
+<hr>
+<h1>Go deeper — owning the machine</h1>
+
+<h2>1. The object graph, from instance to first pixel</h2>
+<pre><code>VkInstance            the Vulkan loader + which layers/extensions (validation!)
+  → VkPhysicalDevice  a GPU on the system (query its queues, memory, features)
+    → VkDevice        your logical handle to it + enabled features
+      → VkQueue       submit work here (5.9's stream)
+      → VkSwapchain   the ring of images you present to the screen (C8)
+      → VkCommandPool → VkCommandBuffer   record draws (5.2), replay on submit
+      → VkPipeline    shaders + fixed state, compiled (5.1)
+      → VkSemaphore/Fence   GPU↔GPU / GPU↔CPU sync (5.9)
+the triangle: acquire a swapchain image → record (begin rendering, bind pipeline,
+draw, end) → submit to the queue with sync → present. Every arrow is a concept
+from Module 5; the API is the bookkeeping around them.</code></pre>
+
+<h2>2. Why OpenGL hit a wall (the history worth knowing)</h2>
+<pre><code>OpenGL's global state machine:
+  · one giant bound-state context → can't record commands from multiple threads
+    (modern CPUs have many cores; OpenGL couldn't use them for draw submission)
+  · the driver guesses memory placement, sync, and shader recompiles at draw time
+    → unpredictable hitches ("shader compile stutter") you can't control
+  · vendor drivers diverge wildly in these heuristics → "works on NVIDIA, janky on X"
+Vulkan's answer: make it all explicit and multithreadable. The cost is verbosity;
+the benefit is predictability + multicore command recording + vendor consistency.
+same trade as Track D's HIP-vs-CUDA control question, in a graphics register.</code></pre>
+
+<h2>3. What explicit ownership actually costs you</h2>
+<pre><code>you now own:                          which means:
+  memory allocation (5.3)             sub-allocate from big VkDeviceMemory blocks
+                                      (don't vkAllocateMemory per resource — a limit!)
+  synchronization (5.9)               every image layout transition + hazard is YOURS
+                                      → miss one = a race (5.4), garbage or a hang
+  pipeline state (5.1)                a pipeline per state combo; manage the explosion
+                                      (pipeline cache, dynamic state for the volatile bits)
+the safety net: VALIDATION LAYERS (C8) — 5.4's sanitizer for Vulkan. NEVER develop
+without them on; they catch the missing barrier, the wrong layout, the leaked object.
+turn them off only for shipping (they're slow), never while writing the code.</code></pre>
+
+<h2>Gotchas</h2>
+<div class="gotcha"><strong>Developing without validation layers.</strong> Vulkan gives no friendly errors by default — a missing barrier is undefined behavior, not a message. The validation layers (C8) are 5.4's sanitizer; run them always during development, or you're debugging blind.</div>
+<div class="gotcha"><strong>vkAllocateMemory per resource.</strong> Drivers cap the number of allocations (sometimes ~4096). Allocate a few big blocks and sub-allocate — or use a library (VMA). Per-resource allocation works in the triangle and crashes in a real scene.</div>
+<div class="gotcha"><strong>Following a pre-1.3 tutorial for a modern engine.</strong> You'll write hundreds of lines of renderpass/framebuffer ceremony that dynamic rendering (core in 1.4) removes. Verify the tutorial's Vulkan version against your target.</div>
+<div class="gotcha"><strong>Forgetting image layout transitions.</strong> A swapchain image must be transitioned to the right layout before rendering and to PRESENT before presenting; miss it and you get validation errors or a black screen. Layouts are explicit ownership (C8).</div>
+<div class="gotcha"><strong>Pipeline explosion.</strong> A distinct VkPipeline per state combination can balloon into thousands. Use dynamic state for the volatile parts (viewport, scissor) and a pipeline cache; plan the state space, don't create pipelines ad hoc.</div>
+<div class="gotcha"><strong>Assuming Vulkan is always the right choice.</strong> For learning, a tool, or a simple app, OpenGL (or WebGPU, D5) gets you there in a fraction of the code. Vulkan's control is worth it when you need predictable performance and multithreading — match the tool to the goal (D1's ladder, graphics edition).</div>
+
+<h2>Scenario — the port that finally used all the cores</h2>
+<p>A studio's renderer is OpenGL, and their frames are CPU-bound: a single thread spends milliseconds every frame issuing draw calls, and the profiler shows seven of eight CPU cores idle while the eighth is pegged submitting work — the classic OpenGL wall, where the global state-machine context can only be driven from one thread. They consider Vulkan, and the senior graphics engineer frames it exactly as this lesson does: this is not learning a new GPU, it's taking ownership of the bookkeeping OpenGL did implicitly. She maps the port for the team — VkQueue is the stream they already understand, command buffers are recorded launches they can build on many threads, memory heaps are the two worlds they know from CUDA — and the genuinely new work is disciplined synchronization and memory management, which the validation layers will police. The port is real effort (the code roughly 10×'s in size), but the payoff is precisely the thing OpenGL couldn't give: each of the eight cores records its own command buffer in parallel, and the main thread just submits them. The CPU-bound frame becomes GPU-bound — the actual goal — and the framerate on CPU-limited scenes nearly doubles. They also lean on dynamic rendering to avoid drowning in renderpass boilerplate, keeping the diff focused on what matters. The moral is the lesson's thesis made concrete: Vulkan's verbosity bought them multithreaded command submission and predictable performance, and it was tractable because it wasn't new physics — it was their existing mental model with the driver's hidden decisions made explicit and parallelizable. The engineers who saw "a thousand new concepts" would have been paralyzed; the one who saw "my CUDA model, typed out, now multithreaded" shipped the port.</p>
+
+<h2>Practice</h2>
+<details><summary>1. Map each Vulkan object to its Module 5 concept: VkQueue, VkCommandBuffer, VkDeviceMemory, VkPipeline, VkFence.</summary><div class="body">VkQueue = a stream (5.9): the ordered timeline you submit work to. VkCommandBuffer = recorded launches (5.2): draw/dispatch commands recorded once and replayed on submit (and recordable from multiple threads). VkDeviceMemory = the two worlds (5.3): explicit device-local vs host-visible memory you allocate and transfer between. VkPipeline = compiled state (5.1): shaders plus fixed-function config baked into one immutable, pre-validated object. VkFence = an event (5.9), specifically GPU→CPU: the CPU waits on it to know a submission (e.g., a frame) is done. Every one is a concept you already owned; Vulkan just makes it an object.</div></details>
+<details><summary>2. Why can OpenGL not record draw commands from multiple CPU threads, and how does Vulkan fix it?</summary><div class="body">OpenGL is a single global state machine bound to one context: draw calls implicitly read and modify that shared bound state, so issuing them from multiple threads would race on the context. In practice OpenGL command submission is single-threaded, which caps how many draws a CPU-bound frame can issue. Vulkan fixes it with command buffers: each thread records its own VkCommandBuffer independently (no shared mutable global state during recording), and a single thread later submits the finished buffers to the queue. So draw-call recording parallelizes across cores — the concrete win in the scenario, turning a one-core-bound OpenGL frame into a multithreaded Vulkan one.</div></details>
+<details><summary>3. What is dynamic rendering, why was it added, and when would you still prefer a legacy renderpass?</summary><div class="body">Dynamic rendering (a Vulkan 1.3 feature, core in 1.4) lets you begin rendering with attachments specified inline via vkCmdBeginRendering, eliminating the separate VkRenderPass and VkFramebuffer objects. It was added because that up-front ceremony was mostly boilerplate for the common desktop single-pass case — hundreds of lines with little benefit. You'd still prefer a legacy renderpass on mobile/tiler GPUs, where declaring the whole pass up front lets the driver keep attachments in fast on-chip tile memory across the pass (a real bandwidth win), and for advanced multi-subpass patterns that exploit that. So: dynamic rendering for desktop simplicity, renderpasses where the tiler/subpass payoff exists.</div></details>
+<details><summary>4. Why must you sub-allocate Vulkan memory instead of calling vkAllocateMemory per resource?</summary><div class="body">Because drivers cap the total number of memory allocations (often around a few thousand), so a real scene with thousands of buffers and textures would exhaust the limit if each got its own vkAllocateMemory. The correct pattern (5.3's ownership, at scale): allocate a small number of large VkDeviceMemory blocks and sub-allocate resources within them yourself, or use a library like VMA (Vulkan Memory Allocator). It works fine in the triangle (one or two allocations) which is why beginners miss it, then it crashes when the scene grows — an ownership responsibility OpenGL handled invisibly.</div></details>
+<details><summary>5. What role do validation layers play, and what CUDA tool are they analogous to?</summary><div class="body">Validation layers are optional Vulkan layers that check your API usage at runtime and report errors — a missing barrier, a wrong image layout, a leaked object, an invalid parameter — with detailed messages, none of which the core API gives you (Vulkan defaults to undefined behavior for misuse, for speed). They're analogous to 5.4's sanitizers (compute-sanitizer/memcheck) in CUDA: a development-time correctness net you run always while writing code and disable only for shipping (they're slow). Developing Vulkan without them is like developing CUDA with sanitizers off — you're flying blind through exactly the class of bugs explicit ownership introduces (C8 covers them in depth).</div></details>
+<details><summary>6. A colleague wants to use Vulkan for a simple internal visualization tool. Is that the right call? How do you decide?</summary><div class="body">Probably not — decide by the goal, not prestige. Vulkan's payoff is predictable performance and multithreaded submission, which a simple internal tool doesn't need; its cost is ~10× the code and the ownership burden (memory, sync). For a visualization tool, OpenGL (fast to write, fine performance) or WebGPU (D5 — cross-platform, even simpler, runs in a browser) will ship far faster with adequate performance. Reserve Vulkan for when you're CPU-bound on draw submission, need multicore command recording, or need vendor-consistent predictable frame times (a shipping game engine, the scenario). It's D1's ladder in graphics: pick the rung that matches the constraint, and "simple tool" points down the ladder.</div></details>
+<details><summary>7. The interview closer: "You're a compute/CUDA engineer moving to graphics. How do you approach learning Vulkan, and what's genuinely new?" Deliver the spoken skeleton.</summary><div class="body">"I'd refuse to treat it as a thousand new concepts, because it isn't — Vulkan's object model maps almost one-to-one onto the CUDA model I already have. A VkQueue is a stream, a command buffer is recorded launches that I can now build on multiple threads, device memory and heaps are the two host/device worlds, a pipeline is compiled state, and semaphores and fences are events. So I'd learn it by writing that mapping down as I build a triangle — ideally with dynamic rendering, which is core in Vulkan 1.4 and removes the old renderpass boilerplate — turning a pile of vkCreate calls into 'my Module 5 model, typed out.' What's genuinely new is ownership: OpenGL and CUDA-runtime made memory and synchronization decisions for me, and Vulkan hands them over, so I now sub-allocate memory from big blocks instead of per-resource, I declare every image layout transition and hazard myself, and a barrier I forget is a real race — which is exactly why I'd never develop without the validation layers on, since they're the sanitizer for this. The reason to pay that cost is control: predictable frame times and multithreaded command recording that OpenGL's single global context can't give — I'd port when I'm CPU-bound on draw submission. So my approach is: map the objects to concepts I own, lean on validation layers for the new ownership discipline, and use Vulkan only where its control actually pays off.' Framing it as 'my compute model made explicit, plus one new discipline' is the answer that shows I'll ramp fast rather than drown."</div></details>
+
+<div class="pager">
+  <a href="lesson-02.html">← The Rasterization Pipeline</a>
+  <a href="lesson-04.html">Next: GLSL Shaders Deep Dive →</a>
+</div>
+<div class="footer">GPU Mastery · Track C · Lesson 3 — works offline · progress saved in your browser</div>
+</div>
+<script src="../assets/diagramsC.js"></script>
+<script src="../assets/app.js"></script>
+</body>
+</html>

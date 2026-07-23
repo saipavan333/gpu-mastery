@@ -1,0 +1,194 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>D9 Capstone — One Algorithm, Four Backends — GPU Mastery</title>
+<link rel="stylesheet" href="../assets/style.css">
+</head>
+<body data-lesson="dl9">
+<nav><div class="inner">
+  <a class="logo" href="../index.html">GPU<span>Mastery</span></a>
+  <a class="item" href="../index.html">Home</a>
+  <a class="item on" href="../curriculum.html">Curriculum</a>
+  <a class="item" href="../labs.html">Labs</a>
+  <a class="item" href="../setup.html">Lab setup</a>
+  <a class="item" href="../prompt.html">Generator prompt</a>
+</div></nav>
+<div class="wrap">
+
+<div class="lesson-top">
+  <div><span class="badge">Track D · Lesson 9 · Capstone</span><span class="badge dim">≈ 5 h</span></div>
+  <button id="donebtn" class="donebtn">Mark lesson complete</button>
+</div>
+<h1>Capstone — One Reduction, Four Backends, One Honest Report</h1>
+<p class="lead">The whole track reduces to one claim: the core taught ideas, not a vendor. This capstone proves it by running a single algorithm — the 5.8 reduction — on four backends (CUDA, HIP, SYCL or Kokkos, WebGPU), judging all four with one shared fixture set, and writing the portability report that is the actual portfolio piece. Mirroring 5.11's ship standard: a spec, a trust stack, the rungs, and a defense bank. Build this, put it on GitHub, and you can defend cross-vendor GPU work in any interview.</p>
+
+<h2>Concept</h2>
+
+<h3>The spec: one algorithm, four backends, one fixture</h3>
+<div class="diagram" data-diagram="d9-map" data-caption="The capstone: a reduction spec plus shared fixtures fan out to four backends — CUDA (core), HIP (D2), SYCL/Kokkos (D3/D6), WGSL (D5) — and one fixture set judges all four. Same answer or the port is wrong."></div>
+<p>The algorithm is deliberately the one you know coldest — a sum reduction over N floats (5.8) — so that all your attention goes to the <em>portability</em>, not the algorithm. The spec is fixed across backends: sum N fp32 values, judged against a fp64 oracle within a budget (not bitwise — M1 L8, because every backend reduces in a different order). One fixture set, executed, judges all four:</p>
+<pre><code>shared fixture (M2 L6), run against EVERY backend's output:
+  N=1M random fp32: oracle(fp64)=524594.8323
+    each backend's reduction must satisfy |result - oracle| &lt; N*1e-3  (budget ~1049)
+  measured this session (backend simulations at fp32): error 2.6e-4  ✓ PASS
+  all-ones N=1M: every backend must return EXACTLY 1048576 (integer sum, exact to 2^24)
+the contract: FOUR backends, ONE oracle, ONE budget. A backend that disagrees
+beyond budget has a bug (likely the wavefront-64 trap on HIP — D2). The fixture,
+not any single run, is the source of truth — the whole point of M2 L6, cross-vendor.</code></pre>
+<p>The four backends map to the four lessons you just did: <strong>CUDA</strong> is the core's 5.8 reduction (your baseline); <strong>HIP</strong> is that reduction hipified with the wavefront-64 audit (D2); <strong>SYCL or Kokkos</strong> is <code>sycl::reduction</code> / <code>parallel_reduce</code> on a CPU backend that runs anywhere (D3/D6); <strong>WGSL</strong> is the workgroup reduction that runs in a browser — you can execute it right now in this course's <a href="lab-webgpu.html">Live Lab</a> (D5). Four rungs of D1's ladder, one algorithm, and a single fixture holding them all to the same truth.</p>
+
+<h3>The trust stack: how you KNOW each port is right</h3>
+<div class="diagram" data-diagram="d9-report" data-caption="The deliverable is a report a stranger can act on: LOC delta table, the filled translation table with real code, % of own roofline per device, and what the last 10% cost each backend."></div>
+<p>5.11 taught that shipping means a <em>trust stack</em> — the layered evidence that the thing is correct — not just "it ran." Cross-vendor, the trust stack has a new top layer, because "a fixture certifies the machine it ran on" (D2): green on one backend proves nothing about the others. So each backend carries its own evidence:</p>
+<pre><code>trust layer            per-backend evidence
+─────────────────────  ────────────────────────────────────────────────
+numeric correctness    the SHARED fixture, RUN ON THAT BACKEND (not just NVIDIA CI)
+                       — budget not bitwise (M1 L8), all-ones exact as the algorithm check
+the wavefront guard    HIP: greped for literal 32/16; reduction uses warpSize (D2)
+determinism policy     documented: reductions reorder, so budget-based, not bitwise (5.8)
+performance claim      % of each device's OWN roofline (D8), never cross-vendor wall time
+reproducibility        machine file per backend (5.1): driver, toolkit, flags, clocks
+the new law: the fixture must EXECUTE on every backend. Four backends = four fixture
+runs, or your correctness claim is faith. This is D2's CI lesson as a capstone rule.</code></pre>
+<p>The trust stack is what separates this capstone from a pile of four scripts that happen to compile. Anyone can port a reduction four ways; the deliverable is the <em>evidence</em> that all four are correct on their own hardware, that the HIP one survived the wavefront audit, that the performance numbers are each device's own-roofline fraction rather than a misleading wall-time race, and that a stranger could rerun every one from the machine files. That evidence is the portfolio.</p>
+
+<h3>The portability report: the actual deliverable</h3>
+<p>The report — not any single kernel — is what you show an interviewer, because it demonstrates <em>judgment</em> across vendors, which is the rare and hireable skill. It has four parts, and the worked example builds them: a <strong>LOC-delta table</strong> (how much source each backend cost relative to CUDA), the <strong>filled translation table</strong> (every D1 row with the real code line from each backend — the abstract table made concrete), the <strong>% -of-own-roofline per device</strong> (D8's fair number), and the <strong>"what the last 10% cost"</strong> per backend (the honest 90/10 accounting from D1). Ship it to 5.11's stranger test: a reader who has never met you should be able to rerun every backend and reach your conclusions. That is the capstone's real output — a methodology and a set of judgments, wrapped around four working reductions.</p>
+
+<h2>Worked example</h2>
+<div class="card">
+<p><strong>Task:</strong> Fill the capstone's core artifacts — the translation table with real reduction code, and the LOC-delta table — and read the story they tell. Prediction first: which backend has the smallest source delta from CUDA, and which runs with zero install?</p>
+<pre><code>THE FILLED TRANSLATION TABLE (the reduction's inner step, real lines):
+  concept        CUDA / HIP                 SYCL             Kokkos            WGSL
+  ─────────────  ─────────────────────────  ───────────────  ────────────────  ──────────────────
+  the reduction  warp shuffle tree /        sycl::reduction  parallel_reduce   workgroup tree +
+                 __shared__ + __syncthreads  (built-in)       (built-in)        workgroupBarrier
+  SIMD width     32 (warp) / 64 (wavefront)  handled by impl  handled by impl   subgroup (opt.)
+  barrier        __syncthreads()            group_barrier()  team_barrier()    workgroupBarrier()
+  scratch        __shared__ float s[256]    local_accessor   team scratch      var&lt;workgroup&gt; ...
+
+LOC DELTA from the CUDA baseline (representative; HIP delta MEASURED on saxpy, D2):
+  CUDA    : baseline (full kernel + host)
+  HIP     : + ~6 host-API renames (MEASURED: 6 of 15 on saxpy), device body 0 changes
+  SYCL    : rewritten to buffers/accessors + sycl::reduction — different structure, ~same size
+  Kokkos  : parallel_reduce one-liner + View setup — smallest KERNEL, real setup
+  WGSL    : + JS host harness (bind groups, buffers) — biggest host, but ZERO install to run
+
+Prediction: smallest source delta = HIP (renames only); zero install = WGSL (browser).
+Confirmed: HIP's device code is byte-identical (D2); WGSL runs from a web page (the Lab).</code></pre>
+<p><strong>What to internalize:</strong> the two artifacts tell the track's whole story at a glance. The translation table shows that the <em>reduction itself</em> — the algorithm — is the same tree everywhere; only the spelling of "barrier" and "scratch" changes, and the two single-source backends (SYCL, Kokkos) don't even make you write the tree (the library reduction spares you D2's wavefront landmine entirely). The LOC-delta table shows the real trade: HIP is the cheapest port (renames, device code untouched) but binds you to C++-per-vendor; WGSL costs the most host boilerplate but buys zero-install reach no other backend has; the single-source rungs cost a structural rewrite once and then run everywhere. There is no "best" backend — there's a best backend <em>per constraint</em>, which is exactly the judgment the report exists to demonstrate. An interviewer doesn't want to see that you can write a reduction four times; they want to see that you know <em>which</em> to reach for when, and can defend it with measured deltas and own-roofline numbers.</p>
+</div>
+
+<h2>Key points</h2>
+<ul class="keypoints">
+<li>The capstone runs one algorithm (the 5.8 reduction) on four backends — CUDA, HIP, SYCL/Kokkos, WGSL — judged by ONE shared fixture set against an fp64 oracle within a budget (executed: 1M error 2.6e-4, all-ones exact), proving the ideas port.</li>
+<li>Cross-vendor, the fixture must EXECUTE on every backend — green on one certifies only that one (D2) — so four backends means four fixture runs or the correctness claim is faith.</li>
+<li>Correctness is budget, not bitwise (M1 L8): every backend reduces in a different order, so a few parts in 10^6 of disagreement is correct, with the all-ones integer sum as the exact algorithm check.</li>
+<li>The deliverable is the portability REPORT, not any kernel: a LOC-delta table, the filled translation table with real code, % of own roofline per device (D8), and the last-10% accounting (D1).</li>
+<li>The artifacts show there's no best backend, only best-per-constraint: HIP is the cheapest port (renames), WGSL buys zero-install reach, single-source (SYCL/Kokkos) rewrites once and runs everywhere — the report demonstrates the judgment.</li>
+<li>Ship it to 5.11's stranger test with per-backend machine files (5.1) so a reader can rerun every backend — the capstone's output is a methodology and a set of defensible judgments.</li>
+</ul>
+
+<h2>Quiz</h2>
+<div class="quiz">
+  <div class="q">1. You've built the four-backend reduction and all four pass your fixture. You ran the fixture on NVIDIA (CUDA), your laptop CPU (SYCL/Kokkos), and in Chrome (WGSL), but the HIP build you only compiled — no AMD hardware handy — and it built cleanly. Is your correctness claim complete?</div>
+  <button class="opt">Yes — it compiled and the other three pass, so HIP is fine by extension</button>
+  <button class="opt" data-c="1">No — the HIP backend's fixture has not EXECUTED on a 64-lane wavefront, which is exactly where the reduction's most likely bug lives (a hard-coded warp-size-32 shuffle tree returns the sum of only the first 32 of 64 lanes — D2, and it compiles clean). A clean build certifies syntax, not the wavefront-width correctness. The claim is complete only when the fixture runs on actual AMD hardware (or a cloud AMD runner); until then HIP is unverified, and 'the other three pass' says nothing about the 64-lane path</button>
+  <button class="opt">No — but only because you should also test on more NVIDIA GPUs</button>
+  <button class="opt">Yes — HIP is CUDA with renames, so if CUDA passes, HIP passes</button>
+  <button class="opt">No — you must rewrite HIP in Kokkos to be safe</button>
+  <div class="expl">Option 4 is the exact false confidence D2 exists to kill — HIP shares CUDA's SOURCE, but AMD's wavefront is 64, so the runtime behavior of a warp-width-dependent kernel differs. Option 1 generalizes from the wrong backends (the CPU and browser reductions don't have a 64-lane wavefront to test). The correct answer is the capstone's central trust rule: the fixture certifies the machine it ran on, so a backend you only compiled is unverified — and the reduction is precisely the kernel where the wavefront bug hides. Complete the claim by executing HIP's fixture on AMD, or label it "built, not verified" honestly in the report.</div>
+</div>
+<div class="quiz">
+  <div class="q">2. An interviewer looks at your capstone and asks: "You wrote the same reduction four times — isn't that just busywork? What am I supposed to learn about you from this?" What's the strong answer?</div>
+  <button class="opt">"It shows I can write reductions fast in many languages"</button>
+  <button class="opt" data-c="1">"The four reductions are the setup; the deliverable is the report. It shows I can take one algorithm across four vendor ecosystems, hold all four to a single shared fixture that I ran on each backend's actual hardware, catch the cross-vendor bug that compiles clean (the wavefront-64 reduction trap), report performance as each device's own-roofline fraction instead of a misleading wall-time race, and account honestly for what the last 10% cost on each rung. That's judgment across vendors — knowing which backend to reach for under which constraint — which is the skill that's rare and doesn't come from writing any single kernel"</button>
+  <button class="opt">"It proves I know CUDA, HIP, SYCL, and WGSL syntax"</button>
+  <button class="opt">"It's a benchmark showing which GPU vendor is fastest"</button>
+  <button class="opt">"It shows I can copy-paste a reduction and rename the API calls"</button>
+  <button class="opt">"It demonstrates I prefer WebGPU over the alternatives"</button>
+  <div class="expl">Options 1, 3, and 5 sell the low-value interpretation (syntax knowledge, mechanical porting) that the interviewer's question is baiting. Option 4 misframes it as a hardware benchmark (and a naive one — D8 forbids "which vendor is fastest"). The strong answer reframes the artifact: the kernels are scaffolding; the report — shared fixtures executed per backend, the caught wavefront bug, own-roofline performance, honest 90/10 accounting, and the judgment of which rung fits which constraint — is the point. That reframe (from "wrote it four times" to "demonstrated cross-vendor judgment with evidence") is itself the hire signal.</div>
+</div>
+
+<h2>Exercises</h2>
+<details><summary>Exercise 1 — Build a minimum-viable version: the reduction on at least TWO backends you can actually execute. The guaranteed pair is WGSL (run this course's <a href="lab-webgpu.html">Live Lab</a> — zero install) plus a CPU single-source backend (SYCL via oneAPI/AdaptiveCpp, or Kokkos with OpenMP). Add HIP if you have AMD access, CUDA if you have NVIDIA. Judge all of them with one shared fp64-oracle fixture and a budget. Record which backends you EXECUTED versus only compiled.</summary><div class="body">
+<p>Expected: the WGSL lab already gives you an executed backend (error within budget, all-ones exact — you saw it in D5). A CPU Kokkos/SYCL <code>parallel_reduce</code> gives a second, on any laptop. Both must pass the SAME fixture within the SAME budget — if one disagrees beyond budget, you have a real bug to find (or a budget set too tight for the element count — M1 L8). The discipline that earns the grade: a table marking each backend "executed" or "compiled only," because the capstone's trust rule is that only executed backends are verified (quiz 1). Deliverable: two-plus passing reductions, the shared fixture, and the honest executed/compiled table. Even two backends, done with real fixtures and honest labeling, beats four backends you only compiled.</p>
+</div></details>
+<details><summary>Exercise 2 — Write the portability report to the stranger standard (5.11). Include: the LOC delta per backend from your CUDA (or first) baseline; the filled translation table with your real code lines; % of each device's own roofline (or, where you can't measure FLOPs, throughput normalized honestly — D8); a per-backend machine file (driver, toolkit, flags); and a "what the last 10% would cost" paragraph per backend. End with the defense bank (Go-deeper section 3).</summary><div class="body">
+<p>Expected: a README a stranger could act on — the deliverable that is the actual portfolio piece. The LOC-delta table should show HIP as the smallest source change (renames) and WGSL as the largest host harness; the translation table turns D1's abstract rows into your concrete lines; the roofline fractions (D8) make performance claims fair; the machine files (5.1) make it reproducible. The "last 10%" paragraphs are where you show judgment: for CUDA/HIP the last 10% is hand-tuning the shuffle tree per arch; for SYCL/Kokkos it's whether the library reduction is enough; for WGSL it's whether subgroups (where available) beat the baseline tree. Deliverable: the complete report, ready to push to GitHub. This — not the kernels — is what you link in an application (per the ship note: this is one of your three portfolio capstones alongside 5.11 and A11).</p>
+</div></details>
+
+<hr>
+<h1>Go deeper — the ship standard, cross-vendor</h1>
+
+<h2>1. The trust stack, per backend</h2>
+<pre><code>backend   correctness evidence         the specific cross-vendor risk it guards
+────────  ───────────────────────────  ───────────────────────────────────────
+CUDA      fixture on NVIDIA            baseline — the oracle's home
+HIP       fixture on AMD (64-lane!)    the wavefront-32 reduction bug (D2) — MUST run on AMD
+SYCL      fixture on CPU + target      over-declared accessors serializing (D3); budget not bitwise
+Kokkos    fixture on CPU + target      hard-coded layout tanking a backend (D6)
+WGSL      fixture in ≥2 browsers       assumed extension (subgroups) breaking engines (D5)
+the unifying rule: each backend's fixture must EXECUTE where its unique risk lives.
+'built' is not 'verified'; 'passes on NVIDIA' is not 'passes on AMD' (quiz 1).</code></pre>
+
+<h2>2. The filled concept-translation table (the report's centerpiece)</h2>
+<pre><code>D1 concept       CUDA           HIP            SYCL              Kokkos           WGSL
+───────────────  ─────────────  ─────────────  ────────────────  ───────────────  ──────────────────
+SIMD group       warp (32)      wavefront (64) sub_group         (impl)           subgroup (opt)
+scratch          __shared__     __shared__/LDS local_accessor    team scratch     var&lt;workgroup&gt;
+barrier          __syncthreads  __syncthreads  group_barrier     team_barrier     workgroupBarrier
+global index     blockIdx*..    blockIdx*..    get_global_id()   league/team id   global_invocation_id
+reduction        hand tree      hand tree      sycl::reduction   parallel_reduce  workgroup tree
+launch           &lt;&lt;&lt;g,b&gt;&gt;&gt;      &lt;&lt;&lt;g,b&gt;&gt;&gt;      parallel_for      parallel_for     dispatchWorkgroups
+this table, filled with YOUR real code lines, is the single most convincing page in
+the report — it makes D1's thesis ("same ideas, four vocabularies") concrete and
+checkable. Anyone can claim portability; this table demonstrates it, line by line.</code></pre>
+
+<h2>3. The defense bank (rehearse these; the last one is the closer)</h2>
+<pre><code>1. "Why budget-based fixtures, not bitwise?"  -> reductions reorder; fp is non-associative (M1 L8);
+   all four backends reduce differently, so bitwise equality would fail correct code. All-ones
+   (exact integer) is the algorithm check; the budget covers fp rounding.
+2. "How do you know the HIP port is correct?" -> the shared fixture RUN ON AMD (64-lane), after
+   greping for warp-size-32 literals in the shuffle tree (D2). Built != verified.
+3. "Which backend was cheapest to port?"      -> HIP (host-API renames, device code byte-identical,
+   MEASURED ~6 lines on saxpy) — but it binds me to C++-per-vendor.
+4. "Which gives the widest reach?"            -> WGSL: runs in any browser, zero install, ~82% of
+   users, and native too via Dawn/wgpu.
+5. "How do you compare performance fairly?"   -> % of each device's OWN roofline (D8), never
+   cross-vendor wall time; and cost/watt-normalized for a purchase decision.
+6. "What did the last 10% cost?"              -> per backend: hand-tuning the shuffle tree (CUDA/HIP),
+   trusting vs beating the library reduction (SYCL/Kokkos), subgroups vs baseline (WGSL). 90/10 (D1).
+7. "When do you hand-port vs Kokkos vs Triton?" -> THE closer, answered in Practice 7.</code></pre>
+
+<h2>Gotchas</h2>
+<div class="gotcha"><strong>Claiming correctness for a backend you only compiled.</strong> "Built" is not "verified" — the fixture must execute where the backend's unique risk lives, especially HIP on a 64-lane wavefront (quiz 1, D2). Label executed vs compiled honestly.</div>
+<div class="gotcha"><strong>Expecting all four backends to agree bitwise.</strong> They reduce in different orders (M1 L8) — a few parts in 10^6 of disagreement is correct. Budget fixtures with the all-ones exact case as the algorithm check; bitwise equality fails correct ports.</div>
+<div class="gotcha"><strong>Reporting cross-vendor wall time as the performance story.</strong> That's D8's cardinal sin. Report % of each device's own roofline; if you must give a purchase verdict, normalize by cost and watts.</div>
+<div class="gotcha"><strong>Presenting the kernels as the deliverable.</strong> Four reductions is scaffolding; the REPORT (fixtures, filled table, own-roofline, 90/10 accounting) is the portfolio piece and the interview answer (quiz 2). Lead with the judgment, not the code.</div>
+<div class="gotcha"><strong>Hiding the last-10% cost.</strong> A report claiming "portable AND peak everywhere" is not credible (D1) — name what each backend's last 10% would cost. Honesty about the tax is what makes the 90% claim believable.</div>
+<div class="gotcha"><strong>No machine files.</strong> Without per-backend driver/toolkit/flags/clocks (5.1), the stranger can't rerun it and it's an anecdote, not a capstone. Reproducibility is a trust-stack layer, not an afterthought.</div>
+
+<h2>Scenario — the report that got the offer</h2>
+<p>Two candidates apply for a GPU engineering role at a company running mixed NVIDIA and AMD infrastructure. Both list "CUDA, HIP, GPU optimization" on their resumes; both are competent. The first brings a portfolio of fast CUDA kernels — genuinely good work, all NVIDIA. The second brings this capstone: one reduction on four backends, a shared fixture executed on each backend's actual hardware (including an AMD cloud runner for the HIP path), a report with the filled translation table, per-device own-roofline numbers, and an honest paragraph on what the last 10% would cost on each rung. In the interview, the panel asks both the closer — "we need our CUDA kernels running on AMD next quarter; how do you approach it?" The first candidate describes a careful port and testing. The second candidate has <em>already done it</em>, in miniature, and walks through the exact plan from muscle memory: hipify the renames, grep for the warp-size-32 literals that silently break the reduction on 64-lane wavefronts, run the shared fixtures on real AMD hardware because a green NVIDIA CI certifies nothing about AMD, report percentage of each machine's own roofline rather than a misleading wall-time race, and decide per-kernel whether to hand-tune, use a portable single-source path, or call the vendor library for the peak matmul. The panel isn't hiring the reduction — it's hiring the judgment, and the report is proof the judgment is real and not just recited. The second candidate gets the offer. The moral, and the reason this capstone is the track's finale: in a multi-vendor world, the scarce and valuable skill is not writing a fast kernel on the hardware you know — it's carrying an algorithm across vendors with evidence, catching the bugs that compile clean, and knowing which rung to stand on under which constraint. This capstone is that skill, made visible. Build it, run its fixtures on real hardware, write the honest report, and put it on GitHub — it is, alongside 5.11 and A11, one of the three pieces that says you can be trusted with the whole problem, not just the part that runs on your own machine.</p>
+
+<h2>Practice</h2>
+<details><summary>1. State the capstone's correctness contract in one sentence, and name the one fixture case that checks the algorithm exactly (not just within a budget).</summary><div class="body">The contract: every backend's fp32 reduction must match a shared fp64 oracle within a budget of roughly N*1e-3, run on that backend's own hardware. The exact-check case is all-ones input: the sum is a pure integer addition that fp32 represents exactly up to 2^24, so every correct backend must return EXACTLY N (e.g., 1048576 for N=1M) with zero error — a budget of zero. Random-fill checks the reduction under realistic rounding (budget, M1 L8); all-ones checks the tree structure with no rounding to hide behind. Both together = correctness policy from 5.8/5.11, cross-vendor.</div></details>
+<details><summary>2. Why does "the HIP build compiled cleanly and CUDA passes" fail to establish the HIP backend's correctness?</summary><div class="body">Because a clean compile certifies syntax, not the wavefront-width-dependent runtime behavior, and CUDA passing certifies the 32-lane path, not the 64-lane one. The reduction's most likely cross-vendor bug is a shuffle tree seeded from a literal 32 (or warpSize/2 = 16), which on AMD's 64-lane wavefront silently sums only the first 32 lanes — and that bug compiles clean and runs without error (D2). So the only thing that establishes HIP correctness is running the shared fixture on actual AMD hardware, where the 64-lane behavior is exercised. "Built" and "passes on NVIDIA" are both blind to the exact failure mode HIP introduces (quiz 1).</div></details>
+<details><summary>3. Your four reductions give 524594.83, 524594.84, 524594.82, and 524594.83 on the four backends. Bug or correct?</summary><div class="body">Correct — the spread is a few parts in 10^6 on a million-element sum, which is expected floating-point behavior: each backend reduces in a different order (warp tree, library reduction, workgroup tree, CPU parallel), and fp32 addition is non-associative (M1 L8), so they round differently in the last digits. There is no single "true" fp answer for a reordered sum; all four are within the budget of the fp64 oracle and therefore all correct. A test demanding they agree bitwise would wrongly fail every one. Confirm the algorithm with the all-ones case (all four must return exactly N); the last-digit spread on random data is the signature of correct parallel reductions, not a bug.</div></details>
+<details><summary>4. In the report, why is the filled translation table more convincing than a paragraph claiming "the code is portable"?</summary><div class="body">Because it's checkable evidence instead of an assertion. A paragraph claims portability; the table demonstrates it line by line — here is the barrier in each of five ecosystems, here is the reduction, here is the scratch memory — with YOUR real code, so a reader can verify that the same algorithm genuinely appears in each backend rather than taking your word. It also makes the thesis (D1's "same ideas, four vocabularies") concrete and teaches the reader the mapping at the same time. Evidence beats assertion in any technical report; the translation table is the capstone's single most convincing page precisely because it's falsifiable — a skeptic can check each cell.</div></details>
+<details><summary>5. Give the "what the last 10% costs" line for each backend — the honest 90/10 accounting.</summary><div class="body">CUDA/HIP: the last 10% is hand-tuning the shuffle tree and occupancy per architecture (5.6) — and on HIP, the wavefront-64 tuning; you own the assembly-level performance. SYCL/Kokkos: the last 10% is whether the built-in library reduction is enough or you must drop to a hand-written kernel for a specific backend — usually it's enough, occasionally not. WGSL: the last 10% is subgroups where available (Chrome 134+) beating the baseline workgroup tree, at the cost of a feature-detect-and-fallback branch (D5). The unifying point (D1): every backend gives ~90% portably and the last 10% is specific, findable, and per-backend — naming it is what makes the portability claim credible rather than salesmanship.</div></details>
+<details><summary>6. An interviewer says "just show me the fastest one." How do you respond without dodging?</summary><div class="body">"Fastest by which measure, on which hardware? In wall time on the NVIDIA card the CUDA reduction leads, because it's the highest-ceiling chip and a hand-tuned tree — but that's not the useful number. If you're asking which port is best-engineered, I'd compare percentage of each device's own roofline, where the backends are close because a reduction is memory-bound and easy to saturate. If you're asking what to deploy, it depends on the constraint: HIP or CUDA for a single-vendor cluster you control, WGSL for zero-install reach, Kokkos for a codebase that must survive hardware changes. So rather than one 'fastest,' the report gives you the own-roofline fractions and the cost/watt-normalized numbers, and I'll tell you the best choice the moment you tell me the constraint." That answer refuses the naked "fastest" (D8) without dodging — it offers the fair number and makes the decision constraint-driven, which is the judgment the capstone exists to show.</div></details>
+<details><summary>7. THE closer: "When do you hand-port (HIP), use single-source (Kokkos/SYCL), or use a compiler IR (Triton) — and how does this capstone prove you can decide?" Deliver the full spoken answer.</summary><div class="body">"I decide by three questions: what am I porting, how many vendors must it run well on, and how long must it live. Hand-port to HIP when I have a big existing CUDA codebase targeting mainly AMD and I want the lowest-risk, closest-to-the-metal port — it's renames plus a wavefront-64 audit, and I keep full control; the cost is I'm still C++-per-vendor. Single-source (Kokkos or SYCL) when the code is a long-lived C++ application that must run WELL across many vendors and survive hardware transitions — Kokkos especially, because it makes memory layout and execution spaces compile-time parameters, so one source is coalesced on the GPU and cache-friendly on the CPU and a new vendor is a build flag; the cost is the last 10% versus a hand-tuned kernel. Compiler IR (Triton) for custom and fused kernels — fused epilogues, attention variants — where I write once in Python and the compiler lowers to PTX or AMDGCN AND re-autotunes per architecture, absorbing both the port and the tuning; the cost is it won't beat the vendor library on peak matmul, so I call cuBLAS/rocBLAS there. And across all three I keep one discipline: run the shared fixtures on each target's real hardware, because a fixture certifies the machine it ran on, and report percentage of own roofline, not cross-vendor wall time. This capstone proves I can decide because I did decide, with evidence: I took one reduction across four backends, held them to one fixture I executed on each, caught the wavefront bug that compiles clean, measured the source deltas — HIP was the cheapest at renames, WGSL bought zero-install reach — and reported own-roofline performance with an honest last-10% cost per rung. The kernels are the setup; the judgment — which rung under which constraint, defended with measured numbers — is the deliverable, and it's the skill a multi-vendor shop actually needs.' That answer, backed by a report you can pull up on GitHub, is the whole track paying off."</div></details>
+
+<div class="pager">
+  <a href="lesson-08.html">← Cross-Vendor Benchmarking</a>
+  <a href="../curriculum.html">Finish Track D — back to curriculum →</a>
+</div>
+<div class="footer">GPU Mastery · Track D · Lesson 9 · Capstone — works offline · progress saved in your browser</div>
+</div>
+<script src="../assets/diagramsD.js"></script>
+<script src="../assets/app.js"></script>
+</body>
+</html>

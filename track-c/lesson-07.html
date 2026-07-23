@@ -1,0 +1,160 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>C7 Compute Shaders — GPU Mastery</title>
+<link rel="stylesheet" href="../assets/style.css">
+</head>
+<body data-lesson="cl7">
+<nav><div class="inner">
+  <a class="logo" href="../index.html">GPU<span>Mastery</span></a>
+  <a class="item" href="../index.html">Home</a>
+  <a class="item on" href="../curriculum.html">Curriculum</a>
+  <a class="item" href="../labs.html">Labs</a>
+  <a class="item" href="../setup.html">Lab setup</a>
+  <a class="item" href="../prompt.html">Generator prompt</a>
+</div></nav>
+<div class="wrap">
+
+<div class="lesson-top">
+  <div><span class="badge">Track C · Lesson 7</span><span class="badge dim">≈ 3 h</span></div>
+  <button id="donebtn" class="donebtn">Mark lesson complete</button>
+</div>
+<h1>Compute Shaders — the reunion, where the core comes home</h1>
+<p class="lead">This is the lesson where graphics and everything you learned in Module 5 turn out to be the same thing. A GLSL compute shader has workgroups (blocks), shared memory, barriers, and subgroups (warps) — you can write the 5.8 reduction in it almost verbatim, and feel the déjà vu. That's the point: the core was never CUDA, it was the GPU. Today: compute shaders in the graphics pipeline, and the post-processing and simulation work they unlock.</p>
+
+<p class="small dim">Lab note: compute shaders run on any GPU (Vulkan/GL/WebGPU). The reduction you'll recognize from 5.8 and D5; the separable-blur arithmetic (below) is verifiable by hand. The concepts transfer wholesale — that's the lesson.</p>
+
+<h2>Concept</h2>
+
+<h3>The reunion: every core idea, in GLSL</h3>
+<div class="diagram" data-diagram="c7-compute" data-caption="A GLSL compute shader maps one-to-one onto the CUDA model: local_size = blockDim, gl_GlobalInvocationID = the global index, shared = __shared__, barrier() = __syncthreads(), subgroups = warps."></div>
+<p>A compute shader is a general-purpose GPU kernel that lives inside the graphics API, outside the rasterization pipeline. Its vocabulary is Module 5 with GLSL spelling: <code>layout(local_size_x=256)</code> is your block dimension (5.2); <code>gl_GlobalInvocationID</code> is the <code>blockIdx*blockDim+threadIdx</code> global index; <code>shared float s[256]</code> is <code>__shared__</code> memory (5.5); <code>barrier()</code> is <code>__syncthreads()</code> (5.5); and subgroup operations (the KHR extension) are warp shuffles (5.8). Write the 5.8 reduction — grid-stride load, tree-reduce in shared memory with a barrier, one partial per workgroup — and it's the same code you wrote in CUDA and ran in the browser (D5), with the identifiers renamed. This isn't a coincidence; it's the whole thesis of the course landing at once: the primitives (blocks, tiles, barriers, coalescing, reductions) are properties of the hardware, not of NVIDIA's API. Graphics just gave them different names. Everything you learned about occupancy (5.6), coalescing (5.7), and reductions (5.8) applies unchanged to compute shaders — which is why a graphics programmer who knows compute is far more powerful than one who only knows the raster pipeline.</p>
+
+<h3>Compute in the frame: post-processing and simulation</h3>
+<div class="diagram" data-diagram="c7-separable" data-caption="A separable blur turns an N×N kernel (N² taps) into two 1D passes (2N taps) — for a 9×9 blur, 18 taps instead of 81, a 4.5× reduction — because a Gaussian factors into G(x)·G(y)."></div>
+<p>Compute shaders do the work that doesn't fit the triangle pipeline: post-processing (blur, bloom, tone-mapping, SSAO), particle simulation, GPU-driven culling, and increasingly the whole modern renderer's guts. The canonical example is a <strong>separable blur</strong>. A naive 2D blur reads an N×N neighborhood per pixel — N² texture taps. But a Gaussian is <em>separable</em>: <code>G(x,y) = G(x)·G(y)</code>, so you can blur horizontally (N taps) into a temp buffer, then blur that vertically (N taps) — <strong>2N taps</strong> total. Executed arithmetic:</p>
+<pre><code>9×9 blur:  naive = 9² = 81 taps/pixel;  separable = 9 + 9 = 18 taps/pixel  → 4.5× less
+21×21 blur: naive = 441;  separable = 42  → 10.5× less (the win grows with radius)
+this is free algebra: the separability of the Gaussian turns an O(N²) cost into O(N),
+which is why every real blur/bloom is two 1D passes, and why it's a compute-shader job
+(intermediate buffer, bandwidth-bound, 4.6 — exactly the citizens compute handles well).</code></pre>
+<p>Particle systems and GPU-driven culling follow the same pattern: thousands of independent updates (5.2's grid), reductions and scans (5.8) to compact visible objects, all in compute, feeding the raster pipeline. Modern engines are increasingly "compute-first" — the GPU decides what to draw (culling, LOD selection) in compute, then draws it — which is why compute fluency is now core graphics skill, not a side topic.</p>
+
+<h2>Worked example</h2>
+<div class="card">
+<p><strong>Task:</strong> Decide how to implement a large-radius bloom blur and quantify the win from separability. Prediction first: for a 25×25 Gaussian blur on a 1080p image, how many texture taps does the naive 2D version cost versus separable, and what does that ratio do to feasibility?</p>
+<pre><code>25×25 Gaussian blur on 1920×1080 ≈ 2.07M pixels:
+  naive 2D:   25² = 625 taps/pixel × 2.07M ≈ 1.30 billion taps
+  separable:  25 + 25 = 50 taps/pixel × 2.07M × (2 passes) ≈ 207 million taps
+  ratio: 625 / 50 = 12.5× fewer taps (and the separable version is bandwidth-bound
+    on a small intermediate, 4.6 — cache-friendly, unlike the scattered 2D gather)
+Prediction: the naive version is ~12.5× more work and likely too slow for a frame
+  budget (C11); separable makes a large-radius blur affordable. Result: confirmed —
+  separability is the difference between "bloom in budget" and "bloom cut from the game."</code></pre>
+<p><strong>What to internalize:</strong> the separable trick is a perfect microcosm of compute-shader thinking: a mathematical property of the operation (the Gaussian factors) turns an O(N²) algorithm into two O(N) passes, and the ratio grows with radius — 4.5× at 9×9, 12.5× at 25×25, over 20× at large blur sizes. That's not a micro-optimization; it's the difference between a feature shipping or being cut. And notice what made it a compute job rather than a fragment-shader job: it needs an intermediate buffer (blur horizontally, store, blur vertically), it's bandwidth-bound on that buffer (4.6), and it benefits from shared-memory tiling to reuse neighbor reads (5.5) — all the compute tools from Module 5. This is why the reunion matters practically, not just philosophically: the moment you see a post-processing or simulation task, you reach for the compute toolkit — tiling, reductions, scans, separability — that you already own from the core. Graphics didn't give you new tools here; it gave you new places to use the ones you have.</p>
+</div>
+
+<h2>Key points</h2>
+<ul class="keypoints">
+<li>A GLSL compute shader maps one-to-one onto the CUDA model: local_size = blockDim (5.2), gl_GlobalInvocationID = the global index, shared = __shared__ (5.5), barrier() = __syncthreads(), subgroups = warps (5.8).</li>
+<li>The 5.8 reduction ports to a compute shader almost verbatim — the déjà vu is the course's thesis: the primitives are the hardware's, not NVIDIA's, so occupancy/coalescing/reductions all transfer.</li>
+<li>Compute shaders do the work outside the triangle pipeline: post-processing, particle simulation, GPU-driven culling, and increasingly the whole modern renderer.</li>
+<li>A separable blur turns an N×N kernel (N² taps) into two 1D passes (2N taps) because a Gaussian factors — executed: 9×9 → 18 vs 81 (4.5×), 25×25 → 50 vs 625 (12.5×), the win growing with radius.</li>
+<li>Separable/tiled post-processing is bandwidth-bound on intermediate buffers (4.6) and benefits from shared-memory reuse (5.5) — the compute toolkit from Module 5, applied.</li>
+<li>Modern engines are compute-first (the GPU culls and selects LODs in compute, then draws), so compute fluency is core graphics skill, not a side topic.</li>
+</ul>
+
+<h2>Quiz</h2>
+<div class="quiz">
+  <div class="q">1. A graphics programmer says "I don't know compute shaders, I only do the rendering pipeline — I'd have to learn a whole new model to add a blur." A colleague who took the core course disagrees. Why?</div>
+  <button class="opt">The colleague is wrong; compute is genuinely a separate skill set</button>
+  <button class="opt" data-c="1">A GLSL compute shader IS the CUDA/GPU model the core taught, renamed: local_size is blockDim, gl_GlobalInvocationID is the global index, shared is __shared__, barrier() is __syncthreads(), subgroups are warps. So anyone who learned the core reduction, tiling, and occupancy already knows compute shaders — they'd write the blur with the exact tools (shared-memory tiling, separability) from Module 5. It's not a new model; it's the same model with graphics-API spelling, which is the whole point of the reunion</button>
+  <button class="opt">Blurs don't need compute shaders; do it all in the fragment shader</button>
+  <button class="opt">Compute shaders are only for physics, not image processing</button>
+  <button class="opt">The colleague means the programmer should just use a library</button>
+  <div class="expl">Option 3 is partly true (small blurs can be fragment-shader passes) but misses the point and is wrong for large separable blurs with intermediates. Option 4 is false (compute does post-processing constantly). The correct answer is the reunion thesis: compute shaders are the Module 5 model with renamed keywords, so the core course already taught them. A programmer who knows the 5.8 reduction and 5.5 tiling can write a compute blur immediately — the "whole new model" fear is exactly the misconception this lesson dissolves. Graphics and compute converge on the same hardware primitives.</div>
+</div>
+<div class="quiz">
+  <div class="q">2. A team implements a 21×21 Gaussian bloom as a single fragment-shader pass reading the full 21×21 neighborhood per pixel, and it's too slow. Before writing any GPU code, what's the algorithmic fix and how much does it save?</div>
+  <button class="opt">Reduce the blur to 5×5; the radius is too large</button>
+  <button class="opt" data-c="1">Make it separable: a Gaussian factors as G(x)·G(y), so replace the one 21×21 pass (441 taps/pixel) with two 1D passes — horizontal then vertical, 21+21 = 42 taps/pixel — a ~10.5× reduction in taps, done in two compute (or fragment) passes with an intermediate buffer. The algorithm changes from O(N²) to O(N) in the radius for free, from a mathematical property, before any low-level optimization. That's the difference between the bloom fitting the frame budget or not</button>
+  <button class="opt">Move it to the vertex shader to run fewer times</button>
+  <button class="opt">Increase the resolution so each tap covers more area</button>
+  <div class="expl">Option 1 sacrifices the visual (a smaller blur is a different look) to work around an algorithmic inefficiency. Options 3/4 are nonsensical for a per-pixel image filter. The correct answer is the separability win: the biggest speedups come from algorithm, not micro-optimization, and a Gaussian's separability turns 441 taps into 42 (10.5×) with no quality loss. This is the worked example — reach for the mathematical property (separable kernel) before touching the GPU code, exactly the compute-first thinking the core built.</div>
+</div>
+
+<h2>Exercises</h2>
+<details><summary>Exercise 1 — Write the 5.8 reduction as a GLSL (or WGSL, reusing D5's lab) compute shader and confirm it's the same algorithm you wrote in CUDA: grid-stride load, shared-memory tree reduction with barrier(), one partial per workgroup. Run it if you have a GPU; otherwise diff it line-by-line against the D5 WGSL version and the 5.8 CUDA version.</summary><div class="body">
+<p>Expected: the three versions (CUDA, WGSL, GLSL) are structurally identical — the only differences are keyword spelling (__shared__/var&lt;workgroup&gt;/shared; __syncthreads/workgroupBarrier/barrier). This IS the reunion: you already wrote this reduction twice, and the graphics version is the third spelling of the same thing. Deliverable: the GLSL compute reduction and a three-column diff against the CUDA and WGSL versions showing that only the vocabulary changed. Feeling that the core transfers wholesale — that occupancy, tiling, and reductions are the GPU's, not one vendor's — is the point of the exercise and the payoff of the whole course.</p>
+</div></details>
+<details><summary>Exercise 2 — Implement a separable Gaussian blur (two 1D compute passes with an intermediate buffer) and compare its cost to a naive 2D blur for radii 3, 7, and 11. Verify the tap-count ratios (N² vs 2N) and, if on a GPU, the timing. Then add shared-memory tiling to the 1D passes and reason about the extra reuse.</summary><div class="body">
+<p>Expected: tap ratios of 9/6=1.5× (r=3, N=7... use N=2r+1), 49/14=3.5× (N=7), 121/22=5.5× (N=11) — the separable win grows with radius (executed pattern: 81/18=4.5× at N=9). Shared-memory tiling on each 1D pass lets a workgroup load its row/column of pixels once into shared memory and have all threads read neighbors from there (5.5), cutting redundant global texture reads — the same tiling win as the 5.5 stencil. Deliverable: the tap-ratio table, timings if available, and a note on how tiling reduces the 1D passes' bandwidth (4.6). This connects three core lessons (5.5 tiling, 5.8 structure, 4.6 bandwidth) to a real post-processing effect.</p>
+</div></details>
+
+<hr>
+<h1>Go deeper — compute in the modern renderer</h1>
+
+<h2>1. Where compute shaders sit</h2>
+<pre><code>compute shaders run OUTSIDE the raster pipeline, dispatched like a CUDA kernel:
+  vkCmdDispatch(groupsX, groupsY, groupsZ)  ≈  kernel&lt;&lt;&lt;grid, block&gt;&gt;&gt;()  (5.2)
+they read/write buffers and images (storage images), then a barrier (C8) makes
+their output visible to the next pass (raster or another compute).
+uses across a frame:
+  · post-processing: blur, bloom, tone-map, SSAO, TAA (all compute now)
+  · simulation: particles, cloth, fluids, hair (thousands of independent updates)
+  · GPU-driven rendering: cull + LOD-select + build draw lists ON the GPU (5.8 scans)
+the trend: the CPU used to decide what to draw; now compute does, and the raster
+pipeline just executes the GPU's decisions. Compute is the renderer's brain.</code></pre>
+
+<h2>2. The compute toolkit is the core toolkit</h2>
+<pre><code>graphics compute task          the core lesson it IS
+─────────────────────────────  ────────────────────────────
+blur / bloom (separable)       5.5 tiling + 4.6 bandwidth + the separability algebra
+histogram (tone-map, exposure) 5.8 privatize-then-merge (per-workgroup, then combine)
+GPU culling (compact visible)  5.8 scan/stream-compaction
+particle update                5.2 grid of independent work
+reduction (auto-exposure avg)  5.8 reduction, verbatim
+occupancy tuning of a pass      5.6 the dial, unchanged
+nothing here is new. The graphics programmer who knows the core reaches for these
+immediately; the one who only knows raster reinvents them badly or gives up.</code></pre>
+
+<h2>3. Subgroups: warps in graphics</h2>
+<pre><code>subgroup operations (VK_KHR_shader_subgroup / GL_KHR_shader_subgroup) = warp intrinsics:
+  subgroupAdd/Min/Max/Ballot ≈ warp shuffle reductions (5.8) — cross-lane without shared memory
+  a subgroup = a warp (32, NVIDIA) or wavefront (64, AMD) — and YES, the D2 wavefront-64
+    trap applies here too: a subgroup-size assumption breaks across vendors (Track D lands
+    in graphics). Query gl_SubgroupSize; don't hardcode 32.
+faster reductions/scans in compute, same portability caveat as Track D. The whole
+course converges: warps, wavefronts, subgroups — one idea, three names (D1's table).</code></pre>
+
+<h2>Gotchas</h2>
+<div class="gotcha"><strong>Reinventing reductions/scans instead of recognizing them.</strong> Auto-exposure is a reduction (5.8), GPU culling is a scan (5.8) — the core already taught these. Reach for the known primitive, don't hand-roll a slow version.</div>
+<div class="gotcha"><strong>Naive 2D blur instead of separable.</strong> An N×N blur is N² taps; separable is 2N (executed: 81→18 at 9×9). Always separate a separable kernel before optimizing anything else — it's a free O(N²)→O(N) win.</div>
+<div class="gotcha"><strong>Forgetting the barrier between compute and its consumer.</strong> A compute pass that writes an image the next pass reads needs a pipeline barrier (C8) — miss it and the reader sees stale/partial data (5.4's race, graphics edition). The output isn't visible until you synchronize.</div>
+<div class="gotcha"><strong>Hardcoding subgroup size 32.</strong> Subgroups are 32 (NVIDIA) or 64 (AMD) — the D2 wavefront trap in graphics. Query gl_SubgroupSize; a hardcoded 32 gives wrong reductions on AMD, silently.</div>
+<div class="gotcha"><strong>Mismatched workgroup size and shared array.</strong> local_size must match the shared-memory array and the reduction's stride (the D5 lab's trap, C-side) — change one, change all, or the tree reads garbage.</div>
+<div class="gotcha"><strong>Ignoring occupancy on compute passes.</strong> A compute pass has the same occupancy dial as any kernel (5.6): too much shared memory or too many registers per workgroup starves parallelism. Profile it like a kernel (C10), because it is one.</div>
+
+<h2>Scenario — the effect that shipped because the core transferred</h2>
+<p>A graphics programmer who came up through the rasterization pipeline — meshes, materials, draw calls — is asked to add a high-quality depth-of-field and bloom pass, both requiring large-radius blurs, and both initially too slow when written as brute-force fragment-shader gathers reading the full neighborhood per pixel. Someone who only knew the raster pipeline might reduce the blur radius (hurting the look) or conclude the effect is too expensive. But this programmer took the core course, so she recognizes the shape of the problem instantly: a large blur is a separable Gaussian (two 1D passes, turning 441 taps into 42 for a 21×21 — the executed 10.5×), each 1D pass is a shared-memory tiling problem (5.5, load the row once, reduce redundant reads), the whole thing is bandwidth-bound on the intermediate buffer (4.6), and it belongs in a compute shader dispatched like a CUDA kernel. She writes it with the exact tools from Module 5 — grid of workgroups, shared-memory tiles, barriers — and it's the reduction-and-stencil muscle memory from the core, just in GLSL. The effect ships in budget. When a teammate asks how she knew to reach for compute and separability, her answer is the lesson's thesis: "it's not graphics, it's the GPU — this is the same tiling and reduction work the core taught, with different keywords." The morals close the reunion. First, the graphics-vs-compute divide is mostly a vocabulary illusion: a compute shader is the CUDA model renamed, so the core course is a graphics course too, and the programmer who knows both sees post-processing and simulation as familiar territory. Second, the biggest wins are algorithmic and recognized, not invented — separability, tiling, reductions are named primitives you already own, and recognizing a blur as "separable Gaussian + tiling + bandwidth" is what turns an unaffordable effect into a shipped one. The whole course was building toward this moment where the pieces snap together: the GPU is one machine, and its primitives don't care whether you call the work "graphics" or "compute."</p>
+
+<h2>Practice</h2>
+<details><summary>1. Map each GLSL compute construct to its CUDA equivalent: layout(local_size_x=256), gl_GlobalInvocationID, shared, barrier(), subgroupAdd.</summary><div class="body">layout(local_size_x=256) = the block dimension, blockDim (5.2) — threads per workgroup. gl_GlobalInvocationID = the global thread index, blockIdx*blockDim+threadIdx (5.2). shared = __shared__ memory (5.5) — the on-chip per-workgroup scratchpad. barrier() = __syncthreads() (5.5) — the workgroup-wide synchronization. subgroupAdd = a warp-shuffle reduction (5.8) — cross-lane sum within a subgroup (warp/wavefront) without shared memory. Every one is a Module 5 concept with GLSL spelling — the reunion: the core taught the GPU, and compute shaders are that model inside the graphics API.</div></details>
+<details><summary>2. A 15×15 blur is too slow. Compute the tap counts for naive vs separable and state the speedup.</summary><div class="body">Naive 2D: 15 × 15 = 225 taps per pixel. Separable: two 1D passes of 15 taps each = 15 + 15 = 30 taps per pixel. Speedup in taps = 225 / 30 = 7.5×. (The separable version also needs an intermediate buffer and is bandwidth-bound on it, but that's cache-friendly and far cheaper than the 225-tap scattered gather.) The win comes from the Gaussian being separable — G(x,y) = G(x)·G(y) — turning an O(N²) filter into two O(N) passes with no quality change. This is the algorithmic fix to reach for before any low-level optimization (the worked example).</div></details>
+<details><summary>3. Why is a compute shader the right home for a separable blur, rather than the fragment shader?</summary><div class="body">Because the separable blur needs an intermediate buffer (blur horizontally, store the result, then blur that vertically), it's bandwidth-bound on that buffer (4.6), and it benefits from shared-memory tiling — a workgroup loads its row/column of pixels once into shared memory so all threads read neighbors on-chip (5.5) instead of re-reading global texture memory. Compute shaders give you explicit shared memory, barriers, and control over the dispatch that make tiling and the two-pass structure natural, whereas fragment-shader passes lack shared memory across pixels and re-gather from texture each time. (Small blurs can be fragment passes; large separable ones with tiling want compute.) It's the same reason 5.5's stencil used shared memory — neighbor reuse — applied to image filtering.</div></details>
+<details><summary>4. What is GPU-driven rendering, and which core primitive does the "cull and build draw lists on the GPU" step rely on?</summary><div class="body">GPU-driven rendering moves the decisions about WHAT to draw — frustum/occlusion culling, LOD selection, building the list of draw commands — from the CPU onto the GPU, in compute shaders, so the CPU just kicks off the work and the GPU decides and draws. The "cull and compact the visible objects into a tight draw list" step relies on a SCAN / stream-compaction (5.8's scan): given a per-object visible/not-visible flag, a parallel prefix-sum computes each visible object's output slot, compacting them without gaps. This is exactly 5.8's privatize-then-merge and scan machinery, applied to draw-command generation. It's why compute fluency is now core graphics skill — the modern renderer's "brain" is a set of 5.8-style reductions and scans deciding the frame's work.</div></details>
+<details><summary>5. Does the D2 wavefront-64 trap apply to graphics subgroups? What's the safe practice?</summary><div class="body">Yes — a subgroup in graphics is a warp (32 lanes, NVIDIA) or a wavefront (64 lanes, AMD), exactly as in compute (D2/D1's translation table). So a compute or fragment shader that hardcodes a subgroup size of 32 in a subgroup reduction or ballot will silently process only half the lanes on AMD, returning wrong results — the same wavefront-64 correctness bug from Track D, now in a graphics shader. Safe practice: query gl_SubgroupSize (or the Vulkan subgroup properties) at runtime and size any subgroup reduction/tree to it, never a literal 32; and verify subgroup-using shaders on AMD hardware, because the bug is invisible on NVIDIA (a test certifies the machine it ran on, D2). The whole GPU converges: warps, wavefronts, subgroups are one idea, and its portability caveat follows it into graphics.</div></details>
+<details><summary>6. Give three tasks in a modern frame that are compute shaders, and the core lesson each corresponds to.</summary><div class="body">(1) Auto-exposure / tone-mapping average brightness → a REDUCTION (5.8): reduce all pixel luminances to one average, then map. (2) Bloom / depth-of-field blur → separable TILING (5.5) + bandwidth management (4.6): two 1D passes with shared-memory reuse. (3) GPU culling and draw-list generation → a SCAN / stream-compaction (5.8's scan): compact visible objects into a tight command buffer. Others: particle simulation (5.2's grid of independent updates), histogram for exposure (5.8's privatize-then-merge). The point: every one is a named core primitive — reduction, scan, tiling — so a modern frame is largely Module 5 running between the raster passes, which is why compute is core graphics skill now.</div></details>
+<details><summary>7. The interview closer: "You're a rasterization-focused graphics programmer. How do you approach adding compute-based post-processing?" Deliver the spoken skeleton.</summary><div class="body">"I'd start by recognizing that a compute shader isn't a new model — it's the same GPU programming model as CUDA, just with GLSL spelling: local_size is the block dimension, gl_GlobalInvocationID is the global thread index, shared is shared memory, barrier is the workgroup sync, and subgroups are warps. So the tools I need are the standard GPU primitives — tiling, reductions, scans, occupancy — and my job is to recognize which one the effect is. For post-processing specifically, the first thing I check is whether the kernel is separable: a Gaussian blur factors as G(x)·G(y), so I do two 1D passes instead of one 2D pass, which turns an N-squared tap count into 2N — for a 21×21 blur that's 42 taps instead of 441, over ten times less, and it's the difference between the effect fitting the frame budget or being cut. Then each 1D pass is a shared-memory tiling problem — load the row once into shared memory so all threads read neighbors on-chip instead of re-gathering from texture — and the whole thing is bandwidth-bound on the intermediate buffer, so I treat it as a bandwidth problem. I'd also watch two portability things: put a barrier between the compute pass and whatever reads its output, and never hardcode a subgroup size of 32, because on AMD it's 64 — the same wavefront trap as portable compute. The mindset I'd convey is that graphics and compute converge on one machine: an auto-exposure pass is a reduction, GPU culling is a scan, a blur is separable tiling — all things the fundamentals already taught, so I'm not learning a new model, I'm applying the one I have to a new set of problems.' Showing that I see post-processing as familiar reduction/tiling/scan work, not exotic compute, is the signal that I understand the GPU as one machine."</div></details>
+
+<div class="pager">
+  <a href="lesson-06.html">← Lighting: Phong to PBR</a>
+  <a href="lesson-08.html">Next: Vulkan Sync — Command Buffers &amp; Barriers →</a>
+</div>
+<div class="footer">GPU Mastery · Track C · Lesson 7 — works offline · progress saved in your browser</div>
+</div>
+<script src="../assets/diagramsC.js"></script>
+<script src="../assets/app.js"></script>
+</body>
+</html>

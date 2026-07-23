@@ -1,0 +1,243 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>3.2 Types, Sizes & Undefined Behavior — GPU Mastery</title>
+<link rel="stylesheet" href="../assets/style.css">
+</head>
+<body data-lesson="m3l2">
+<nav><div class="inner">
+  <a class="logo" href="../index.html">GPU<span>Mastery</span></a>
+  <a class="item" href="../index.html">Home</a>
+  <a class="item on" href="../curriculum.html">Curriculum</a>
+  <a class="item" href="../labs.html">Labs</a>
+  <a class="item" href="../setup.html">Lab setup</a>
+  <a class="item" href="../prompt.html">Generator prompt</a>
+</div></nav>
+<div class="wrap">
+
+<div class="lesson-top">
+  <div><span class="badge">Module 3 · Lesson 2</span><span class="badge dim">≈ 3 h</span></div>
+  <button id="donebtn" class="donebtn">Mark lesson complete</button>
+</div>
+<h1>Types, Sizes & Undefined Behavior — the rules of the metal</h1>
+<p class="lead">Module 1 taught you fixed-width arithmetic as math; NumPy re-introduced it as dtypes. C is where it becomes law — with a twist Python never had: break certain rules and the compiler is <em>allowed to assume you didn't</em>, then optimize accordingly. This lesson makes you fluent in the rules and fluent in the consequences.</p>
+
+<h2>Concept</h2>
+
+<h3>The type zoo — and the stdint discipline</h3>
+<div class="diagram" data-diagram="m3l2-sizes" data-caption="Say what you mean: exact-width names from <stdint.h> beat platform-dependent int/long."></div>
+<pre><code>#include &lt;stdint.h&gt;                 /* the M1 L1 types, by their real names        */
+#include &lt;stddef.h&gt;                 /* size_t, ptrdiff_t                            */
+int8_t   tiny  = -5;                /* exactly 8 bits, signed (two's complement)   */
+uint8_t  pixel = 200;               /* 0..255 — the image byte (M2 L8)             */
+int32_t  idx   = 1&lt;&lt;20;             /* the "int" you usually mean                  */
+int64_t  big   = 3000000000LL;      /* indices past 2.1e9 (M1 L1's overflow line)  */
+                                    /* (digit separators 3'000'000'000: C23/C++ only) */
+size_t   n     = sizeof(double);    /* unsigned type OF sizes — 8 here             */
+float    x     = 0.1f;              /* fp32! without the f, 0.1 is a DOUBLE        */
+double   y     = 0.1;               /* fp64 — everything M1 L8 said applies        */</code></pre>
+<p>Rules of the house from today: <strong>exact-width stdint names for data</strong> (int32_t, uint8_t…), <strong>size_t for sizes and byte counts</strong>, <strong>int is acceptable only for small local counters</strong>, and <strong>every fp32 literal wears its f</strong>. Bare <code>int/long</code> vary by platform (long is 8 bytes on Linux, 4 on Windows — a real porting landmine); the stdint names never lie.</p>
+
+<h3>Implicit conversions: the compiler's quiet hand</h3>
+<div class="diagram" data-diagram="m3l2-promotion" data-caption="Anything smaller than int is promoted before arithmetic; narrowing happens at the store."></div>
+<pre><code>uint8_t a = 200, b = 100;
+int     sum  = a + b;               /* 300 ✓ — the math happened in int            */
+uint8_t c    = a + b;               /* 44 — narrowing at the STORE (mod 256)       */
+float   f    = 7 / 2;               /* 3.0f! integer division FIRST, then convert  */
+double  d    = 7 / 2.0;             /* 3.5 — one double operand lifts the whole op */</code></pre>
+<p>And the one that has shipped a thousand bugs — <strong>signed meets unsigned</strong>: the signed side converts to unsigned (M1 L1's trap, now silent):</p>
+<pre><code>int n = -1;
+size_t len = 10;
+if (n &lt; len) { ... }                /* FALSE: -1 → 18446744073709551615            */
+for (size_t i = len - 1; i &gt;= 0; i--)  /* INFINITE: size_t is never &lt; 0           */</code></pre>
+<div class="warnbox">-Wall -Wextra flags most sign-compare cases — warnings-as-law pays again. For the countdown loop, the idiom is <code>for (size_t i = len; i-- > 0; )</code> — test-then-decrement, no signed types needed. Learn it once; it reads strangely for a day and correctly forever.</div>
+
+<h3>Overflow: two different universes</h3>
+<table>
+<tr><th></th><th>Unsigned</th><th>Signed</th></tr>
+<tr><td>On overflow</td><td><strong>Defined:</strong> wraps mod 2ⁿ (M1 L1's clock)</td><td><strong>Undefined behavior</strong> — not "wraps": the program's meaning is void</td></tr>
+<tr><td>Legit uses</td><td>hashes, RNGs, ring buffers, checksums — wrap ON PURPOSE</td><td>none; prevent it (widen, check before, or use unsigned deliberately)</td></tr>
+<tr><td>Optimizer may…</td><td>nothing special — wrap is the spec</td><td>assume it can't happen and DELETE your checks:</td></tr>
+</table>
+<div class="diagram" data-diagram="m3l2-ub" data-caption="UB is a voided contract. The optimizer doesn't 'break' your code — it takes you at your word."></div>
+<p>This is the cliffhanger from 3.1 resolved: the optimizer rewrites your program into anything <em>equivalent under the rules</em>. Signed overflow, out-of-bounds access, format-string lies — each voids the contract, and "equivalent" starts meaning things you didn't intend. The fix is never "hope the compiler is gentle"; it's write-defined-code, and let UBSan (3.8) police the boundary meanwhile.</p>
+
+<h3>Floats in C: Module 1 Lesson 8, verbatim</h3>
+<pre><code>float  eps32 = 1.19209290e-7f;       /* FLT_EPSILON — your M1 L8 machine epsilon  */
+16777216.0f + 1.0f == 16777216.0f    /* true — 2²⁴ absorption, now in C           */
+float t = 0.1f + 0.2f;               /* 0.3.. with fp32 rounding                  */
+sqrt vs sqrtf, sin vs sinf           /* double vs FLOAT versions — use the f ones  */
+                                      /* for fp32 work or you silently compute in  */
+                                      /* double and convert back (slower + M1 L8)  */</code></pre>
+<p>One C-specific addition: <strong>float literals without f are doubles</strong>, and <strong>float arguments to variadic functions (printf) promote to double</strong> (why %f handles both). In fp32-heavy code, a stray double literal (<code>x * 0.5</code>) can promote a whole expression to double math — correct-ish, 2× slower on GPUs, and a top-3 CUDA code-review catch. Write <code>0.5f</code>. Always.</p>
+
+<h2>Worked example</h2>
+<div class="card">
+<p><strong>Task:</strong> The M1 L1 / M2 L8 pixel-brightness bug, C edition — then catch the signed version red-handed with UBSan.</p>
+<pre><code>/* pixels.c */
+#include &lt;stdio.h&gt;
+#include &lt;stdint.h&gt;
+
+int main(void) {
+    uint8_t pixel = 173;
+    uint8_t wrong = pixel + 100;              /* promotion→273, store→wraps to 17  */
+    int     wide  = pixel + 100;              /* 273 survives in int               */
+    uint8_t right = wide > 255 ? 255 : (uint8_t)wide;   /* clamp, then narrow      */
+    printf("wrong=%u  right=%u\n", wrong, right);        /* wrong=17  right=255    */
+
+    int8_t s = 127;                           /* now the SIGNED twin:              */
+    s = s + 1;                                /* promotion→128 fits int; the STORE */
+    printf("s=%d\n", s);                      /* narrows: -128, implementation-ok  */
+
+    int big = 2147483647;                     /* INT_MAX                            */
+    big = big + 1;                            /* TRUE signed overflow: UB           */
+    printf("big=%d\n", big);
+    return 0;
+}</code></pre>
+<pre><code>$ gcc -Wall -Wextra -O2 pixels.c -o pixels && ./pixels
+wrong=17  right=255
+s=-128
+big=-2147483648        ← "worked"? NO — you got lucky. Now make it confess:
+$ gcc -fsanitize=undefined pixels.c -o pixels && ./pixels
+pixels.c:17: runtime error: signed integer overflow: 2147483647 + 1
+             cannot be represented in type 'int'</code></pre>
+<p><strong>Read the three cases like a professional:</strong> the uint8 wrap is <em>defined</em> (mod 256 at the store — diagram 2's pipeline); the int8 store of 128 is <em>implementation-defined narrowing</em> (gcc: wraps — portable-ish, still sloppy); the INT_MAX+1 is <em>undefined</em> — it printed a plausible number today and voids the contract always. Three superficially identical "+1 too far" lines, three different legal regimes — being able to name which is which is exactly what "knows C" means in an interview. <strong>Decision made:</strong> the fix pattern (widen → clamp → narrow, from M1 L1) is the same one your M2 L8 pixelforge tests enforce, and the same one CUDA's <code>__saturatef</code>/saturating intrinsics hardware-accelerate.</p>
+</div>
+
+<h2>Key points</h2>
+<ul class="keypoints">
+<li>Use stdint names (int32_t, uint8_t, int64_t) for data, size_t for sizes; bare int/long vary by platform and long is the classic porting landmine.</li>
+<li>Everything smaller than int computes IN int (promotion); wrapping/narrowing happens at the store — (uint8_t)(a+b) is where you choose truncation.</li>
+<li>Signed meets unsigned → signed converts to unsigned: -1 becomes huge, size_t loops can't count down naively; -Wextra flags it, the i-- idiom fixes it.</li>
+<li>Unsigned overflow wraps by definition (useful on purpose); signed overflow is UB — the optimizer may assume it never happens and delete your checks.</li>
+<li>UB ≠ "wrong value"; it voids the program's meaning. Write defined code; run UBSan in dev builds to police the boundary.</li>
+<li>fp32 literals need the f (0.5f, sinf) — stray doubles silently promote expressions: correct-looking, 2× slower on GPUs, top-tier code-review catch.</li>
+</ul>
+
+<h2>Quiz</h2>
+<div class="quiz">
+  <div class="q">1. <code>uint8_t a = 5, b = 10; int d = a - b;</code> — what is d, and why isn't it 251?</div>
+  <button class="opt">251 — uint8 arithmetic wraps at 0</button>
+  <button class="opt" data-c="1">-5 — a and b promote to int BEFORE the subtraction; the math never happened in uint8</button>
+  <button class="opt">Undefined behavior — unsigned underflow</button>
+  <button class="opt">0 — negative results clamp</button>
+  <div class="expl">Promotion first (diagram 2): int(5) − int(10) = −5, stored into an int unchanged. You'd get 251 only by storing into uint8_t (narrowing mod 256) — or in NumPy, which wraps in-dtype (M2 L5)! Same expression, three systems, three answers: C-int −5, C-uint8-store 251, NumPy-uint8 251. Knowing WHOSE rules apply is the entire game.</div>
+</div>
+<div class="quiz">
+  <div class="q">2. This loop hangs only in release builds: <code>for (int i = 1; i > 0; i *= 2) count++;</code>. The developer says "-O2 has a bug." Your verdict?</div>
+  <button class="opt">Correct — report the gcc bug</button>
+  <button class="opt" data-c="1">i *= 2 eventually signed-overflows (UB); -O2 legally reasons 'i starts positive, doubling stays positive' → i &gt; 0 becomes 'true' → infinite loop. The BUG is the overflow; -O0 just hid it</button>
+  <button class="opt">count++ is being optimized away</button>
+  <button class="opt">int is too small; long fixes the logic</button>
+  <div class="expl">At -O0, i wraps to negative on most hardware and the loop exits after 31 iterations — UB "behaving". At -O2 the optimizer uses the no-overflow guarantee YOU provided by using signed int. Fixes: unsigned i (defined wrap → loop exits), or bound the loop explicitly. UBSan flags line and value on the first run. "Works at -O0, breaks at -O2" ≈ UB, almost always — it's row 4 of 3.8's tool table.</div>
+</div>
+
+<h2>Exercises</h2>
+<details><summary>Exercise 1 — Write overflow_lab.c that demonstrates, with printed evidence and comments naming the regime (defined / implementation-defined / UB): uint32 wrap at 2³²−1; the size_t countdown idiom over an array of 5 doubles (print indices 4..0); and the int64 fix for M1 L1's thread-index bug (blockIdx 9,000,000 × blockDim 256 + 17 — compute it wrong in int32, right in int64_t).</summary><div class="body">
+<pre><code>#include &lt;stdio.h&gt;
+#include &lt;stdint.h&gt;
+#include &lt;stddef.h&gt;
+int main(void) {
+    uint32_t u = 4294967295u;                      /* UINT32_MAX */
+    printf("wrap: %u + 1 = %u (DEFINED, mod 2^32)\n", u, u + 1);      /* → 0 */
+
+    double arr[5] = {10, 11, 12, 13, 14};
+    for (size_t i = 5; i-- > 0; )                  /* test-then-decrement idiom */
+        printf("arr[%zu]=%.0f ", i, arr[i]);       /* 4..0, no signed types */
+    printf("\n");
+
+    int32_t bad  = (int32_t)9000000 * 256 + 17;    /* 2.304e9 &gt; INT32_MAX: UB    */
+    int64_t good = (int64_t)9000000 * 256 + 17;    /* cast an OPERAND: 64-bit math */
+    printf("bad=%d (garbage/UB)  good=%lld\n", bad, (long long)good);  /* 2304000017 */
+    return 0;
+}</code></pre>
+<p>Compile twice: normally (observe bad's garbage — likely −1990967279) and with -fsanitize=undefined (watch it name the multiplication). The cast placement is M1 L1 Ex.2's exact lesson: <code>(int64_t)(9000000 * 256)</code> casts AFTER the 32-bit overflow already happened. One operand cast promotes the whole expression first. This three-part file is a keeper — it's your personal UB reference card.</p>
+</div></details>
+<details><summary>Exercise 2 — The double-promotion hunt: this fp32 function is correct but secretly slow on GPUs. Find all four promotions to double, fix them, and explain how you'd CONFIRM the fix without trusting your eyes (hint: 3.1 §3).</summary>
+<div class="body">
+<pre><code>float gelu_approx(float x) {                     /* before: */
+    return 0.5 * x * (1 + tanh(0.79788456 * (x + 0.044715 * x * x * x)));
+}
+float gelu_fixed(float x) {                      /* after: every literal f, tanhf */
+    return 0.5f * x * (1.0f + tanhf(0.79788456f * (x + 0.044715f * x * x * x)));
+}</code></pre>
+<p>The four: <code>0.5</code>, <code>1</code> (int→fine actually, but the surrounding doubles lift it), <code>0.79788456</code>, <code>0.044715</code> — plus the biggest one hiding as a function: <code>tanh</code> is the DOUBLE version; <code>tanhf</code> is fp32. Any one double literal lifts its whole subexpression: compute in fp64, convert back. Confirmation without eyes: <code>gcc -S -O2</code> both versions — the before is full of <code>cvtss2sd/cvtsd2ss</code> (convert float↔double) and calls <code>tanh</code>; the after stays in <code>ss</code> (scalar single) instructions and calls <code>tanhf</code>. On CPU the cost is small; on GPU fp64 runs 1/32 rate on gaming cards — this exact review comment appears in real CUDA PRs weekly. (GELU itself: the activation inside GPT-style models — Track A5 will fuse it.)</p>
+</div></details>
+
+<hr>
+<h1>Go deeper — the complete guide</h1>
+<p>The promotion rules precisely, the UB catalog you'll actually meet, implementation-defined vs unspecified vs undefined, limits and float metadata headers, and how NumPy/C/CUDA divide the same territory.</p>
+
+<h2>1. The conversion ladder, precisely</h2>
+<p>For any binary arithmetic op: <strong>(1) integer promotion</strong> — anything narrower than int (char, short, uint8_t, int16_t, bitfields) becomes int (or unsigned int if int can't hold it — on normal platforms, uint8/int16 all fit in int). <strong>(2) usual arithmetic conversions</strong> — then both operands convert to the "larger" type by rank: <code>long double &gt; double &gt; float &gt; unsigned long long &gt; long long &gt; … &gt; int</code>, with the treacherous rule that when signed and unsigned of the same rank meet, <strong>unsigned wins</strong>. Worked instances:</p>
+<pre><code>uint8_t*uint8_t → int*int            (250*250 = 62500 ✓ no wrap — fits int)
+int * int64_t   → int64_t math        (promote the int)
+int  + unsigned → BOTH unsigned       (-1 + 1u == 0u, but -2 + 1u == 4294967295u!)
+float + double  → double              (the promotion hunt, Ex.2)
+int32_t i; i &lt;&lt; 33                    → UB: shift ≥ width (not "0", not "wraps": UB)</code></pre>
+<p>Corollary worth its own line: <code>uint8_t a=250, b=250; int ok = a*b;</code> is safe — but <code>uint16_t a=60000, b=2; a*b</code> promotes to <em>int</em>, computes 120000 fine… while on a hypothetical 16-bit-int platform it would be UB. And a REAL modern one: <code>unsigned short x = 65535; x * x</code> → promotes to int, 65535² = 4294836225 &gt; INT_MAX → <strong>UB from multiplying two unsigned shorts</strong>. That cursed example is a favorite of C interviewers and static analyzers alike.</p>
+
+<h2>2. The UB catalog (the ones you will actually meet)</h2>
+<table>
+<tr><th>UB</th><th>Where it bites</th><th>Detector</th></tr>
+<tr><td>Signed overflow</td><td>index math, loop bounds (quiz 2)</td><td>UBSan; -ftrapv in a pinch</td></tr>
+<tr><td>Shift ≥ width or into sign bit</td><td>1 &lt;&lt; 31 on int; masks (M1 L1) — write 1u &lt;&lt; 31</td><td>UBSan</td></tr>
+<tr><td>Out-of-bounds access</td><td>arrays, strings — 3.4's whole territory</td><td>ASan</td></tr>
+<tr><td>Use of uninitialized values</td><td>locals have GARBAGE, not zero (unlike globals)</td><td>-Wall (some), MSan/valgrind</td></tr>
+<tr><td>NULL/dangling dereference</td><td>3.3/3.5's territory</td><td>ASan, crash</td></tr>
+<tr><td>Format-string lies</td><td>3.1 quiz 2</td><td>-Wformat</td></tr>
+<tr><td>Divide by zero (integer)</td><td>modulo/hash math (float ÷0 gives inf — DEFINED, M1 L8!)</td><td>UBSan</td></tr>
+</table>
+<p>Note the float row's contrast: IEEE-754 <em>defines</em> 1.0/0.0 (inf) and 0.0/0.0 (NaN) — M1 L8's algebra of the edges is <em>defined behavior</em>. Integer 1/0 is UB. C's integer world and float world have different constitutions; you hold dual citizenship now.</p>
+
+<h2>3. Undefined vs implementation-defined vs unspecified</h2>
+<p>Three legal regimes, in decreasing severity: <strong>Undefined</strong> — anything may happen, contract void (signed overflow, OOB). <strong>Implementation-defined</strong> — the platform must document a consistent choice (is char signed? long's size? int8 narrowing behavior). Portable code either avoids depending on these or pins them via stdint/static_assert. <strong>Unspecified</strong> — one of several outcomes, no documentation required (evaluation order of <code>f() + g()</code>! — never write expressions whose result depends on which call runs first). The <code>char</code> signedness one is a genuine classic: <code>char c = 0xFF; if (c == 0xFF)</code> is false on x86 Linux (char is signed: c is −1) — image/byte code uses <code>uint8_t</code> or <code>unsigned char</code>, full stop, which your pixelforge instincts (M2 L8) already demanded.</p>
+
+<h2>4. Metadata headers: asking the platform about itself</h2>
+<pre><code>#include &lt;limits.h&gt;   /* INT_MAX (2147483647), SIZE_MAX, CHAR_BIT (8)             */
+#include &lt;float.h&gt;    /* FLT_EPSILON ≈ 1.19e-7, DBL_MAX ≈ 1.8e308, FLT_MAX 3.4e38 */
+#include &lt;stdint.h&gt;   /* INT32_MAX, UINT64_MAX, INT64_C(literal) macros           */
+_Static_assert(sizeof(void*) == 8, "this code assumes 64-bit pointers");
+_Static_assert(sizeof(long) == 8,  "LP64 assumed — Windows (LLP64) needs fixes");</code></pre>
+<p>Those two static_asserts are a professional signature: assumptions written as compile-time checks (M2 L6's assert philosophy, moved left into the build). Note every float.h constant is an M1 L8 number you can already derive — FLT_EPSILON is your 2⁻²³; checking that you can re-derive each one is excellent interview prep.</p>
+
+<h2>5. One expression, three rulebooks: C / NumPy / CUDA</h2>
+<table>
+<tr><th>uint8: 200+100</th><th>int32: INT_MAX+1</th><th>fp32: big+small</th></tr>
+<tr><td>C: 300 in int; 44 only at a uint8 store</td><td>C: UB (optimizer license)</td><td>C: IEEE absorb (defined — M1 L8)</td></tr>
+<tr><td>NumPy: 44 in-dtype (+ overflow warnings sometimes)</td><td>NumPy: wraps silently in-dtype</td><td>NumPy: same IEEE</td></tr>
+<tr><td>CUDA: C's rules exactly</td><td>CUDA: C's rules exactly (UBSan's GPU cousin: compute-sanitizer)</td><td>CUDA: same IEEE + FTZ options (M1 L8 §5)</td></tr>
+</table>
+<p>The table's moral: floats carry ONE constitution (IEEE-754) across all three worlds — your M1 L8 knowledge transfers untouched. Integers carry THREE — promotion-then-store (C/CUDA) vs in-dtype (NumPy) vs UB-on-signed (C/CUDA only). When porting M2 pipelines to C or Module 5 kernels, integer expressions are where line-by-line review earns its time.</p>
+
+<h2>6. Gotchas</h2>
+<div class="gotcha"><strong>The f-less float literal.</strong> <code>float y = x * 1.5;</code> computes in double, converts back — precision surprise + GPU 2× tax. Grep new fp32 code for <code>[0-9]\.[0-9]*[^f0-9]</code>; your future CUDA reviewers do.</div>
+<div class="gotcha"><strong>sizeof in printf with %d.</strong> sizeof yields size_t; %d expects int — UB on the spot where you were being careful. %zu, always.</div>
+<div class="gotcha"><strong>Uninitialized locals read as garbage.</strong> <code>int sum; for(...) sum += x[i];</code> starts from stack noise — sometimes 0 (tests pass!), sometimes not (prod fails). Globals zero-init; locals do NOT. Initialize at declaration, every time.</div>
+<div class="gotcha"><strong><code>1 &lt;&lt; 31</code> on int.</strong> Shift into the sign bit: UB. Masks and flags use unsigned: <code>1u &lt;&lt; 31</code>, <code>UINT32_C(1) &lt;&lt; 31</code> for width certainty (M1 L1's bit tools, now with type armor).</div>
+<div class="gotcha"><strong>Comparing int i with vec.size()/strlen.</strong> The unsigned conversion trap in its natural habitat, loop conditions. Use size_t indices, or the i-- countdown idiom, and let -Wextra's sign-compare warning gate CI.</div>
+<div class="gotcha"><strong>Assuming char is unsigned (or signed).</strong> Implementation-defined; ARM and x86 historically disagree. Bytes are uint8_t; text is char; arithmetic on raw char is a smell.</div>
+
+<h2>Scenario — the checksum that failed only on the ARM build server</h2>
+<p>Your study group's benchmark harness (C port of the M2 bench module) adds a data checksum so results can't silently diverge across machines — and immediately, the x86 laptops and the ARM CI runner disagree on the checksum of identical bytes. The hunt is a tour of this lesson. The function reads the file into <code>char buf[]</code> and accumulates <code>sum += buf[i] * 31</code>: on x86, char is signed — byte 0xFF contributes −31; on ARM's default, char is unsigned — +8 129 velocity difference per high byte (§3's implementation-defined classic). Fix: <code>uint8_t</code> buffer, and the checksums align… except one file still differs. Second bug: the accumulator is <code>int</code>, and 40 MB of bytes×31 overflows it — signed overflow, UB, and the two platforms' optimizers "resolve" it differently (quiz 2's physics at -O2). Fix: <code>uint64_t</code> accumulator (wrap is defined, and 2⁶⁴ won't wrap for exabytes — M1 L3 estimation says so in one breath). UBSan on the old build names both lines in one run — which becomes the group's new rule: <em>sanitizer build in CI before any cross-platform mystery is allowed to eat an afternoon.</em> Total diff: two type names. Total lesson: platform-dependent types and UB don't announce themselves — your defaults (stdint, unsigned accumulators, UBSan in CI) have to.</p>
+
+<h2>Practice</h2>
+<details><summary>1. Name the regime (defined / impl-defined / unspecified / UB) and the result where one exists: (a) UINT_MAX + 1u; (b) INT_MAX + 1; (c) (int8_t)200; (d) f() + g() evaluation order; (e) 1.0/0.0; (f) 1/0.</summary><div class="body">(a) defined: 0 (wrap). (b) UB. (c) implementation-defined narrowing: gcc gives −56 (200−256). (d) unspecified order (both run, order unknown — don't let them share state). (e) defined: +inf (IEEE — M1 L8). (f) UB (integer). Six expressions, four regimes — this exact sextet is a fair interview screen, and you now pass it.</div></details>
+<details><summary>2. Predict, then run: <code>printf("%zu %zu %zu\n", sizeof(char), sizeof('A'), sizeof(1.5f + 1));</code> — two of the three surprise almost everyone.</summary><div class="body">1, 4, 4. Surprise 1: in C, 'A' is an INT literal (sizeof 4), not a char — (C++ differs: 1!). Surprise 2: 1.5f + 1 → int promotes to float → sizeof(float) = 4 (no double in sight — the f held the line). The 'A'-is-int fact explains why char arithmetic promotes so eagerly (§1) and is a genuine C-vs-C++ trivia divider.</div></details>
+<details><summary>3. The loop <code>for (uint8_t i = 0; i &lt; 300; i++)</code> — what happens, why, and give two correct fixes with their trade-offs.</summary><div class="body">Infinite: i promotes to int for the compare (fine), but the STORE back into uint8_t wraps at 256 → i can never reach 300 (max 255). Note this is DEFINED behavior — defined and still wrong, a useful distinction! Fixes: widen the counter (int/size_t — just right); or if uint8_t is required by an API, restructure with an explicit break. -Wextra hints via -Wtype-limits ("comparison is always true"). The compile-time warning existed; the law was there to be read.</div></details>
+<details><summary>4. Derive from M1 L8, then confirm against float.h: FLT_EPSILON, FLT_MAX's order of magnitude, the largest odd integer exactly representable in float, and DBL_DIG (15 vs 16 — why the ambiguity?).</summary><div class="body">FLT_EPSILON = 2⁻²³ ≈ 1.19e-7 (23 fraction bits). FLT_MAX ≈ 2¹²⁸ ≈ 3.4e38. Largest odd exact float: 2²⁴−1 = 16 777 215 (above 2²⁴ the ulp is 2 — odd numbers skip). DBL_DIG = 15: the guaranteed round-trip decimal digits (M1 L8's "~15.9" floored — 16 digits sometimes survive, 15 always do). Every float.h constant is an M1 L8 derivation; being able to produce them from the bit layout is exactly the fluency the capstones assume.</div></details>
+<details><summary>5. Code review, four lines, find every issue: <code>unsigned n = count(); for (int i = 0; i &lt; n - 1; i++) { total += (float)data[i] * 0.1; } printf("%d\n", total);</code> where total is float and count() can return 0.</summary><div class="body">(1) n is unsigned and can be 0 → n−1 wraps to 4294967295 → the loop runs ~4 billion times over a (probably tiny) array: OOB + eternity. Guard: <code>for (unsigned i = 0; i + 1 &lt; n; i++)</code> — rearrange to avoid the subtraction. (2) i is int vs n unsigned → sign-compare conversion (warned). (3) <code>* 0.1</code> promotes to double per element (Ex.2's tax) → 0.1f. (4) %d with a float: UB (3.1 quiz 2) → %f. Four bugs, four lessons, one plausible-looking snippet — this is what "C review eyes" means, and you just demonstrated them.</div></details>
+<details><summary>6. Make the optimizer visible: write <code>int f(int x){ return x+1 &gt; x; }</code> and <code>int g(unsigned x){ return x+1 &gt; x; }</code>; compile -O2 -S and compare. Then add -fwrapv and recheck f. What is -fwrapv, and why is relying on it a team-level decision rather than a fix?</summary><div class="body">f at -O2: <code>mov eax, 1; ret</code> — folded to constant true (signed overflow assumed impossible). g: real comparison code remains (unsigned wrap means x+1 CAN be 0 ≤ x — the answer is genuinely input-dependent: 0 when x=UINT_MAX). -fwrapv redefines signed overflow as wrapping → f compiles to a real compare too. It's a dialect switch: your code stops being standard C and requires that flag forever, everywhere it's built (including nvcc's host compiler...). Teams choose it consciously (the Linux kernel does); individuals reaching for it to silence one bug are treating the symptom. Preferred: fix the arithmetic (widen/reorder) — then the code is correct in EVERY dialect.</div></details>
+<details><summary>7. Design: a types.h for the course's C projects — the contents (includes, aliases, static_asserts, three helper macros/functions max) that would have prevented every bug in this lesson. Justify each line against a specific lesson section or scenario.</summary><div class="body"><code>#include &lt;stdint.h&gt; &lt;stddef.h&gt; &lt;limits.h&gt; &lt;float.h&gt;</code> (§4). <code>typedef int64_t idx_t;</code> — ALL index math 64-bit by policy (M1 L1's 3-billion bug + Ex.1's fix, made structural). <code>_Static_assert(sizeof(long)==8 && sizeof(void*)==8, "LP64 assumed")</code> (§4 — fail at compile on the odd platform, not at 3am). <code>static inline uint8_t clamp_u8(int v){ return v &lt; 0 ? 0 : v &gt; 255 ? 255 : (uint8_t)v; }</code> — the widen-clamp-narrow pattern as THE named operation (worked example; used by every image function in 3.9's fixtures). <code>#define ARRAY_LEN(a) (sizeof(a)/sizeof((a)[0]))</code> — with the 3.4 caveat documented in a comment (decay makes it lie on pointers — and a compile-time trick to reject pointers exists for the curious). Rule in the header's comment block: signed overflow is a bug, not a feature; unsigned wrap only with a comment saying WRAP INTENDED. One small header, every scar from this lesson institutionalized — which is what senior engineers actually do with their scars.</div></details>
+
+<div class="pager">
+  <a href="lesson-01.html">← Why C: source to binary</a>
+  <a href="lesson-03.html">Next: Pointers →</a>
+</div>
+<div class="footer">GPU Mastery · Module 3 · Lesson 2 — works offline · progress saved in your browser</div>
+</div>
+<script src="../assets/diagrams3.js"></script>
+<script src="../assets/app.js"></script>
+</body>
+</html>

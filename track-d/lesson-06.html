@@ -1,0 +1,180 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>D6 Kokkos &amp; RAJA — GPU Mastery</title>
+<link rel="stylesheet" href="../assets/style.css">
+</head>
+<body data-lesson="dl6">
+<nav><div class="inner">
+  <a class="logo" href="../index.html">GPU<span>Mastery</span></a>
+  <a class="item" href="../index.html">Home</a>
+  <a class="item on" href="../curriculum.html">Curriculum</a>
+  <a class="item" href="../labs.html">Labs</a>
+  <a class="item" href="../setup.html">Lab setup</a>
+  <a class="item" href="../prompt.html">Generator prompt</a>
+</div></nav>
+<div class="wrap">
+
+<div class="lesson-top">
+  <div><span class="badge">Track D · Lesson 6</span><span class="badge dim">≈ 3.5 h</span></div>
+  <button id="donebtn" class="donebtn">Mark lesson complete</button>
+</div>
+<h1>Kokkos &amp; RAJA — the performance-portability bet the national labs made</h1>
+<p class="lead">SYCL gave you one source and an inferred schedule. Kokkos goes further: it makes the two decisions that actually determine GPU performance — memory layout (M2 L7's AoS/SoA) and where code runs (5.3's two worlds) — into <em>compile-time template parameters</em>, so one source file is coalesced on the GPU and cache-friendly on the CPU without you editing a line. This is why LLNL runs it on El Capitan and ~300 HPC projects bet decades of code on it. Today: Views, spaces, and the single <code>parallel_for</code> that compiles to every machine.</p>
+
+<h2>Concept</h2>
+
+<h3>View: strides with a compile-time layout switch</h3>
+<div class="diagram" data-diagram="d6-view" data-caption="A Kokkos View is M2 L5's strided array with the memory layout chosen at COMPILE time per backend — LayoutLeft (coalesced) on GPU, LayoutRight (cache-friendly) on CPU. The AoS/SoA decision, automated."></div>
+<p>A Kokkos <code>View&lt;float**&gt;</code> is exactly M2 L5's model — a multidimensional array defined by shape plus strides — with one superpower: the <em>layout</em> (the stride formula) is a template parameter the compiler picks per backend. On a GPU build it defaults to <code>LayoutLeft</code> (column-major); on a CPU build, <code>LayoutRight</code> (row-major). Why those defaults matter is pure 5.7, and it's worth seeing the addresses, which were executed:</p>
+<pre><code>View&lt;float**&gt; A(N, M); accessed A(i, j), adjacent threads vary i (fixed j=0):
+  LayoutLeft  (GPU): addr = i + j*N -> threads i=0,1,2,3 hit 0,1,2,3   stride 1
+                     => adjacent threads, adjacent addresses = COALESCED (5.7) ✓
+  LayoutRight (CPU): addr = i*M + j -> threads i=0,1,2,3 hit 0,4,8,12  stride 4
+                     => each CPU core walks a contiguous ROW = cache lines stay hot (4.5) ✓
+Same source, same A(i,j) indexing. The compiler flipped the stride formula per
+machine so the access is optimal on BOTH — the AoS/SoA choice (M2 L7, 5.7) you
+used to make by hand and re-make per port, now a template parameter.</code></pre>
+<p>This is the deepest idea in the track's single-source rung. In CUDA you chose SoA and a coalesced index by hand (5.7), and if you ported to a CPU that choice was now wrong (CPUs want each core on a contiguous row, not adjacent threads on adjacent elements). Kokkos encodes "what layout does this machine want" once, in the View type, so the identical <code>A(i,j)</code> in your kernel compiles to a coalesced access on the GPU and a cache-friendly one on the CPU. You write the algorithm; the layout adapts.</p>
+
+<h3>Spaces as types: where code runs, where data lives</h3>
+<div class="diagram" data-diagram="d6-spaces" data-caption="Execution space (Cuda/HIP/OpenMP/Serial) and memory space (device HBM / host RAM / unified) are template parameters — 5.3's two worlds as types, so a mismatch is a compile error, not a 3am segfault."></div>
+<p>5.3 taught you the two worlds — host and device — and that touching device memory from the host is a bug you find at runtime with a crash. Kokkos promotes both worlds to <em>types</em>. An <code>ExecutionSpace</code> (<code>Cuda</code>, <code>HIP</code>, <code>SYCL</code>, <code>OpenMP</code>, <code>Serial</code>) says where a kernel runs; a <code>MemorySpace</code> (<code>CudaSpace</code>, <code>HostSpace</code>, <code>SharedSpace</code>) says where data lives. Because they're template parameters, a kernel that tries to read host-space data on the device is a <strong>compile error</strong>, not 3.5's segfault at 3am — the ownership discipline you enforced by hand is now checked by the type system. And the parallel hierarchy transfers directly: a <code>TeamPolicy</code> is a grid of blocks (a "league" of "teams"), <code>TeamThreadRange</code> and <code>ThreadVectorRange</code> are 5.5/5.6's block-and-warp levels — the same three-tier structure (grid/block/warp) you know, expressed portably.</p>
+
+<h3>One parallel_for, every backend — and it runs for real on the CPU</h3>
+<div class="diagram" data-diagram="d6-dispatch" data-caption="A single parallel_for (or parallel_reduce/scan) compiles to CUDA, HIP, SYCL, or OpenMP by a build flag — the same source across every machine in a lab's fleet."></div>
+<p>The dispatch layer is one API — <code>parallel_for</code>, <code>parallel_reduce</code>, <code>parallel_scan</code> — over a policy, and a build flag (<code>-DKokkos_ENABLE_CUDA</code> / <code>_HIP</code> / <code>_SYCL</code> / <code>_OPENMP</code>) picks the backend. The OpenMP backend means the same source runs, for real, on any multicore CPU — no GPU required — which is why it's a universal correctness lab (like SYCL's CPU backend, D3). Executed here, a <code>parallel_reduce</code>-style sum over 10M doubles on the OpenMP backend:</p>
+<pre><code>parallel_reduce over 10M doubles (OpenMP backend, compiled and run):
+  threads=1  sum=1952.3080127736  err vs serial = 0
+  threads=2  sum=1952.3080127737  err vs serial = 6.0e-11
+  threads=4  sum=1952.3080127738  err vs serial = 2.1e-10
+The parallel sum is NOT bitwise-identical to serial — the threads reduce in a
+different order (M1 L8's non-associativity), so it drifts in the last digits but
+stays within budget. Same lesson as every backend: correct means within budget,
+not bitwise (5.8, 5.11). Kokkos 5.1 (C++20) · CUDA/HIP/SYCL/OpenMP/HPX backends.</code></pre>
+<p>This is the labs' bet in one picture: LLNL, Sandia, and ~300 HPC projects write <em>one</em> Kokkos codebase and run it on El Capitan (AMD), an Intel machine, an NVIDIA cluster, or a developer's laptop CPU, by flipping a build flag. It's B7's "reproducible environment across the fleet" solved at the source level — the same algorithm, retargeted by the compiler, verified everywhere including the CPU where you have no GPU at all.</p>
+
+<h2>Worked example</h2>
+<div class="card">
+<p><strong>Task:</strong> Decide the layout for a matrix kernel that must run well on both a GPU and a CPU, and see why Kokkos's compile-time switch beats hand-coding either choice. Prediction first: if you hard-coded a single layout for both machines, which one would you pick, and what would it cost on the other machine?</p>
+<pre><code>The kernel: adjacent threads/iterations process adjacent i (fixed j) of A(i,j).
+Prediction: no single hard-coded layout is optimal on both.
+  hard-code LayoutLeft (GPU-optimal):  CPU cores now stride by N through memory
+     -> cache-line waste, the 5.7 stride cliff on the CPU side.
+  hard-code LayoutRight (CPU-optimal): GPU threads now stride by M
+     -> uncoalesced, the 8x sector tax (5.7) on the GPU side.
+Executed addresses confirm the conflict:
+  LayoutLeft  A(i,0): 0 1 2 3   (stride 1 - GPU coalesced, CPU strided)
+  LayoutRight A(i,0): 0 4 8 12  (stride 4 - CPU row-contiguous, GPU scattered)
+Kokkos's answer: DON'T hard-code. Let the View default to LayoutLeft on the GPU
+  build and LayoutRight on the CPU build. One source, optimal on both.</code></pre>
+<p><strong>What to internalize:</strong> the layout decision is a genuine conflict — the GPU wants adjacent threads on adjacent addresses (coalescing, 5.7) and the CPU wants each core marching down a contiguous row (cache locality, 4.5), and those are opposite stride formulas. Any hand-coded single layout is wrong on one of the two machines, paying the stride cliff (a factor of several, 5.7) there. This is precisely the AoS/SoA / layout decision M2 L7 said depends on the access pattern — and Kokkos's insight is that the access pattern's <em>optimal encoding</em> depends on the machine, so it makes the encoding a compile-time parameter and picks per backend. You get to write the mathematically natural <code>A(i,j)</code> and have it be fast everywhere, which is the entire value proposition of performance portability: not "runs everywhere" (SYCL does that) but "runs <em>well</em> everywhere" without per-machine source forks.</p>
+</div>
+
+<h2>Key points</h2>
+<ul class="keypoints">
+<li>A Kokkos View is M2 L5's strided array with the layout as a compile-time template parameter — LayoutLeft (coalesced, stride 1) on GPU builds, LayoutRight (cache-friendly, stride 4) on CPU builds (executed addresses), the AoS/SoA decision (M2 L7, 5.7) automated per backend.</li>
+<li>Execution spaces (Cuda/HIP/SYCL/OpenMP/Serial) and memory spaces (device/host/shared) are template parameters — 5.3's two worlds as types, so a host/device access mismatch is a compile error, not a runtime segfault (3.5).</li>
+<li>TeamPolicy/TeamThreadRange/ThreadVectorRange are the grid/block/warp hierarchy (5.5/5.6) expressed portably — the same three tiers you already know.</li>
+<li>One parallel_for/parallel_reduce/parallel_scan compiles to any backend by a build flag; the OpenMP backend runs on any CPU for real (executed: 10M-double reduce), a universal correctness lab with no GPU needed.</li>
+<li>Parallel reductions drift from serial in the last digits (executed: 2.1e-10 at 4 threads) because threads reduce in a different order (M1 L8) — correctness is budget, not bitwise, on every backend.</li>
+<li>Kokkos 5.1 (C++20) targets CUDA/HIP/SYCL/OpenMP/HPX; LLNL/Sandia and ~300 HPC projects bet one codebase on it, running El Capitan (AMD) to a laptop CPU by a build flag (B7's fleet, source-level).</li>
+</ul>
+
+<h2>Quiz</h2>
+<div class="quiz">
+  <div class="q">1. A developer new to Kokkos writes <code>View&lt;double**, LayoutRight&gt;</code> everywhere because "row-major is what I know from C." The code is correct on the CPU but 4-8x slower than expected on the GPU. What's the mechanism, and what should they have written?</div>
+  <button class="opt">LayoutRight is simply a slow layout; use LayoutLeft everywhere instead</button>
+  <button class="opt" data-c="1">By hard-coding LayoutRight they forced row-major on the GPU too, so adjacent GPU threads accessing adjacent i now stride by the row length M — uncoalesced access paying the sector tax (5.7), which is the 4-8x. The fix is to NOT specify a layout: write View&lt;double**&gt; and let Kokkos default to LayoutLeft on the GPU build (coalesced) and LayoutRight on the CPU build (cache-friendly). Hard-coding a layout throws away the compile-time switch that is the whole point of a View</button>
+  <button class="opt">The GPU is just slower for double precision; nothing to fix</button>
+  <button class="opt">Add more threads to hide the slowdown</button>
+  <div class="expl">Option 1 over-corrects into the opposite hard-code, which would then be slow on the CPU — the point is that neither fixed layout is right for both machines. Option 4 misdiagnoses a memory-access problem as an occupancy one (adding threads doesn't fix uncoalesced access, 5.7). The correct answer names the mechanism (hard-coded row-major = strided/uncoalesced on GPU) and the fix (let the View default so the layout tracks the backend). The meta-lesson: specifying a layout is opting OUT of performance portability — you do it only when you have a specific reason, and then you own the per-machine consequence.</div>
+</div>
+<div class="quiz">
+  <div class="q">2. A Kokkos kernel with <code>ExecutionSpace = Cuda</code> tries to read a View allocated in <code>HostSpace</code>. On a hand-written CUDA port, the analogous bug (dereferencing a host pointer on the device) was a runtime crash you found with the sanitizer (5.4). What happens in Kokkos, and why is that better?</div>
+  <button class="opt">The same runtime crash — Kokkos can't check memory spaces</button>
+  <button class="opt" data-c="1">It's a COMPILE error: because execution and memory spaces are template parameters, the type system knows a Cuda-space kernel can't legally access HostSpace data, and rejects it at build time. That's strictly better than 5.4's runtime discovery — the bug can't ship, can't reach production, and needs no sanitizer run to find. It's 5.3's host/device ownership discipline enforced by the compiler instead of by your vigilance. The fix is an explicit deep_copy from host to device space (the copy you'd have written in CUDA, now type-checked)</button>
+  <button class="opt">Kokkos silently copies the data for you, so there's no error and no cost</button>
+  <button class="opt">It works fine; Kokkos uses unified memory for everything</button>
+  <div class="expl">Options 3 and 4 describe a convenience Kokkos deliberately doesn't provide — silent host-device copies would hide the 4.6 bus cost that you need to see and control, so Kokkos makes you write <code>deep_copy</code> explicitly. Option 1 misses the type-level guarantee. The correct answer is the payoff of making 5.3's two worlds into types: a whole class of runtime memory-space bugs (3.5, 5.4) becomes a compile error. Moving a bug from runtime to compile time is one of the highest-leverage things a type system does — it converts "found in production at 3am" into "found by the build."</div>
+</div>
+
+<h2>Exercises</h2>
+<details><summary>Exercise 1 — Build Kokkos on your machine with the OpenMP and Serial backends (no GPU needed) and run a <code>parallel_reduce</code> summing 10M values. Run it at 1, 2, and 4 threads and confirm the results match the serial sum within an fp budget but not bitwise. Then flip on a GPU backend if you have one and confirm the same source compiles unchanged.</summary><div class="body">
+<pre><code>expected (executed here via the OpenMP backend):
+  threads=1: err vs serial 0 ; threads=2: ~6e-11 ; threads=4: ~2e-10
+</code></pre>
+<p>The drift with thread count is M1 L8 live: more threads means a different reduction order means different last-digit rounding — correct, within budget, not bitwise. The deliverable that matters is the second half: change <code>-DKokkos_ENABLE_OPENMP</code> to <code>-DKokkos_ENABLE_CUDA</code> (or HIP) and rebuild the <em>same</em> source — it compiles and runs on the GPU with no code edits. That "one source, flip a flag, new machine" moment is the performance-portability thesis you can feel, and it's why B7's cluster world and El Capitan's programmers chose Kokkos. If you have no GPU, the OpenMP-vs-Serial comparison alone teaches the reduction-order point.</p>
+</div></details>
+<details><summary>Exercise 2 — The layout experiment. Allocate a large <code>View&lt;double**&gt;</code> and a kernel that reads column-wise (adjacent threads vary the first index). Time it with the default layout, then force <code>LayoutRight</code> and <code>LayoutLeft</code> explicitly on a CPU build, and reason about what each would do on a GPU. Predict which explicit layout matches the CPU default and which matches the GPU default.</summary><div class="body">
+<p>Prediction: on the CPU build, the default is <code>LayoutRight</code> — so forcing LayoutRight matches the default (fast, contiguous rows per core) and forcing LayoutLeft makes each core stride by N (cache-hostile, slower). On a GPU build the defaults invert: LayoutLeft is the default and is coalesced; forcing LayoutRight strides GPU threads by M (uncoalesced, the quiz-1 slowdown). So the same explicit layout that's fast on one machine is slow on the other — which is the whole argument for NOT hard-coding it. Deliverable: your CPU timings for default vs both explicit layouts, plus a one-paragraph prediction of the GPU behavior grounded in coalescing (5.7). The experiment makes the abstract "compile-time layout switch" into a measured factor.</p>
+</div></details>
+
+<hr>
+<h1>Go deeper — the performance-portability machine</h1>
+
+<h2>1. View: layout, memory space, and traits</h2>
+<pre><code>View&lt;double**, LayoutLeft, CudaSpace, MemoryTraits&lt;RandomAccess&gt;&gt;
+       ^data type  ^layout      ^where it lives ^access hints
+  layout        : LayoutLeft (col-major, GPU default) / LayoutRight (row, CPU default)
+                  / LayoutStride (arbitrary) — the M2 L5 stride formula, as a type
+  memory space  : CudaSpace / HostSpace / SharedSpace(USM) — 5.3's worlds
+  memory traits : RandomAccess (use texture/__ldg path), Atomic, Unmanaged...
+default the layout and space and you get performance portability; specify them
+and you're making a per-machine performance claim you now own.</code></pre>
+<p>The design rule reads right off the type: every parameter you leave defaulted is a decision Kokkos makes optimally per backend; every one you pin is a decision you've taken responsibility for on every machine. Beginners over-specify (quiz 1); experts default aggressively and pin only what a profiler justified.</p>
+
+<h2>2. Spaces, deep_copy, and the team hierarchy</h2>
+<pre><code>host/device transfer : Kokkos::deep_copy(dst_view, src_view)  // explicit, like cudaMemcpy (4.6)
+                       — no silent copies; the bus cost stays visible and yours
+mirror pattern       : auto h = create_mirror_view(d_view); ... deep_copy(h, d_view);
+                       // the canonical "get device results to the host" idiom
+team hierarchy       : TeamPolicy(league_size, team_size)      = grid of blocks (5.2)
+                       TeamThreadRange(team, n)                = threads in a block (5.5)
+                       ThreadVectorRange(team, n)              = the vector/warp level (5.6)
+                       team.team_barrier()                     = __syncthreads()
+scratch memory       : team scratch pad                        = __shared__ (5.5)</code></pre>
+
+<h2>3. Kokkos vs RAJA vs std::execution, and why labs bet on it</h2>
+<pre><code>Kokkos  : Views (data layout) + parallel dispatch + spaces — the FULL model,
+          data-and-execution. C++20. Backends: CUDA/HIP/SYCL/OpenMP/HPX/threads.
+RAJA    : LLNL's execution-focused layer (loops, reductions, kernel policies) —
+          pairs with a separate memory manager (CHAI/Umpire) for the data side.
+std::execution / stdpar : ISO C++ parallel algorithms — portable but thinner;
+          less control over layout/spaces than Kokkos.
+why the labs bet on Kokkos: El Capitan (AMD), Aurora (Intel), and NVIDIA clusters
+  in one procurement cycle — a single Kokkos source targets all three by a flag,
+  so a decade of simulation code survives the next hardware transition (B7).
+  That survival-across-hardware is worth more to a lab than the last 10% (D1).</code></pre>
+
+<h2>Gotchas</h2>
+<div class="gotcha"><strong>Hard-coding a layout.</strong> <code>LayoutRight</code> everywhere tanks the GPU (uncoalesced, 5.7); <code>LayoutLeft</code> everywhere tanks the CPU (cache-hostile). Default the layout so it tracks the backend (quiz 1) — specifying one opts out of portability.</div>
+<div class="gotcha"><strong>Expecting silent host/device copies.</strong> Kokkos won't move data between spaces for you — a space mismatch is a compile error, and you write <code>deep_copy</code> explicitly. That's deliberate: it keeps the bus cost (4.6) visible, not hidden.</div>
+<div class="gotcha"><strong>Assuming parallel_reduce is bitwise-reproducible.</strong> Thread count changes the reduction order and the last digits (executed: 2e-10 at 4 threads, M1 L8). Use budget fixtures; for bit-reproducibility you need a deterministic reduction, which costs performance (5.8).</div>
+<div class="gotcha"><strong>Capturing a View by reference in a KOKKOS_LAMBDA.</strong> Device lambdas must capture by value ([=]); a View is a cheap reference-counted handle designed for by-value capture. Capturing the surrounding scope by reference is a dangling-pointer bug on the device (5.3's two worlds).</div>
+<div class="gotcha"><strong>Deep-copying between incompatible layouts silently transposing.</strong> <code>deep_copy</code> between a LayoutLeft and a LayoutRight View of the same shape does a real transpose (data movement, 5.7's cost), not a rename — easy to do accidentally when mixing CPU and GPU Views. Match layouts or budget the transpose.</div>
+<div class="gotcha"><strong>Forgetting Kokkos::initialize/finalize or fence before timing.</strong> Kernels are asynchronous (5.9); timing without <code>Kokkos::fence()</code> measures launch, not execution — the same event-discipline bug as 5.9/5.10, portable edition.</div>
+
+<h2>Scenario — the code that had to outlive three supercomputers</h2>
+<p>A national lab's flagship simulation is a million lines of C++ that must run for the next fifteen years across procurement cycles that already include an AMD machine (El Capitan), an Intel machine (Aurora), and legacy NVIDIA clusters — with more, unknown, vendors to come. The tempting path is a HIP port for AMD and a CUDA path for NVIDIA behind <code>#ifdef</code>s, and it's what a smaller project might do. But the lab does the math on the fifteen-year horizon: every vendor-specific path is a path someone must maintain, re-tune, and re-validate at every hardware transition, forever, and the next machine might be a vendor none of those <code>#ifdef</code>s know about. So they build on Kokkos. The payoff shows up exactly where this lesson predicts. The layout decision — coalesced on GPU, cache-friendly on CPU — is a template default, so the same <code>A(i,j)</code> is fast on all three machines without a fork (the worked example, at scale). The host/device space rules are type-checked, so the class of bugs that plagued the old hand-written CUDA (host pointer on device, 5.4) becomes compile errors that never reach a run. And when a new machine arrives, the port is a build-flag change and a re-tune of the handful of kernels a profiler flags (D1's 90/10), not a rewrite. The cost they accept is real and worth naming: Kokkos gives ~90% of peak, and a hand-tuned CUDA kernel might beat it on the specific NVIDIA machine (D1's last 10%). But the lab isn't optimizing for one machine on one day; it's optimizing for one codebase across a decade of machines, and there the portability is the performance — because a fork they can't maintain is slower than a portable kernel that actually runs. The moral generalizes past labs: when code must outlive hardware, performance portability isn't a compromise, it's the only strategy that compounds.</p>
+
+<h2>Practice</h2>
+<details><summary>1. What does a Kokkos <code>View&lt;float**&gt;</code> default to on a GPU build vs a CPU build, and why is each the right default?</summary><div class="body">GPU build: <code>LayoutLeft</code> (column-major) — so adjacent threads accessing adjacent first-index elements hit adjacent addresses, which is coalesced (5.7), the GPU's requirement for full bandwidth. CPU build: <code>LayoutRight</code> (row-major) — so each core walks a contiguous row, keeping cache lines hot (4.5), the CPU's requirement. They're opposite stride formulas because the two machines want opposite access patterns, and defaulting the layout lets one source be optimal on both. Pinning a layout opts out of this and makes you slow on one machine (quiz 1).</div></details>
+<details><summary>2. Why is a host/device space mismatch a compile error in Kokkos but a runtime crash in hand-written CUDA?</summary><div class="body">Because Kokkos encodes execution space and memory space as template parameters (types), so the compiler can see that a Cuda-execution kernel is trying to access HostSpace data and reject it during compilation. Hand-written CUDA uses raw pointers with no space in the type, so the compiler can't tell a host pointer from a device pointer — the mismatch only manifests at runtime as an illegal access (5.4). Encoding the two worlds (5.3) as types moves the check from runtime vigilance to compile-time guarantee, which is strictly safer: the bug can't ship (quiz 2).</div></details>
+<details><summary>3. Map the Kokkos hierarchy to the CUDA one: TeamPolicy, TeamThreadRange, ThreadVectorRange, team scratch, team_barrier.</summary><div class="body">TeamPolicy(league, team) = the grid of blocks (league of teams) — 5.2's launch. TeamThreadRange = the threads within a block — 5.5's block level. ThreadVectorRange = the vector/warp level within a thread's work — 5.6's warp/ILP level. Team scratch = <code>__shared__</code> memory (5.5). team_barrier() = <code>__syncthreads()</code>. It's the identical three-tier grid/block/warp structure you learned on CUDA, given portable names — D1's translation table for the parallel hierarchy.</div></details>
+<details><summary>4. When would you explicitly specify a layout or memory space instead of defaulting it, accepting the loss of automatic portability?</summary><div class="body">When a profiler proves a specific access pattern needs a specific layout that the default doesn't give — e.g., a kernel that genuinely accesses A row-wise on the GPU might want LayoutRight there despite the coalescing default, or an interop boundary with a library expecting a particular layout. Or when you need data in a specific space for interop (a raw pointer for MPI/an external library needs HostSpace or a specific device space). The rule: default until a measurement or an interface forces your hand, then pin the minimum and own that per-machine claim. Over-specifying without a measured reason is the quiz-1 mistake.</div></details>
+<details><summary>5. Explain why <code>parallel_reduce</code> summing the same data gives slightly different results at 2 vs 4 threads, and whether that's a bug.</summary><div class="body">Not a bug — it's floating-point non-associativity (M1 L8). Different thread counts partition the sum differently, so the additions happen in a different order, and fp rounding depends on order, producing last-digit differences (executed: ~6e-11 at 2 threads, ~2e-10 at 4). The serial sum, the 2-thread sum, and the 4-thread sum are all equally "correct" — there's no single true fp answer for a reordered sum. The fixture must use an error budget, not equality (5.8, 5.11). If you genuinely need bit-reproducibility across thread counts (some regulated simulations do), you use a deterministic reduction algorithm, which costs performance — a real trade, not a free lunch.</div></details>
+<details><summary>6. A KOKKOS_LAMBDA captures a large std::vector by reference and indexes it on the GPU. What's the bug and the fix?</summary><div class="body">The bug is 5.3's two worlds: a device lambda runs on the GPU, but a <code>std::vector</code> lives in host memory, so capturing it by reference gives the device a host pointer it can't legally dereference — a crash or garbage (and Kokkos device lambdas must capture by value anyway). The fix is to put the data in a <code>View</code> (device or shared space) and capture the View by value in the lambda — Views are cheap reference-counted handles designed exactly for by-value capture, and their memory space is type-checked so the compiler catches a space mismatch (quiz 2). Rule: on the device, capture Views by value, never raw host containers by reference.</div></details>
+<details><summary>7. The interview closer: "When would you choose Kokkos over just writing separate CUDA and HIP paths, and what do you give up?" Deliver the spoken skeleton.</summary><div class="body">"I choose Kokkos when the code has to run well across multiple vendors and outlive the current hardware — the classic case being HPC codebases that must target AMD, Intel, and NVIDIA machines across procurement cycles. The reason isn't just 'one source' — SYCL gives that too — it's that Kokkos makes the two decisions that actually set GPU performance into compile-time parameters: the memory layout, so a View is coalesced on the GPU and cache-friendly on the CPU without a code fork, and the execution and memory spaces, so a host-pointer-on-device bug becomes a compile error instead of a runtime crash. So the same <code>parallel_for</code> is fast on every backend by a build flag, and I can test it on a CPU with the OpenMP backend where I have no GPU. What I give up is the last 10%: a hand-tuned CUDA kernel can beat Kokkos on a specific NVIDIA machine, and if I had exactly one target forever, separate native paths might edge it. But separate CUDA and HIP paths are two codebases to maintain, re-tune, and re-validate at every hardware transition — and the moment a third vendor shows up, that #ifdef strategy collapses. So my rule: Kokkos when code must run well across vendors and survive hardware changes — where the portability IS the performance because an unmaintainable fork is the real slowdown — and hand-written native only for a single fixed target or a profiled hot kernel where I'll pay the last-10% cost deliberately.' Naming that trade — breadth-and-longevity versus the last 10% — is the answer."</div></details>
+
+<div class="pager">
+  <a href="lesson-05.html">← WebGPU &amp; WGSL</a>
+  <a href="lesson-07.html">Next: Triton &amp; MLIR →</a>
+</div>
+<div class="footer">GPU Mastery · Track D · Lesson 6 — works offline · progress saved in your browser</div>
+</div>
+<script src="../assets/diagramsD.js"></script>
+<script src="../assets/app.js"></script>
+</body>
+</html>

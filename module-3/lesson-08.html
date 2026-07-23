@@ -1,0 +1,228 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>3.8 Segfaults, gdb & Sanitizers — GPU Mastery</title>
+<link rel="stylesheet" href="../assets/style.css">
+</head>
+<body data-lesson="m3l8">
+<nav><div class="inner">
+  <a class="logo" href="../index.html">GPU<span>Mastery</span></a>
+  <a class="item" href="../index.html">Home</a>
+  <a class="item on" href="../curriculum.html">Curriculum</a>
+  <a class="item" href="../labs.html">Labs</a>
+  <a class="item" href="../setup.html">Lab setup</a>
+  <a class="item" href="../prompt.html">Generator prompt</a>
+</div></nav>
+<div class="wrap">
+
+<div class="lesson-top">
+  <div><span class="badge">Module 3 · Lesson 8</span><span class="badge dim">≈ 3 h</span></div>
+  <button id="donebtn" class="donebtn">Mark lesson complete</button>
+</div>
+<h1>Segfaults, gdb & Sanitizers — making C's silence loud</h1>
+<p class="lead">Python guarded every index and raised readable exceptions (M2 L6). C took the guards away — this lesson gives you better ones: a debugger that replays the crime, and sanitizers that catch memory bugs the instant they happen. Same scientific method as M2 L6; sharper instruments.</p>
+
+<h2>Concept</h2>
+
+<h3>What a segfault actually is</h3>
+<div class="diagram" data-diagram="m3l8-segv" data-caption="SIGSEGV is the MMU saying 'not your page'. The silent wrong-page write is the one to fear."></div>
+<p>Your process sees virtual addresses mapped page-by-page (4 KB) to real memory (M4 deepens this). Dereference an address on an <em>unmapped</em> page — wild pointer, NULL, freed-and-recycled region — and the MMU faults: <strong>SIGSEGV, immediate, loud, lucky</strong>. The unlucky case: the bad address lands on a page you DO own — no crash, silent corruption, and a symptom three functions and twenty minutes away (3.4 Ex.2's lottery). Everything in this lesson exists to convert the second case into the first.</p>
+
+<h3>The toolbox, matched to symptoms</h3>
+<div class="diagram" data-diagram="m3l8-tools" data-caption="Symptom → instrument. Memorize this table; it replaces panic."></div>
+<pre><code>gcc -Wall -Wextra -O2 -g            # -g ALWAYS: names + lines in every tool below
+gcc -fsanitize=address,undefined -g # ASan+UBSan: the DEV BUILD default (make asan)
+valgrind --leak-check=full ./prog   # slower, no rebuild needed — the deep hunt
+gdb ./prog                          # the interactive time machine</code></pre>
+
+<h3>gdb in ten commands (the traceback machine, interactive)</h3>
+<pre><code>$ gdb ./program
+(gdb) run --n 4096              # run with arguments; crashes stop HERE
+(gdb) bt                        # backtrace — M2 L6's traceback, in C (read bottom-up!)
+(gdb) frame 2                   # jump to YOUR deepest frame
+(gdb) print i                   # inspect: variables, *pointers, arr[i]@8 (8 elems)
+(gdb) print/x flags             # hex view — M1 L1 literacy in the debugger
+(gdb) break matmul.c:31         # breakpoints...
+(gdb) break saxpy if i > 1000   # ...conditional ones (skip 1000 healthy iterations)
+(gdb) next / step / continue    # over / into / go
+(gdb) watch C[42]               # HARDWARE watchpoint: stop when this MEMORY changes
+                                # — "who is corrupting my cell" answered directly</code></pre>
+<p><code>watch</code> is the one to remember: 3.4's neighbor-corruption mystery ("who changed my canary?") stops being a mystery — the debugger halts at the exact writing instruction, even if it's in someone else's function. Post-mortem workflow: <code>ulimit -c unlimited</code>, crash produces a core file, <code>gdb ./prog core</code> → bt shows the death scene without re-running (essential for 1-in-1000 crashes).</p>
+
+<h3>ASan: the crash you deserve, at the moment you earn it</h3>
+<div class="diagram" data-diagram="m3l8-asan" data-caption="Five annotations, always the same anatomy. After ten reports you'll read them like tracebacks."></div>
+<pre><code>$ gcc -fsanitize=address -g overflow.c &amp;&amp; ./a.out
+== ERROR: AddressSanitizer: heap-buffer-overflow          ① what
+WRITE of size 4 at 0x603000000050                          ② direction + size
+    #0 fill_buffer buffer.c:31                             ③ where (your frame!)
+allocated by thread T0 here:                               ④ the buffer's birthplace
+    #1 make_buffer buffer.c:14
+... 0 bytes to the right of 40-byte region                 ⑤ off-by-how-much</code></pre>
+<p>ASan plants poisoned "redzones" around every allocation and quarantines freed memory — OOB and use-after-free trip the alarm <em>at the faulty instruction</em>, with both stacks (use + allocation). Cost ~2×: perfect for dev builds, tests, CI (M2 L6's constitution, C amendment); never for production or benchmark timings. UBSan (<code>,undefined</code>) rides along free-ish, catching 3.2's whole catalog at runtime with file:line.</p>
+
+<h3>The method is still M2 L6's</h3>
+<pre><code>1 REPRODUCE  — smallest input, deterministic (seed it — M1 L7)
+2 HYPOTHESIZE — one claim ("idx exceeds n when W isn't a multiple of 8")
+3 INSTRUMENT  — the RIGHT tool: crash→ASan/gdb bt · corruption→watch · leak→ASan/valgrind
+4 TEST        — hypothesis dies or survives
+5 FIX + LOCK  — and the regression test goes in the suite (playbook layer 6)</code></pre>
+
+<h2>Worked example</h2>
+<div class="card">
+<p><strong>Task:</strong> One 25-line program, three planted bugs (the classic trio); catch each with the matched instrument. Type this out — reading sanitizer output cold, before you need it in anger, is the entire point.</p>
+<pre><code>/* trio.c — three bugs on purpose */
+#include &lt;stdlib.h&gt;
+#include &lt;stdio.h&gt;
+int main(void) {
+    /* bug 1: heap overflow (the fencepost) */
+    float *a = malloc(10 * sizeof *a);
+    for (int i = 0; i &lt;= 10; i++) a[i] = (float)i;      /* &lt;= writes a[10]!      */
+
+    /* bug 2: use-after-free */
+    float *b = malloc(4 * sizeof *b);
+    free(b);
+    printf("%f\n", b[0]);                                /* reading a ghost       */
+
+    /* bug 3: leak */
+    float *c = malloc(1000 * sizeof *c);
+    c[0] = 1.0f;                                          /* ...and never freed    */
+    free(a);
+    return 0;
+}</code></pre>
+<pre><code>$ gcc -fsanitize=address -g trio.c &amp;&amp; ./a.out
+ERROR: heap-buffer-overflow WRITE of size 4 ... 0 bytes to the RIGHT of 40-byte region
+    #0 main trio.c:8            ← bug 1, instantly: the ⑤ annotation says "fencepost"
+$ # fix bug 1 (i &lt; 10), rebuild, rerun:
+ERROR: heap-use-after-free READ of size 4 ... freed by thread T0 here: #0 free ... trio.c:12
+    #0 main trio.c:13           ← bug 2: BOTH stacks — the read AND the free
+$ # fix bug 2, rerun:
+LeakSanitizer: 4000 byte(s) leaked in 1 allocation(s) from: #1 main trio.c:16
+                                 ← bug 3 at exit: birthplace named. 4000 = 1000×4 ✓ (M1 L1)</code></pre>
+<p><strong>What to internalize:</strong> ASan surfaces them <em>one at a time, in execution order</em> — fix, rebuild, rerun is the rhythm (each bug can mask later ones). Every report's ③ points at YOUR line, ④ at the allocation's birth — the two ends of the 3.5 ownership contract, printed. And note what a plain run shows: possibly nothing at all. All three bugs pass silently without instrumentation — "it ran fine" was never evidence (3.2's contract logic; the segv diagram's quiet branch). <strong>Decision made:</strong> from this lesson forward, <code>make test</code> in every course project compiles with ASan+UBSan (3.6 P6's separate-objects law) — bugs get caught the week they're written, not the month they ship.</p>
+</div>
+
+<h2>Key points</h2>
+<ul class="keypoints">
+<li>SIGSEGV = the MMU refusing an unmapped address (the lucky case); wild writes into owned pages corrupt silently — tools exist to make the quiet case loud.</li>
+<li>gdb: bt/frame/print for autopsies, break (+conditions) for stakeouts, watch for "who wrote to this address" — and core files replay crashes you can't reproduce live.</li>
+<li>ASan reports have five fixed parts (what/direction/where/birthplace/offset) — learn the anatomy once, read every future report (CPU and GPU) fluently.</li>
+<li>Symptom→tool: crash→gdb/ASan · leak→ASan-exit/valgrind · wrong-values→UBSan/watch · works-at-O0-breaks-at-O2→almost always UB, UBSan first.</li>
+<li>Sanitizers in dev/test/CI builds always (~2× cost), never in production or timed benchmarks; valgrind (~20×) for no-rebuild deep hunts.</li>
+<li>The method is unchanged from M2 L6: reproduce → hypothesize → instrument → test → fix AND lock with a regression test. The instruments got sharper, not the logic.</li>
+</ul>
+
+<h2>Quiz</h2>
+<div class="quiz">
+  <div class="q">1. A program crashes 1-in-1000 runs in production (no sanitizers there). You have one core dump. What's the highest-value FIRST move, and why not "add printfs and redeploy"?</div>
+  <button class="opt">Add printfs everywhere and wait for the next crash</button>
+  <button class="opt" data-c="1">gdb ./prog core → bt → inspect the dying frame's variables: the autopsy is already in hand — no waiting, no heisenbug risk from changed timing/layout</button>
+  <button class="opt">Rebuild with -O0 and hope it reproduces</button>
+  <button class="opt">valgrind in production</button>
+  <div class="expl">The core IS the crash, frozen — bt + print interrogate it immediately. printf-redeploy waits ~1000 runs AND can shift memory layout/timing enough to hide the bug (the heisenbug effect — UB symptoms move when the binary changes, gotcha #3's physics). Then: reproduce locally under ASan with the clues from the core. Core-dump literacy is a production-engineering marker skill.</div>
+</div>
+<div class="quiz">
+  <div class="q">2. ASan says: <code>READ of size 4 ... 16 bytes to the LEFT of a 4000-byte region allocated at matrix_flat matmul.c:12</code>. Translate to a hypothesis before opening the editor.</div>
+  <button class="opt">The matrix is too small — allocate more</button>
+  <button class="opt" data-c="1">Some index computed −4 elements before the block: reading M[r*W+c] with a NEGATIVE or wrapped index — likely r or c went negative / the IDX formula underflowed (16 bytes left = index −4 in fp32)</button>
+  <button class="opt">malloc returned a misaligned pointer</button>
+  <button class="opt">The read is fine; ASan is too strict</button>
+  <div class="expl">LEFT of the region = index below 0: 16/4 = element −4 (M1 L1 division turning bytes into elements — the ⑤ annotation doing real work). Prime suspects from this course: size_t subtraction wrap (3.2's countdown trap) making a huge index that ALIASES negative, or r−1 at the boundary of a stencil. The report handed you the index; the hypothesis names the line class before you scroll. That's instrument literacy.</div>
+</div>
+
+<h2>Exercises</h2>
+<details><summary>Exercise 1 — The watchpoint hunt: take 3.4 Ex.2's canary program (canary/arr/canary2), but let the corrupting write happen deep inside a helper called from a loop iteration you don't know. Use gdb: watch canary2, run, and report what gdb shows when it fires (old value, new value, the frame). Then answer: why did watch find in seconds what printf-hunting couldn't, and what's the GPU-era equivalent?</summary><div class="body">
+<pre><code>(gdb) watch canary2
+Hardware watchpoint 1: canary2
+(gdb) run
+Hardware watchpoint 1: canary2
+Old value = 7
+New value = 1315859240                  ← 1e9f's bits as int — M1 L8 read the clue!
+fill_row (row=..., i=8) at helper.c:23  ← the EXACT instruction, in a frame you
+(gdb) bt                                   never suspected; bt gives the full route</code></pre>
+<p>Why it wins: printf shows state at chosen checkpoints — corruption BETWEEN checkpoints stays invisible, and adding prints moves the layout (heisenbug roulette). The hardware watchpoint is the CPU itself trapping on a write to that address: zero blind spots, zero layout change. Recognizing 1315859240 as float bits (3.4 Ex.2's party trick) turns "garbage" into "someone wrote a float here" — narrowing suspects by TYPE. GPU equivalent: compute-sanitizer's memcheck plus cuda-gdb's device-side breakpoints (5.4) — same concept, thousands of threads; the literacy transfers whole.</p>
+</div></details>
+<details><summary>Exercise 2 — UB, staged and convicted: write ub_lab.c with 3.2's two showcase bugs — the INT_MAX+1 loop (quiz 2 there) and a 1&lt;&lt;31 shift — plus one OOB stack read. Build four ways: -O0, -O2, -O2 -fsanitize=undefined, -fsanitize=address. Tabulate what each build reports (including "nothing"), and write the two-sentence conclusion your table proves about testing C.</summary><div class="body">
+<p>Typical table (yours may vary — that variance IS finding #1):</p>
+<pre><code>build                     | INT_MAX+1 loop      | 1&lt;&lt;31            | stack OOB read
+-O0                       | exits (wrap)        | -2147483648      | plausible garbage
+-O2                       | INFINITE LOOP       | same             | different garbage
+-O2 -fsanitize=undefined  | "signed integer     | "left shift of 1  | (silent — not UBSan's
+                          |  overflow" +line    |  by 31 places…"  |  department)
+-fsanitize=address        | (loop bug silent)   | (silent)         | "stack-buffer-overflow
+                          |                     |                  |  READ" + frame + offset</code></pre>
+<p>Conclusions the table proves: (1) behavior under UB is a function of BUILD FLAGS, not just code — so "it worked when I ran it" tests one point of a family of programs; (2) the sanitizers partition the bug space (UBSan: arithmetic contracts; ASan: memory contracts) — you need both, and CI needs them more than your laptop does (M2 L6's constitution, now with mechanized enforcement). Keep ub_lab.c forever; it's your instrument-calibration file.</p>
+</div></details>
+
+<hr>
+<h1>Go deeper — the complete guide</h1>
+<p>Debugging optimized code, ASan's mechanism and its blind spots, valgrind vs ASan honestly, defensive engineering that pre-empts the debugger, and the bridge to GPU debugging.</p>
+
+<h2>1. Debugging optimized code (because -O0 isn't always available)</h2>
+<pre><code>(gdb) print i         → $1 = &lt;optimized out&gt;        # i lives in a register or nowhere
+(gdb) next            → line jumps 31 → 28 → 35     # code was reordered/merged</code></pre>
+<p>-O2 inlines (frames vanish from bt), keeps variables in registers, and reorders lines — the program is EQUIVALENT, not identical (3.1 §1's contract, felt in the debugger). Coping kit: <code>-Og</code> (optimize-but-debuggable — the intended middle), <code>-fno-omit-frame-pointer</code> (honest backtraces at tiny cost — many prod fleets run this always, and it's in the course's SAN flags), disassemble+registers when line info lies (your 3.1 §3 assembly-glancing, now diagnostic), and strategic <code>volatile</code> ONLY as a temporary probe to keep one variable observable (remove after — it blocks optimization). Production reality: crashes arrive from -O2 binaries; being merely uncomfortable (not helpless) there is a distinguishing skill.</p>
+
+<h2>2. How ASan works — and therefore where it's blind</h2>
+<p>Mechanism: every 8 bytes of your memory has shadow-memory bookkeeping; allocations get poisoned <em>redzones</em> before/after; frees go to quarantine (stay poisoned a while) — every load/store is instrumented to check its shadow first. Knowing the mechanism predicts the blind spots: <strong>(a)</strong> an OOB that leaps PAST the redzone into another live allocation (e.g., index off by exactly one row of a big matrix — 3.4's IDX drift can do this!) reads VALID memory → silent; <strong>(b)</strong> use-after-free after quarantine recycles → can miss; <strong>(c)</strong> uninitialized reads are NOT its department (that's MSan/valgrind); <strong>(d)</strong> and it can't see through custom arenas (3.5 P7) unless you annotate them. Moral: ASan converts MOST memory lotteries into certainties, not all — layered defense (asserts, tests, UBSan, occasional valgrind) remains the doctrine. This mechanism-first understanding is exactly how you'll reason about compute-sanitizer's coverage on GPU (5.4).</p>
+
+<h2>3. valgrind vs sanitizers, honestly</h2>
+<table>
+<tr><th></th><th>ASan/UBSan</th><th>valgrind memcheck</th></tr>
+<tr><td>Rebuild needed</td><td>yes (-fsanitize)</td><td><strong>no</strong> — any binary, even one you can't rebuild</td></tr>
+<tr><td>Slowdown</td><td>~2×</td><td>~10–30×</td></tr>
+<tr><td>Uninitialized reads</td><td>no (MSan exists, niche)</td><td><strong>yes</strong> — its specialty</td></tr>
+<tr><td>Leak taxonomy</td><td>at exit, basic</td><td>definitely/indirectly/still-reachable (3.5 P6's vocabulary)</td></tr>
+<tr><td>Default role</td><td>dev builds, tests, CI — always-on</td><td>the second opinion; third-party binaries; uninit hunts</td></tr>
+</table>
+
+<h2>4. Defense-in-depth: making the debugger unnecessary</h2>
+<pre><code>assert(i &lt; n);                          /* M2 L6's asserts — now guarding UB, not  */
+                                        /* just logic: an assert BEFORE an access  */
+                                        /* converts silent corruption into a named  */
+                                        /* crash even in non-ASan builds            */
+#define CHECK_BOUNDS(i, n) assert((size_t)(i) &lt; (size_t)(n))
+gcc -D_FORTIFY_SOURCE=2 -O2             /* hardened libc string/mem functions       */
+gcc -fstack-protector-strong            /* canaries (3.4 Ex.2's trick, compiler-    */
+                                        /* automated) around vulnerable frames      */</code></pre>
+<p>Priority order the pros actually use: <strong>types that can't be wrong</strong> (size_t indices, 3.7's no-copy RAII buffers) &gt; <strong>asserts at boundaries</strong> (M2 L6's doctrine — the assert names the invariant AND documents it) &gt; <strong>sanitizers in CI</strong> (catch what discipline missed) &gt; <strong>debugger</strong> (for the survivors). Every rung you climb early is an afternoon you don't spend on the last one. The course's projects encode this: types.h (3.2 P7), contract asserts (3.9's fixtures), make asan (3.6 P6), and NOW you have the instruments for the survivors.</p>
+
+<h2>5. The GPU bridge (why this lesson happened now)</h2>
+<table>
+<tr><th>CPU tool (this lesson)</th><th>GPU twin (Module 5.4)</th><th>Transfers directly</th></tr>
+<tr><td>ASan</td><td>compute-sanitizer --tool memcheck</td><td>report anatomy ①–⑤, OOB/UAF categories</td></tr>
+<tr><td>UBSan's "check every op"</td><td>--tool initcheck / racecheck</td><td>the "instrumented build" workflow + CI role</td></tr>
+<tr><td>gdb</td><td>cuda-gdb (same commands + thread focus)</td><td>bt/break/print/watch, core-dump autopsies</td></tr>
+<tr><td>"it ran fine" ≠ evidence</td><td>doubly true: 10,000 threads race-hide bugs</td><td>the entire epistemology</td></tr>
+</table>
+
+<h2>6. Gotchas</h2>
+<div class="gotcha"><strong>Debugging without -g.</strong> bt full of ?? and addresses. -g costs nothing at runtime (it's separate debug info) — it's in the default flags (3.1 §5) precisely so this never happens.</div>
+<div class="gotcha"><strong>ASan + valgrind together.</strong> Shadow memory vs dynamic instrumentation: they fight (crashes, nonsense). One instrument per run.</div>
+<div class="gotcha"><strong>Sanitized benchmarks.</strong> ~2× slowdown IN the numbers → "optimization" decisions made on fiction. Bench builds and test builds are different targets (3.6's Makefile made them so — the design earns its keep here).</div>
+<div class="gotcha"><strong>The printf that "fixes" the bug.</strong> Adding I/O shifts layout/timing; UB symptoms move or hide (quiz 1). It didn't fix anything — it changed which lottery ticket you hold. Watchpoints and sanitizers don't reshuffle the deck.</div>
+<div class="gotcha"><strong>Trusting "no ASan report" as "no bugs".</strong> §2's blind spots: leaps past redzones, uninit reads, logic errors. ASan is one layer; the fixture tests (M2 L6 playbook) remain the correctness authority.</div>
+<div class="gotcha"><strong>Leak-hunting with the wrong category.</strong> Chasing "still reachable" (usually benign) while "indirectly lost" (broken structure — 3.5 P6) sits ignored. Read the taxonomy before the line numbers.</div>
+
+<h2>Scenario — the 1-in-200 crash that survived three "fixes"</h2>
+<p>A friend's image-pipeline C port (their M2 L8 project, rewritten for speed) crashes about once per 200 images — and has survived three fixes ("added a NULL check", "made the buffer bigger", "reordered two frees"), each of which changed the crash rate without eliminating it: the classic signature of UB being reshuffled, not removed (gotcha #4). You run the method. <strong>Reproduce:</strong> the failing images share nothing obvious — but a seeded shuffle (M1 L7 discipline) makes the crash deterministic at image #137: odd width, 331 px. Hypothesis forms already. <strong>Instrument:</strong> ASan build, one run: <em>heap-buffer-overflow WRITE of size 4, 4 bytes to the right of a 438,092-byte region, #0 blur_row filter.c:58, allocated at pipeline.c:31</em>. The ⑤ arithmetic: 438,092 = 331×331×4 ✓ (M1 L1 corroboration); 4 bytes right = element [W] of a row — the fencepost. Line 58: <code>for (x = 0; x &lt;= W; x++)</code> in the blur's edge handling — 3.4's off-by-one, hiding behind "usually even widths" (the padding of typical camera sizes had been absorbing it: writes landed in the NEXT row's first pixel — visible as the "one-pixel smear" bug report everyone had dismissed as JPEG artifacts!). One character (<code>&lt;</code>), plus the regression fixture: a 3×3 odd-size image in the test suite (playbook layer 6). Then the teachable epilogue: the three earlier "fixes" are reverted one by one — the NULL check was dead code, the bigger buffer had merely moved the neighbor being corrupted (turning crashes into the smears!), the reordered frees did nothing. All three had been treating symptoms of a bug nobody had SEEN. Total time with instruments: 40 minutes. The friend's takeaway, verbatim, belongs on a poster: <em>"I spent three weekends debugging the crash and the bug was never in any function that crashed."</em></p>
+
+<h2>Practice</h2>
+<details><summary>1. Match symptom → first instrument (one each, justify in a clause): (a) works -O0, hangs -O2; (b) free() aborts with "invalid pointer"; (c) RSS grows 40 MB/hour; (d) a result matrix has 3 wrong cells, no crash; (e) crash only on the ARM runner.</summary><div class="body">(a) UBSan — the flag-dependent signature is UB (3.2 quiz 2). (b) ASan — free-of-non-malloc'd/middle pointer or earlier header smash (3.5 P4); ASan names the pointer's provenance. (c) ASan leak-at-exit on a shortened run, valgrind for taxonomy (3.5 scenario's exact play). (d) gdb watch on one wrong cell's address — corruption without crash is watchpoint territory (Ex.1). (e) UBSan + 3.2's implementation-defined checklist (char signedness!) — platform-splitting bugs are usually the 3.2 §3 table, and the checksum scenario there is the template. Five symptoms, five different first moves — the table is the skill.</div></details>
+<details><summary>2. Read this ASan excerpt and state: bug class, the two code locations you'd open, the size of the object, and your first hypothesis. <code>ERROR: heap-use-after-free READ of size 8 at 0x614...  #0 report_stats harness.c:88  freed by: #0 free #1 bench_teardown harness.c:71  previously allocated by: #1 bench_create harness.c:22 ... region is 8192 bytes</code></summary><div class="body">Class: use-after-free (read). Open: harness.c:88 (the ghost read) and harness.c:71 (the premature free) — the report hands you BOTH ends of the broken ownership (3.5's one-owner law, violated between them). Object: 8192 B = 1024 doubles — smells like the timings buffer (M1 L1 arithmetic profiling the victim). Hypothesis: report_stats called AFTER bench_teardown — a lifecycle-order bug (teardown too early, or report added later without checking the create/destroy pairing — 3.5 §4's create/destroy row). Note you formed all this WITHOUT source access — that's what report literacy buys, and it's a genuinely asked interview exercise.</div></details>
+<details><summary>3. Why can a use-after-free print CORRECT values for weeks and then break during an unrelated deploy? Mechanism (3.5 §1 + this lesson), the name for this bug lifecycle, and the two structural defenses that end it.</summary><div class="body">Freed blocks keep their bytes until the allocator REUSES them (freelist — 3.5 §1); reads of the ghost return stale-but-correct data. Any change to allocation patterns — new feature, library bump, different input mix — reshuffles reuse, and the ghost's bytes become someone else's live data: "impossible" values, weeks later, in code nobody touched. Lifecycle name: latent UB / heisenbug (the deploy didn't CAUSE it; it collapsed the wave function). Defenses: ASan-in-CI (quarantine catches the read the week it's written — worked example's decision) and ownership-by-construction (3.7's RAII/no-copy types — the read can't outlive what a scope owns). The story "our bug appeared after an unrelated deploy" is told in every engineering org weekly; you now know it's almost never about the deploy.</div></details>
+<details><summary>4. Core-dump drill: list the exact command sequence from "service crashed on server X" to "line hypothesis in hand" — enabling cores, retrieving, opening, the three gdb commands, and the ONE thing you must match between server and your gdb session for symbols to resolve.</summary><div class="body"><code>ulimit -c unlimited</code> (or systemd-coredump config) BEFORE — cores must be enabled ahead of the crash (the ops lesson: do it today, not after). Retrieve core + the EXACT binary (and ideally its .debug info); <code>gdb ./prog core</code>; then <code>bt</code> (route), <code>frame N</code> into the deepest owned frame, <code>info locals</code> / <code>print *ptr</code> (state at death). The must-match: the binary BUILD — same executable (build IDs are checked; a "fixed" rebuild won't resolve symbols against the old core). This is why fleets archive binaries+symbols per release (and why -g in production flags — §1 — costs nothing but saves incidents). Fifteen minutes of setup, purchased before the fire.</div></details>
+<details><summary>5. The assert-vs-sanitizer boundary: for the IDX macro's r &lt; H invariant, compare four enforcement points — caller discipline only, assert in debug builds, ASan at access time, .at()-style checked access always — on: when it fires, what it costs, what it reports, and which combination 3.9 should ship. (M2 L6's boundary doctrine is the rubric.)</summary><div class="body">Caller-only: fires never (hope is not enforcement); cost 0; reports nothing — necessary but insufficient. assert: fires at the VIOLATION with the invariant's NAME (r &lt; H — self-documenting); cost ~1 branch in debug, 0 in release (-DNDEBUG); the best signal-per-cost for interior code. ASan: fires at the ACCESS (may be past the assert's context); ~2× whole-program; report is generic (overflow) not semantic (which invariant) — the safety net UNDER asserts, not instead. Checked-always: fires always, costs always (quiz-4-of-3.7's measured tax), right at API boundaries where inputs are untrusted. Ship in 3.9: asserts on IDX bounds in debug + ASan in make test + unchecked hot loop in bench builds after the bound is proven by the loop header (M2 L6: checks at edges, trust inside) — three layers, each where its cost/signal ratio wins. Defense-in-depth is a placement problem, and you just solved a real instance.</div></details>
+<details><summary>6. Instrument the un-instrumentable: a third-party .so (no source, no rebuild) is suspected of corrupting YOUR buffer. Which tools remain (name two), the exact gdb move to catch it in the act, and what fact from §3's table makes valgrind uniquely valuable here?</summary><div class="body">Remaining: gdb (any binary) and valgrind (no rebuild needed — §3's killer row). gdb move: <code>watch buf[suspicious_index]</code> (or the raw address: <code>watch *(float*)0x...</code>) — hardware watchpoints don't care whose code writes; when it fires inside the .so, bt shows their frames + the call path from yours (evidence for the vendor ticket!). valgrind's uniqueness: instruments THEIR code identically to yours without any rebuild — ASan can't reach code compiled without it. Bonus discipline: reproduce with LD_PRELOAD-order noted and versions pinned — vendor bug reports live or die on that metadata (M2 L7's provenance ethic, applied to blame).</div></details>
+<details><summary>7. Design: the debugging-runbook page for the course repo (CONVENTIONS.md §Debugging). One page: the symptom→tool table (customized with the course's own scars — cite the lesson for each row), the build-target matrix (dev/test/bench/prod flags), the core-dump policy, the report-reading checklists (ASan's ①–⑤, valgrind's taxonomy), and the two named anti-patterns banned outright. This page ships with 3.9's capstone repo.</summary><div class="body">Table rows (each with its scar): crash→ASan/gdb-core (3.8 scenario); flag-dependent→UBSan (3.2 quiz 2); leak→ASan-exit then valgrind taxonomy (3.5 scenario); silent corruption→watchpoint (3.4 Ex.2); platform-split→3.2 §3 checklist (checksum scenario). Build matrix: dev = -O2 -g -fno-omit-frame-pointer; test = dev + -fsanitize=address,undefined (separate objects — 3.6 P6); bench = -O2/-O3 -g, sanitizers BANNED in timed paths (gotcha #3), results must name the build; prod-style = -O2 -g -D_FORTIFY_SOURCE=2 -fstack-protector-strong (§4). Core policy: enabled everywhere, binaries+symbols archived per tag (P4). Checklists: ASan ①what ②dir/size ③your-frame ④birthplace ⑤offset-arithmetic (do the M1 L1 division!); valgrind: definitely&gt;indirectly&gt;still-reachable triage (3.5 P6). Banned: "fix by rearranging until the crash stops" (the scenario's three fake fixes — symptom-shuffling UB) and "printf-and-redeploy on production crashes" (quiz 1). One page, every line traceable to an incident this module manufactured deliberately — which is WHY the module manufactured them.</div></details>
+
+<div class="pager">
+  <a href="lesson-07.html">← C++ essentials</a>
+  <a href="lesson-09.html">Next: Capstone — CPU matmul & the honest ladder →</a>
+</div>
+<div class="footer">GPU Mastery · Module 3 · Lesson 8 — works offline · progress saved in your browser</div>
+</div>
+<script src="../assets/diagrams3.js"></script>
+<script src="../assets/app.js"></script>
+</body>
+</html>

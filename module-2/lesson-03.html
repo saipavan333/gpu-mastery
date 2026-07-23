@@ -1,0 +1,251 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>2.3 Functions & Scope — GPU Mastery</title>
+<link rel="stylesheet" href="../assets/style.css">
+</head>
+<body data-lesson="m2l3">
+<nav><div class="inner">
+  <a class="logo" href="../index.html">GPU<span>Mastery</span></a>
+  <a class="item" href="../index.html">Home</a>
+  <a class="item on" href="../curriculum.html">Curriculum</a>
+  <a class="item" href="../labs.html">Labs</a>
+  <a class="item" href="../setup.html">Lab setup</a>
+  <a class="item" href="../prompt.html">Generator prompt</a>
+</div></nav>
+<div class="wrap">
+
+<div class="lesson-top">
+  <div><span class="badge">Module 2 · Lesson 3</span><span class="badge dim">≈ 2–3 h</span></div>
+  <button id="donebtn" class="donebtn">Mark lesson complete</button>
+</div>
+<h1>Functions & Scope — building your own machines</h1>
+<p class="lead">M1 L2 called functions "machines with one job." Today you build the machines: define them, pass data in, get results out, and understand exactly where names live. Plus the design property — purity — that will decide, in Module 5, whether your code can run on 10,000 threads.</p>
+
+<h2>Concept</h2>
+
+<h3>def: from formula to machine</h3>
+<pre><code>def ceil_div(n, b):
+    """How many blocks of size b cover n items? (M1 L2)"""
+    return (n + b - 1) // b
+
+blocks = ceil_div(10, 4)        # 3 — call it like any built-in
+print(ceil_div(1_000_000, 128)) # 7813 — write once, reuse forever</code></pre>
+<p>Anatomy: <code>def name(parameters):</code>, an indented body, and <code>return</code> which ends the call and delivers the result. The <em>docstring</em> (first line, triple-quoted) is the function's contract — <code>help(ceil_div)</code> prints it. A function with no <code>return</code> (or a bare one) returns <code>None</code> — the "nothing" object, and the source of a classic bug (gotchas).</p>
+
+<h3>The call stack: where parameters live</h3>
+<div class="diagram" data-diagram="m2l3-stack" data-caption="Each call pushes a frame with its own names; return pops it. Locals cannot collide."></div>
+<pre><code>def square(x):  return x * x
+def area(r):    return 3.14159 * square(r)
+print(area(2.0))     # 12.56636 — square's x was born and died inside the call</code></pre>
+<p>Every call gets a fresh <em>frame</em> holding its local names. <code>square</code>'s <code>x</code> and any <code>x</code> elsewhere are strangers. This is why 2.2's traceback (coming in 2.6) shows a <em>chain of frames</em> — you're literally reading the stack. And it's why recursion is even possible: each level owns its variables.</p>
+
+<h3>Scope: how Python finds a name</h3>
+<div class="diagram" data-diagram="m2l3-scope" data-caption="Lookup walks outward: Local, then Global (your file), then Builtins."></div>
+<pre><code>balance = 50.0                    # global (module level)
+
+def verdict(intensity):
+    threshold = balance           # READING a global: automatic, fine
+    return "compute" if intensity > threshold else "memory"
+
+def broken(intensity):
+    balance = balance * 2         # UnboundLocalError! assignment makes 'balance'
+    ...                           # local for the WHOLE function — even before the =</code></pre>
+<p>The rule that resolves every scope confusion: <strong>assignment anywhere in a function makes that name local everywhere in it</strong>. Reading outer names is free; rebinding them requires <code>global</code> (module level) — which you should treat as a design smell, not a tool (see purity). Constants by convention are SHOUTED: <code>BYTES_PER_FP32 = 4</code> at module top; reading them everywhere is clean style.</p>
+
+<h3>Defaults, keywords, and calls that read like sentences</h3>
+<pre><code>def kernel_time_ms(flops, peak=50e12, efficiency=0.35):
+    """Estimated runtime given achieved fraction of peak (M1 L3)."""
+    return flops / (peak * efficiency) * 1000
+
+kernel_time_ms(1.37e11)                        # defaults fill in → 7.83 ms
+kernel_time_ms(1.37e11, efficiency=0.9)        # keyword: skip 'peak', name what you change
+kernel_time_ms(1.37e11, 989e12, 0.6)           # positional — legal, but which is which?</code></pre>
+<p>Keyword arguments are self-documenting call sites — with numeric-heavy GPU code (<code>tile=32, warps=4, stages=2</code>), they're the difference between readable and radioactive. Required-then-optional order is enforced; and <strong>never use a mutable default</strong> (<code>def f(x, acc=[])</code>) — the default object is created once and shared across all calls (2.4 shows the crime scene; the diagram in 2.4's shared-row trap is the same disease).</p>
+
+<h3>Purity: the property GPUs will pay you for</h3>
+<div class="diagram" data-diagram="m2l3-pure" data-caption="Pure = same in, same out, touches nothing else. That's what parallel hardware wants."></div>
+<pre><code># PURE — a fact about math                    # IMPURE — a fact about history
+def lerp(a, b, t):                             frame_count = 0
+    return a + t * (b - a)                     def next_frame():
+                                                   global frame_count
+                                                   frame_count += 1
+                                                   return frame_count</code></pre>
+<p>A pure function's output depends only on its inputs, and it changes nothing outside itself. Consequences, in ascending importance: it's trivially testable (2.6), cacheable, safe to reorder — and safe to run on 10,000 threads at once, because threads that share nothing can't race (M5 proves the converse with a corrupted counter). Real programs need <em>some</em> state (files, RNGs, the GPU itself); the professional structure is a <strong>pure core</strong> with side effects pushed to the edges.</p>
+
+<h2>Worked example</h2>
+<div class="card">
+<p><strong>Task:</strong> Start your toolbox — <code>gpu_math.py</code>, four functions you'll still be importing in Module 5. Written with docstrings, defaults, and a micro self-check block.</p>
+<pre><code>"""gpu_math — tiny helpers the whole course reuses."""
+
+def ceil_div(n, b):
+    """Blocks of size b covering n items. ceil_div(10,4) == 3."""
+    if b &lt;= 0: raise ValueError(f"block size must be positive, got {b}")
+    return (n + b - 1) // b
+
+def clamp(x, lo, hi):
+    """Pin x into [lo, hi] — the saturate() of M1 L1's pixel fix."""
+    return lo if x &lt; lo else hi if x > hi else x
+
+def lerp(a, b, t):
+    """Linear interpolation (M1 L5): t=0 → a, t=1 → b."""
+    return a + t * (b - a)
+
+def is_pow2(n):
+    """True iff n is a positive power of two (M1 L1 bit trick)."""
+    return n > 0 and (n &amp; (n - 1)) == 0
+
+# --- micro-checks: run the file directly to verify (2.6 upgrades these to pytest)
+if __name__ == "__main__":
+    assert ceil_div(10, 4) == 3 and ceil_div(8, 4) == 2      # ragged + exact
+    assert clamp(273, 0, 255) == 255                          # M1 L1's overflow fix
+    assert lerp(0.0, 10.0, 0.25) == 2.5
+    assert is_pow2(1024) and not is_pow2(1000) and not is_pow2(0)
+    print("gpu_math: all checks pass")</code></pre>
+<p><strong>Decisions made:</strong> <code>ceil_div</code> validates its input and fails loudly (a b=0 would otherwise crash cryptically at the modulo — fail at the boundary, 2.1 §5); every function is pure; docstrings carry a worked example each (the cheapest documentation that stays true); and the <code>__main__</code> guard means the checks run only when you execute the file directly, not when another file imports it (2.7 explains the mechanism). Four functions, zero state, infinitely reusable: this file is the seed of every utils module you'll ever maintain.</p>
+</div>
+
+<h2>Key points</h2>
+<ul class="keypoints">
+<li><code>def</code> builds a machine: parameters in, <code>return</code> out; no return means <code>None</code>, silently — and half of all "why is my result None" bugs.</li>
+<li>Each call gets its own stack frame of locals; frames push on call, pop on return — recursion and non-colliding names both fall out of this picture.</li>
+<li>Lookup is Local → Global → Builtins; assignment anywhere in a function makes the name local <em>everywhere</em> in it (the UnboundLocalError rule).</li>
+<li>Keyword arguments make numeric call sites self-documenting; defaults fill gaps — but never default to a mutable object.</li>
+<li>Pure functions (same in → same out, no outside effects) are testable, cacheable, reorderable, and parallel-safe — design pure by default, push state to the edges.</li>
+<li><code>f</code> is the function object; <code>f()</code> calls it. Passing <code>f</code> around (to sorted, to a timer) is normal Python and the seed of "functions as values."</li>
+</ul>
+
+<h2>Quiz</h2>
+<div class="quiz">
+  <div class="q">1. What does this print? <code>def f(x): x = x + 1</code> then <code>y = f(10); print(y)</code></div>
+  <button class="opt">11 — f returns its last expression</button>
+  <button class="opt">10 — x is unchanged outside</button>
+  <button class="opt" data-c="1">None — f has no return, so the call evaluates to None</button>
+  <button class="opt">Error — x + 1 has no effect</button>
+  <div class="expl">Python functions return None unless a return says otherwise — there is no implicit "last expression" return (that's other languages). The x=x+1 happened in f's frame and evaporated with it. When something is mysteriously None, look for the missing return first.</div>
+</div>
+<div class="quiz">
+  <div class="q">2. <code>count = 0</code> at module level; inside <code>def tick(): count += 1</code>. Calling tick() raises UnboundLocalError. Why, when reading count works fine elsewhere?</div>
+  <button class="opt">count is protected because it's an int</button>
+  <button class="opt" data-c="1">The assignment makes count local to tick for the whole function body — so += reads a local that doesn't exist yet</button>
+  <button class="opt">You can never touch globals from a function</button>
+  <button class="opt">+= only works on floats</button>
+  <div class="expl">count += 1 is count = count + 1: the assignment marks count LOCAL everywhere in tick, so the read side finds an unassigned local. Fixes, best first: pass it in and return it (pure!), use a class (later), or declare global count (design smell). The rule is compile-time, not line-by-line — that's the surprising part worth remembering.</div>
+</div>
+
+<h2>Exercises</h2>
+<details><summary>Exercise 1 — Write <code>launch_shape(n, block=256)</code> returning the pair (blocks, idle_threads) for a CUDA-style launch, validating that block is a positive power of two ≤ 1024 (real CUDA limit) using your own is_pow2. Include docstring + three asserts, including one that must raise.</summary><div class="body">
+<pre><code>def launch_shape(n, block=256):
+    """(blocks, idle) for covering n items; block must be a power of two ≤ 1024."""
+    if not (is_pow2(block) and block &lt;= 1024):
+        raise ValueError(f"block must be a power of two ≤ 1024, got {block}")
+    blocks = ceil_div(n, block)
+    return blocks, blocks * block - n
+
+assert launch_shape(1_000_000) == (3907, 192)      # 3907*256 = 1000192
+assert launch_shape(1024, 1024) == (1, 0)          # exact fit edge
+try:
+    launch_shape(10, 384)                           # 384 = not a power of two
+    assert False, "should have raised"
+except ValueError:
+    pass</code></pre>
+<p>Returning a pair is a tuple preview (2.4 formalizes unpacking: <code>blocks, idle = launch_shape(n)</code>). The try/except-asserts pattern — "this call MUST fail" — is a real testing idiom you'll meet again in pytest as <code>pytest.raises</code>. Check the arithmetic: ceil(10⁶/256) = 3907 (M1 L2), idle = 192 ✓.</p>
+</div></details>
+<details><summary>Exercise 2 — Purity audit: classify each and fix the impure ones without changing what callers can compute. (a) <code>def gb(nbytes): return nbytes/2**30</code> (b) <code>def log_gb(nbytes): print(nbytes/2**30)</code> (c) <code>seen = 0</code>; <code>def biggest(x): global seen; seen = max(seen, x); return seen</code>.</summary><div class="body">
+<p>(a) <strong>Pure</strong> ✓. (b) <strong>Impure</strong> (I/O side effect) — and worse, it returns None so callers can't use the value. Fix: return the number; let the CALLER print. Formatting-vs-computing separation is the miniature of "pure core, effects at edges." (c) <strong>Impure and stateful</strong> — result depends on call history; two modules using it corrupt each other; parallel calls race. Fix: make the state explicit in the signature: <code>def biggest(x, seen): return max(seen, x)</code> and let the caller carry <code>seen</code> forward (or use the best-so-far loop from 2.2 locally). Passing state in and out looks clunkier by one argument and pays for itself the first time you test it, cache it, or thread it — which is Module 5's entire opening argument.</p>
+</div></details>
+
+<hr>
+<h1>Go deeper — the complete guide</h1>
+<p>Functions as values, *args/**kwargs, closures without tears, recursion priced honestly, type hints as documentation, and the design rules that keep functions small and testable.</p>
+
+<h2>1. Functions are objects — pass them around</h2>
+<pre><code>def by_time(run): return run[1]                 # tuple preview: run = (name, ms)
+runs = [("naive", 300.0), ("tiled", 12.5), ("cublas", 2.9)]
+print(sorted(runs, key=by_time))                # sorted takes a FUNCTION as an argument
+print(max(runs, key=by_time))                   # ('naive', 300.0) — worst kernel
+fast = filter(lambda r: r[1] &lt; 20, runs)        # lambda: tiny anonymous function</code></pre>
+<p><code>key=</code> is your first taste of higher-order programming: behavior as a parameter. <code>lambda args: expr</code> is a one-expression function — fine for keys, wrong for anything with logic (give it a def and a name). This "pass the function" pattern is exactly how you'll hand kernels to timers (2.6), transforms to pipelines (2.8), and — eventually — Python functions to <code>torch.compile</code> (Track A9), which compiles them into GPU code. The idea scales from sorting three tuples to compiling transformers.</p>
+
+<h2>2. *args and **kwargs: variadic machines</h2>
+<pre><code>def time_call(fn, *args, repeats=5, **kwargs):
+    """Time fn(*args, **kwargs) — median of repeats (M1 L7 ritual)."""
+    import time
+    ts = []
+    for _ in range(repeats):
+        t0 = time.perf_counter()
+        fn(*args, **kwargs)                    # forward everything untouched
+        ts.append(time.perf_counter() - t0)
+    ts.sort()
+    return ts[len(ts)//2]
+
+med = time_call(ceil_div, 10**9, 256, repeats=9)</code></pre>
+<p><code>*args</code> collects extra positionals into a tuple, <code>**kwargs</code> extra keywords into a dict (2.4's structures, previewed); the same stars <em>unpack</em> at the call. This wrapper shape — accept anything, forward faithfully, add behavior around the call — is the skeleton of every timer, logger, and cache; when you meet decorators later, they're this pattern with syntax sugar. Note the keyword-only <code>repeats</code> after <code>*args</code>: callers must name it, so it can't be swallowed into the forwarded arguments by accident.</p>
+
+<h2>3. Closures: functions that remember their birthplace</h2>
+<pre><code>def make_scaler(k):
+    def scale(x):
+        return k * x            # k is captured from the enclosing frame
+    return scale
+
+to_ms  = make_scaler(1000.0)
+to_gib = make_scaler(1 / 2**30)
+print(to_ms(0.00275), to_gib(14e9))    # 2.75  13.038...</code></pre>
+<p>The inner function keeps a reference to <code>k</code> even after <code>make_scaler</code> returns — the frame's captured names outlive the frame. This is the fourth letter of LEGB (Enclosing, between Local and Global). Used well, closures are configuration without globals: build the function you need, pre-loaded with its constants. The one trap: closures capture the <em>variable</em>, not its value at capture time — building closures in a loop over <code>i</code> gives functions that all see the final <code>i</code>; fix with a default (<code>def f(x, i=i)</code>) if you ever hit it.</p>
+
+<h2>4. Recursion: elegant, priced, and bounded</h2>
+<pre><code>def tree_sum(vals):
+    """Sum by halving — the SHAPE of a GPU reduction (M1 L3's staircase)."""
+    if len(vals) == 1: return vals[0]          # base case FIRST, always
+    mid = len(vals) // 2
+    return tree_sum(vals[:mid]) + tree_sum(vals[mid:])</code></pre>
+<p>Recursion = a function calling itself on smaller input, one frame per level (the stack diagram, now load-bearing). Depth here is log₂n (M1 L3) — 20 frames for a million values, trivially safe against Python's ~1000-frame default limit. But naive linear recursion (<code>f(n) calls f(n-1)</code>) stacks n frames — a RecursionError at n≈1000 — and Python does <em>not</em> optimize tail calls: iterative loops win for linear scans. Verdict you can defend: <strong>recursion for divide-and-conquer (log depth), loops for linear passes</strong>. Bonus foreshadowing: tree_sum's call structure is literally the reduction topology you'll build in shared memory in 5.8 — and M1 L8 already told you the tree order is more accurate for floats, too.</p>
+
+<h2>5. Type hints: documentation that tools can check</h2>
+<pre><code>def kernel_time_ms(flops: float, peak: float = 50e12, efficiency: float = 0.35) -> float:
+    """Runtime estimate at a given fraction of peak."""
+    return flops / (peak * efficiency) * 1000</code></pre>
+<p>Hints don't change runtime behavior (Python won't stop a string from arriving) — they're machine-readable documentation that editors and checkers (mypy/pyright) use to catch bugs before running, and they make signatures self-explaining in <code>help()</code>. House style from here on: hint public functions, skip throwaway scripts. When you read PyTorch source in Track A2, every signature will speak this dialect — learn to read it now while the examples are four lines long.</p>
+
+<h2>6. Function design rules (the code-review checklist)</h2>
+<table>
+<tr><th>Rule</th><th>Why / test</th></tr>
+<tr><td>One job, named honestly</td><td>If the name needs "and" (<code>load_and_normalize_and_plot</code>), split it.</td></tr>
+<tr><td>Few parameters (≤ ~4)</td><td>More = the function wants a structure (2.4) or is doing two jobs.</td></tr>
+<tr><td>Validate at the boundary, raise loudly</td><td>ceil_div's b ≤ 0 check: fail where the mistake is, not three calls deeper (2.6 formalizes).</td></tr>
+<tr><td>Return values; don't print them</td><td>Printing is a side effect that destroys composability — the caller formats.</td></tr>
+<tr><td>Pure core, effects at the edge</td><td>The testability/parallelism dividend; today's habit, Module 5's requirement.</td></tr>
+<tr><td>Docstring with one worked example</td><td>The example doubles as a doctest-able check and never rots unnoticed.</td></tr>
+</table>
+
+<h2>7. Gotchas</h2>
+<div class="gotcha"><strong>Calling vs referencing.</strong> <code>time_call(ceil_div, ...)</code> passes the machine; <code>time_call(ceil_div(10,4), ...)</code> calls it FIRST and passes 3 — then the timer explodes trying to call an int. Missing/extra parentheses on function names cause both bugs.</div>
+<div class="gotcha"><strong>The vanished return.</strong> Adding a print to debug, deleting the return by accident; or returning inside an if but falling off the end (→ None) on the else path. Every code path returns, deliberately.</div>
+<div class="gotcha"><strong>Mutable default arguments.</strong> <code>def f(x, acc=[])</code>: ONE list, created at def time, shared by every call forever. Idiom: <code>acc=None</code> then <code>if acc is None: acc = []</code>. (2.4 shows the shared-object mechanics that make this inevitable rather than weird.)</div>
+<div class="gotcha"><strong>Shadowing your own tools.</strong> A local <code>sum = 0</code> or parameter named <code>list</code> hides the builtin for the whole function — the same trap as 2.1's, now scoped. Linters flag it; let them.</div>
+<div class="gotcha"><strong>global as a habit.</strong> Each <code>global</code> couples the function to hidden state — untestable, unparallelizable, order-dependent (the impure diagram's disease). Legitimate uses exist (module-level caches, counters in tiny scripts); reaching for it in the first draft isn't one.</div>
+<div class="gotcha"><strong>Doing work at import time.</strong> Top-level code runs when the file is imported (2.7). Heavy computation or prints outside <code>if __name__ == "__main__":</code> makes your module slow and noisy for everyone who imports it.</div>
+
+<h2>Scenario — the accumulator that couldn't be tested</h2>
+<p>You inherit a teammate's benchmarking script for the study group's kernel comparisons. It "works on his machine" and nowhere else, and the code review is a museum of this lesson: a global <code>results = []</code> that every function appends to (call order matters — running analyses in a different sequence changes the report); <code>def bench(fn, runs=[]) </code> with a mutable default that has been quietly accumulating timings <em>across different kernels</em> since Tuesday (the "why does the naive kernel have 400 samples" mystery); and a <code>summarize()</code> that prints instead of returning, so nobody can sort or compare its outputs. The refactor is mechanical with this lesson in hand: <code>bench(fn, *args, repeats=20) -> list[float]</code> pure, state passed explicitly; <code>summarize(times) -> tuple</code> returning (median, iqr, outliers) computed with 2.2's patterns; printing quarantined in one <code>report()</code> at the edge; the accidental cross-kernel contamination fixed by deleting one <code>=[]</code>. Line count: nearly identical. Behavior: identical on the happy path. Difference: it now runs in any order, tests in 2.6 with three asserts, and — the punchline arriving in Module 5 — parallelizes across kernels with zero changes, because nothing shares anything. Purity wasn't philosophy; it was a week of debugging refunded.</p>
+
+<h2>Practice</h2>
+<details><summary>1. Predict: <code>def f(a, b=2, c=3): return a*100 + b*10 + c</code> — evaluate f(1), f(1, c=9), f(1, 9), f(b=5, a=0), and the illegal call among f(1, b=2, 3) / f(1, **{"c": 7}).</summary><div class="body">123, 129, 193 (positional 9 lands on b!), 53, and f(1, b=2, 3) is a SyntaxError — positional after keyword. f(1, **{"c": 7}) = 127 is legal (dict unpacking). The f(1,9)→193 line is the argument-order trap that keyword-calling exists to prevent.</div></details>
+<details><summary>2. Trace the stack: <code>def g(x): return x + 1</code>; <code>def h(x): return g(x * 2)</code>; <code>h(5)</code>. List the frames alive at the deepest moment and each frame's locals.</summary><div class="body">Deepest moment (inside g): [module frame] → [h: x=5] → [g: x=10]. g returns 11 → its frame pops → h returns 11. Two different x's coexisted peacefully in two frames — the whole point of the stack diagram. (This trace format is exactly how you'll read 2.6's tracebacks.)</div></details>
+<details><summary>3. Write <code>occupancy(threads_per_block, regs_per_thread, regs_per_sm=65536)</code> returning how many BLOCKS fit per SM by the register budget alone (floor division!), with validation that all inputs are positive. Compute it for (256, 64) and (256, 128) and state the M5 foreshadow.</summary><div class="body"><code>def occupancy(tpb, rpt, regs_per_sm=65536): if tpb &lt;= 0 or rpt &lt;= 0 or regs_per_sm &lt;= 0: raise ValueError(...); return regs_per_sm // (tpb * rpt)</code>. (256,64): 65536//16384 = 4 blocks. (256,128): 65536//32768 = 2 blocks — doubling per-thread registers halved residency. Foreshadow: this exact floor-division economics is 5.6's occupancy lesson; registers are the currency, and the compiler's -maxrregcount flag is you negotiating this formula.</div></details>
+<details><summary>4. The closure trap: <code>fns = []</code>; <code>for k in [2, 10]: fns.append(lambda x: k * x)</code>. What does fns[0](3) return and why? Give the one-token-ish fix.</summary><div class="body">30, not 6 — both lambdas captured the VARIABLE k, which finished the loop pointing at 10 (names are tags; the closure holds the tag, not a snapshot). Fix: <code>lambda x, k=k: k * x</code> — the default evaluates AT DEFINITION, freezing each k. Deep-dive §3's warning, demonstrated in two lines; this appears in real callback and plotting code constantly.</div></details>
+<details><summary>5. Convert this to a pure function plus an edge: <code>TOTAL = 0.0</code>; <code>def add_gb(nbytes): global TOTAL; TOTAL += nbytes/2**30; print(f"running: {TOTAL:.2f} GiB")</code>. Callers currently rely on the print. Show the pure core + edge wrapper, and name the concrete benefits.</summary><div class="body">Core: <code>def to_gib(nbytes): return nbytes / 2**30</code> (pure). Accumulation belongs to the caller: <code>total += to_gib(nb)</code> — or a generator/loop. Edge: <code>def report(total): print(f"running: {total:.2f} GiB")</code>. Benefits, concretely: to_gib is testable with one assert; totals for two independent datasets can't cross-contaminate; parallel accumulation becomes a sum of results (associative reduction — M1 L8's tree!) instead of a race on TOTAL. The refactor is the scenario's, miniaturized.</div></details>
+<details><summary>6. Why is <code>def norm(v, eps=1e-12): return [x / (mag(v) + eps) for x in v]</code> calling mag(v) len(v) times a performance AND design smell? Fix both with one local variable, and connect to a Module 1 principle.</summary><div class="body">The comprehension re-evaluates mag(v) per element — O(n²) total work for an O(n) job (Gauss would like a word — M1 L2 §4), and it hides an invariant computation inside a loop. Fix: <code>m = mag(v) + eps</code> then divide by m — hoisting the invariant, exactly M1 L2's "constants hoist out of Σ" and lesson 5's normalize-once-outside-the-pixel-loop decision. Compilers do this for you in C sometimes; in Python, YOU are the optimizer.</div></details>
+<details><summary>7. Design: specify (signatures + docstrings + purity notes, no bodies needed) a 4-function module <code>bench.py</code> that 2.6 will test and 2.8 will use: <code>time_once(fn, *args) -> float</code>, <code>bench(fn, *args, warmup=3, repeats=20) -> list[float]</code>, <code>stats(times) -> tuple[float, float, int]</code> (median, iqr, outlier count vs 3× median), <code>report(name, s) -> str</code>. Which are pure? Where does M1 L7 live? What did you deliberately NOT let any function do?</summary><div class="body">time_once: impure by nature (clock I/O) but effect-contained; bench: impure (calls time_once) but stateless — no global accumulation, warmup discarded INSIDE it per M1 L7; stats: PURE — the ritual's arithmetic (median not mean, IQR spread, 3×-median outlier flag, all M1 L7); report: pure (returns a string; printing left to the caller). Deliberately forbidden everywhere: printing (except the caller), global state, and deleting outliers (they're counted and reported, never dropped — M1 L7's ethics). This module is the scenario's refactor, designed before writing — which is the order pros do it in.</div></details>
+
+<div class="pager">
+  <a href="lesson-02.html">← Control flow</a>
+  <a href="lesson-04.html">Next: Lists, tuples, dicts & sets →</a>
+</div>
+<div class="footer">GPU Mastery · Module 2 · Lesson 3 — works offline · progress saved in your browser</div>
+</div>
+<script src="../assets/diagrams2.js"></script>
+<script src="../assets/app.js"></script>
+</body>
+</html>

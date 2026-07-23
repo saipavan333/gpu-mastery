@@ -1,0 +1,178 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>1.5 Vectors & the Dot Product — GPU Mastery</title>
+<link rel="stylesheet" href="../assets/style.css">
+</head>
+<body data-lesson="m1l5">
+<nav><div class="inner">
+  <a class="logo" href="../index.html">GPU<span>Mastery</span></a>
+  <a class="item" href="../index.html">Home</a>
+  <a class="item on" href="../curriculum.html">Curriculum</a>
+  <a class="item" href="../labs.html">Labs</a>
+  <a class="item" href="../setup.html">Lab setup</a>
+  <a class="item" href="../prompt.html">Generator prompt</a>
+</div></nav>
+<div class="wrap">
+
+<div class="lesson-top">
+  <div><span class="badge">Module 1 · Lesson 5</span><span class="badge dim">≈ 2–3 h</span></div>
+  <button id="donebtn" class="donebtn">Mark lesson complete</button>
+</div>
+<h1>Vectors & the Dot Product — the atom of GPU work</h1>
+<p class="lead">Strip away the frameworks and a GPU spends its life doing one thing: dot products, billions per millisecond. Lighting a pixel, firing a neuron, ranking a document — same operation. This lesson makes vectors and their one killer product completely yours.</p>
+
+<h2>Concept</h2>
+
+<h3>A vector is two things at once</h3>
+<p><strong>Geometric view:</strong> an arrow — direction plus length. Velocity, force, "which way the light points." <strong>Computational view:</strong> a list of numbers — <code>(3, 4)</code>, <code>float3</code>, a row of 1024 floats. The whole power of the subject is that these are the <em>same object</em>: geometry gives you intuition, components give you code. An embedding vector in 1024-D has no drawable arrow, but every geometric fact (length, angle, projection) still computes fine — that's why "distance between meanings" makes sense at all.</p>
+<pre><code>math:   v = (3, 4)         ‖v‖ = √(3² + 4²) = 5        (Pythagoras — Lesson 4)
+CUDA:   float3 v = make_float3(3.f, 4.f, 0.f);
+NumPy:  v = np.array([3.0, 4.0]);  np.linalg.norm(v)  # 5.0</code></pre>
+
+<h3>The two operations that respect the arrow</h3>
+<p><strong>Addition</strong> — tip to tail; componentwise in code. <strong>Scalar multiplication</strong> — stretch or shrink (negative flips direction). Everything else (subtraction, averages, interpolation) is combinations of these two:</p>
+<div class="diagram" data-diagram="m1l5-add" data-caption="Tip-to-tail addition: geometry on the left, plain per-component adds on the right."></div>
+<pre><code>a + b = (a.x + b.x, a.y + b.y)          a − b = a + (−1)·b
+lerp(a, b, t) = a + t·(b − a)           // t∈[0,1] slides from a to b — animation's favorite line
+midpoint = 0.5·(a + b)</code></pre>
+
+<h3>Length and normalization</h3>
+<div class="diagram" data-diagram="m1l5-norm" data-caption="Normalizing keeps direction, forces length 1 — the prerequisite for honest angle math."></div>
+<pre><code>‖v‖ = √(v·v)                     // length is the dot product with yourself, rooted
+u = v / ‖v‖                      // unit vector: length exactly 1
+// guard: if ‖v‖ == 0 there is no direction — division makes NaN, and NaN spreads</code></pre>
+
+<h3>The dot product: one number measuring alignment</h3>
+<div class="diagram" data-diagram="m1l5-dot" data-caption="Same number two ways: multiply-and-add the components, or ‖a‖‖b‖cos θ."></div>
+<pre><code>algebraic:   a·b = a.x·b.x + a.y·b.y + a.z·b.z         // multiply matching slots, add
+geometric:   a·b = ‖a‖ · ‖b‖ · cos θ                    // θ = angle between them</code></pre>
+<p>The algebraic form is how you <em>compute</em> it (a loop of fused multiply-adds — the FMA from Lesson 3, which is why hardware loves it). The geometric form is how you <em>read</em> it:</p>
+<table>
+<tr><th>a·b value</th><th>Meaning</th><th>Used for</th></tr>
+<tr><td>> 0</td><td>angle < 90° — broadly same direction</td><td>"is the surface facing the light?"</td></tr>
+<tr><td>= 0</td><td>exactly perpendicular (orthogonal)</td><td>independence tests, building coordinate frames</td></tr>
+<tr><td>< 0</td><td>angle > 90° — pointing away</td><td>backface culling, "behind the camera" tests</td></tr>
+<tr><td>= ‖a‖‖b‖</td><td>perfectly parallel</td><td>cosine similarity = 1: same meaning</td></tr>
+</table>
+<p>With <em>unit</em> vectors, ‖a‖ = ‖b‖ = 1, so <strong>a·b = cos θ directly</strong> — angle information with zero trig calls. This is why graphics normalizes everything in sight and why embedding models normalize before similarity search.</p>
+
+<h3>Cross product: the perpendicular-maker (3D only)</h3>
+<pre><code>a × b = (a.y·b.z − a.z·b.y,  a.z·b.x − a.x·b.z,  a.x·b.y − a.y·b.x)
+‖a × b‖ = ‖a‖‖b‖·sin θ        direction: perpendicular to both, right-hand rule
+order matters: b × a = −(a × b)</code></pre>
+<p>Job description: given two edges of a triangle, a × b is the surface <strong>normal</strong> — the vector lighting needs. Its length is the parallelogram's area (triangle = half), which mesh code uses constantly. Cross products live only in 3D; in 2D use the scalar version a.x·b.y − a.y·b.x (positive = b is counterclockwise of a — the "which side of the line" test).</p>
+
+<h2>Worked example</h2>
+<div class="card">
+<p><strong>Task:</strong> Compute the diffuse brightness of a surface point. Surface normal n = (0, 1, 0) (facing straight up); the sun direction (pointing <em>from</em> the surface <em>toward</em> the sun) is s = (3, 4, 0), not yet normalized. Lambert's law: brightness = max(0, n̂·ŝ).</p>
+<p><strong>1 — normalize s</strong> (n is already unit length): ‖s‖ = √(9+16) = 5 → ŝ = (0.6, 0.8, 0).</p>
+<p><strong>2 — dot:</strong> n̂·ŝ = 0·0.6 + 1·0.8 + 0·0 = <strong>0.8</strong>.</p>
+<p><strong>3 — clamp:</strong> max(0, 0.8) = 0.8 → the point renders at 80% of full diffuse intensity. Geometry check: cos θ = 0.8 → θ ≈ 37° between "straight up" and "toward the sun" — a morning-sun angle, and 80% brightness feels right.</p>
+<p><strong>Why the max(0, ·):</strong> if the sun is <em>behind</em> the surface (dot < 0), physics says no light, not negative light. Skipping the clamp produces surfaces that <em>subtract</em> light — an actual shipped bug in more than one early game.</p>
+<p><strong>Decision made:</strong> we normalized once, outside the per-pixel loop (the sun direction is the same for every pixel). Normalizing per-pixel would add a sqrt + divide × 2 million pixels for identical results. Hoisting invariants out of loops — Lesson 2's constant-hoisting — is worth real milliseconds here.</p>
+</div>
+
+<h2>Key points</h2>
+<ul class="keypoints">
+<li>A vector is simultaneously an arrow (intuition) and a component list (computation); all geometric facts survive into any number of dimensions.</li>
+<li>Addition is componentwise (tip-to-tail); scalar multiply stretches; lerp(a,b,t) = a + t(b−a) is the interpolation workhorse built from both.</li>
+<li>‖v‖ = √(v·v); normalize with u = v/‖v‖; never normalize the zero vector — NaN propagates through everything downstream.</li>
+<li>a·b = Σ aᵢbᵢ = ‖a‖‖b‖cos θ: compute with FMAs, read as alignment; sign alone answers facing/behind/perpendicular questions.</li>
+<li>Unit vectors make a·b = cos θ with no trig call — the reason graphics and embedding pipelines normalize aggressively.</li>
+<li>a × b builds the perpendicular (normals, areas, winding); it anti-commutes, so argument order encodes orientation.</li>
+</ul>
+
+<h2>Quiz</h2>
+<div class="quiz">
+  <div class="q">1. a = (2, −1, 3), b = (1, 4, 0). What is a·b, and what does its sign tell you?</div>
+  <button class="opt">9 — they point broadly the same way</button>
+  <button class="opt" data-c="1">−2 — the angle between them exceeds 90°</button>
+  <button class="opt">−2 — they are exactly opposite</button>
+  <button class="opt">(2, −4, 0) — the dot product is a vector</button>
+  <div class="expl">2·1 + (−1)·4 + 3·0 = 2 − 4 + 0 = −2. Negative means angle > 90° ("pointing away"), NOT exactly opposite (that needs a·b = −‖a‖‖b‖). And the dot product is always a single number — mixing it up with elementwise multiply is the classic first NumPy bug (a*b vs a@b).</div>
+</div>
+<div class="quiz">
+  <div class="q">2. Two embedding vectors have cosine similarity 0.98, but a·b = 47.3. What must be true?</div>
+  <button class="opt">Someone computed the cosine wrong — it can't exceed 1 while the dot is 47</button>
+  <button class="opt" data-c="1">The vectors aren't normalized: a·b = ‖a‖‖b‖·0.98, so ‖a‖‖b‖ ≈ 48.3</button>
+  <button class="opt">The angle is 47.3°</button>
+  <button class="opt">The vectors are orthogonal in most dimensions</button>
+  <div class="expl">cos θ = a·b/(‖a‖‖b‖). A raw dot of 47.3 with cosine 0.98 just means the magnitudes multiply to ~48.3. Ranking by raw dot when magnitudes vary conflates "similar direction" with "long vector" — a real retrieval bug: long documents win regardless of relevance.</div>
+</div>
+
+<h2>Exercises</h2>
+<details><summary>Exercise 1 — A character at P = (10, 2) looks along d = (0.8, 0.6) (unit). An item sits at Q = (14, 8). Is the item within the character's 60° half-angle vision cone, and how do you decide with ONE dot product and NO trig calls?</summary><div class="body">
+<p>To-item vector: v = Q − P = (4, 6), ‖v‖ = √52 ≈ 7.211 → v̂ ≈ (0.5547, 0.8321). Alignment: d·v̂ = 0.8·0.5547 + 0.6·0.8321 = 0.4438 + 0.4992 = <strong>0.943</strong>. Cone test: inside iff cos(angle to axis) ≥ cos(60°) = 0.5. Since 0.943 ≥ 0.5 → <strong>visible</strong> (angle ≈ 19.4°).</p>
+<p>The trick: precompute cos(half-angle) once (0.5); per-entity you need one normalize + one dot — and you can even drop the normalize by testing <code>d·v ≥ 0.5·‖v‖</code>, squaring carefully if you want sqrt gone too: <code>(d·v ≥ 0) && ((d·v)² ≥ 0.25·(v·v))</code>. Every stealth game's AI runs this exact comparison thousands of times per frame.</p>
+</div></details>
+<details><summary>Exercise 2 — Triangle with vertices A(0,0,0), B(2,0,0), C(0,3,0). Compute the normal via cross product, its area, and state what flips if you compute the edges in the other order — and why GPUs care.</summary><div class="body">
+<p>Edges: e₁ = B−A = (2,0,0), e₂ = C−A = (0,3,0). Cross: e₁×e₂ = (0·0−0·3, 0·0−2·0, 2·3−0·0) = (0, 0, 6) → normal points +z; normalized n̂ = (0,0,1). Area = ‖e₁×e₂‖/2 = 3.</p>
+<p>Swapped order: e₂×e₁ = (0, 0, −6) — same plane, opposite facing. GPUs use exactly this sign (the triangle's <em>winding</em>: counterclockwise vs clockwise as seen on screen) to decide front vs back face and cull ~half of all triangles before shading. A mesh exported with inconsistent winding renders inside-out — one of the most-filed bugs in graphics pipelines, and it's "cross product anti-commutes" wearing a costume.</p>
+</div></details>
+
+<hr>
+<h1>Go deeper — the complete guide</h1>
+<p>Why the two dot-product formulas agree, projection (the shadow that becomes attention scores), building coordinate frames, hardware vectors (float4/SIMT), and the full gotcha list.</p>
+
+<h2>1. Why Σ aᵢbᵢ equals ‖a‖‖b‖cos θ</h2>
+<p>Law of cosines on the triangle with sides a, b, and a−b: ‖a−b‖² = ‖a‖² + ‖b‖² − 2‖a‖‖b‖cos θ. Expand the left side with components: ‖a−b‖² = Σ(aᵢ−bᵢ)² = Σaᵢ² + Σbᵢ² − 2Σaᵢbᵢ = ‖a‖² + ‖b‖² − 2 Σaᵢbᵢ. Match the two expansions: <strong>Σaᵢbᵢ = ‖a‖‖b‖cos θ</strong>. School geometry (law of cosines is Pythagoras plus a correction term) welds the computational and geometric views together — and the proof works unchanged in n dimensions, which is why "angle between 1024-D embeddings" is legitimate mathematics, not a metaphor.</p>
+
+<h2>2. Projection: the shadow, formalized</h2>
+<pre><code>scalar projection of a onto b:   comp_b(a) = a·b̂            (how far along b)
+vector projection:               proj_b(a) = (a·b̂)·b̂        (the shadow itself)
+perpendicular remainder:         perp = a − proj_b(a)        (what's left over)</code></pre>
+<p>Projection is the "how much of this is that?" operator. Three appearances you'll meet again: <strong>(graphics)</strong> decomposing velocity against a wall's normal — slide = v − (v·n̂)n̂ is how characters glide along walls instead of sticking. <strong>(ML)</strong> an attention score is query·key — literally "how much does this token project onto that one" before softmax. <strong>(numerics)</strong> Gram–Schmidt builds perpendicular frames by repeatedly subtracting projections — how you construct a camera basis from a single "look" direction.</p>
+
+<h2>3. Building frames: from one vector to a full basis</h2>
+<pre><code>// camera: given forward f (unit), world up w = (0,1,0)
+right = normalize(cross(f, w));        // perpendicular to both
+up    = cross(right, f);               // completes the frame; already unit
+// degenerate case: f nearly parallel to w → cross ≈ 0 → normalize blows up
+if (fabsf(dot(f, w)) > 0.999f) w = make_float3(1, 0, 0);   // pick a different up</code></pre>
+<p>Three mutually perpendicular unit vectors = an <em>orthonormal basis</em> — a private coordinate system. Express a point in camera coordinates with three dots: (p·right, p·up, p·(−f)). That triple-dot is a matrix multiply in disguise; next lesson gives it its true name (and the "camera looks straight up and the screen goes black" bug above is a rite of passage — now you'll never ship it).</p>
+
+<h2>4. Vectors in hardware: float4, SoA, and the SIMT preview</h2>
+<table>
+<tr><th>Level</th><th>What "vector" means there</th><th>Why you care</th></tr>
+<tr><td>Language types</td><td><code>float2/3/4</code> (CUDA/GLSL/HLSL)</td><td>float4 loads/stores compile to one 128-bit memory instruction — Lesson 1's 16-byte alignment, cashed in.</td></tr>
+<tr><td>CPU SIMD</td><td>AVX registers: 8–16 floats, one instruction</td><td>NumPy's speed; the mental model "one op, many lanes."</td></tr>
+<tr><td>GPU SIMT</td><td>32 threads (a warp) execute in lockstep</td><td>The machine is built like vector math: same instruction, 32 data lanes. Module 4 makes this precise.</td></tr>
+<tr><td>Layout choice</td><td>AoS (xyzxyz…) vs SoA (xxx…yyy…zzz…)</td><td>SoA lets 32 consecutive threads read 32 consecutive x's — coalescing (5.7) depends on this choice.</td></tr>
+</table>
+<p>Note the mild irony: <code>float3</code> is often the <em>worst</em> layout for bulk GPU data (12 bytes breaks the 16-byte pattern; arrays of float3 mis-align every other element). Fine for a few camera vectors; for a million particles, store SoA. You now know enough to understand why when Module 5 proves it with a profiler.</p>
+
+<h2>5. Dot products at industrial scale (the bridge to everything)</h2>
+<p>One neuron: output = w·x + b — a dot product plus a shift. One matrix row times a vector: a dot product. Matmul: m×n <em>independent</em> dot products (next lesson). Attention: every query dotted with every key. A 7B-parameter LLM generating one token ≈ 14 billion FMAs ≈ 14 billion slots of "multiply matching components, accumulate." When NVIDIA quotes 989 TFLOP/s fp16, it is quoting <em>dot-product throughput</em>. You have now traced the entire stack — transistor-counting (L1), index algebra (L2), FLOP estimation (L3), angles (L4), and the operation itself (L5) — to the single line <code>s += a[i]*b[i]</code>.</p>
+
+<h2>6. Gotchas</h2>
+<div class="gotcha"><strong>Elementwise multiply ≠ dot.</strong> NumPy <code>a*b</code> is elementwise; the dot is <code>a@b</code> or <code>np.dot</code>. Shaders: <code>a*b</code> elementwise, <code>dot(a,b)</code> for the scalar. Symptom: "my similarity is a vector."</div>
+<div class="gotcha"><strong>Reading angles from unnormalized dots.</strong> a·b = 47 tells you nothing about θ until you divide by the magnitudes. Rankings silently become length contests.</div>
+<div class="gotcha"><strong>normalize(0,0,0).</strong> Zero direction → 0/0 → NaN, and NaN infects every later dot, min, and max (NaN comparisons are all false — Lesson 8). Guard degenerate inputs at creation, not at use.</div>
+<div class="gotcha"><strong>Cross product order.</strong> a×b = −b×a. Wrong order = inverted normals = inside-out lighting or culled visible geometry. Pick a winding convention per project and assert it in the asset pipeline.</div>
+<div class="gotcha"><strong>Testing perpendicularity with ==.</strong> <code>dot(a,b) == 0.0f</code> is false for computed vectors that are perpendicular to 7 digits. Use <code>fabsf(dot) < eps·‖a‖‖b‖</code> — a *relative* epsilon (absolute epsilons break at scale; Lesson 8).</div>
+<div class="gotcha"><strong>Lerping unit vectors and expecting unit results.</strong> lerp of two unit vectors cuts the chord — length < 1 mid-way (up to 29% short at 90°). Re-normalize after, or use slerp when angles must sweep uniformly (Track C, quaternions).</div>
+
+<h2>Scenario — the retrieval system that preferred long documents</h2>
+<p>A startup's RAG search "works, but users say results feel off — long boilerplate documents dominate." You audit with this lesson. The pipeline embeds queries and documents (1024-D), then ranks by raw dot product "because it's one FMA loop and cosine needs two extra norms." Diagnosis in one line: dot = ‖q‖‖d‖cos θ, and document embedding norms in their index vary 3× with document length — ranking rewards ‖d‖, not relevance. Fix: normalize document vectors <em>once at index time</em> (they're static!) and query vectors once per query; ranking by dot is now exactly cosine, same per-query cost as before. Second finding: their "deduplicate near-identical chunks" step tested <code>dot(a,b) == 1.0</code> — never true in fp32; switched to ≥ 0.999. Third: the ANN library wanted unit vectors anyway for its inner-product mode; feeding it mixed norms had also degraded recall. One geometry audit, three fixes, +11 points on their retrieval benchmark, zero new infrastructure. Direction vs magnitude is a production distinction, not a textbook one.</p>
+
+<h2>Practice</h2>
+<details><summary>1. u = (1, 2, 2). Compute ‖u‖, û, and the angle between u and the z-axis (3 s.f.).</summary><div class="body">‖u‖ = √(1+4+4) = 3. û = (1/3, 2/3, 2/3). cos θ = û·(0,0,1) = 2/3 → θ = 48.2°.</div></details>
+<details><summary>2. When does ‖a+b‖ = ‖a‖+‖b‖ hold exactly? Prove your condition with the dot-product expansion of ‖a+b‖².</summary><div class="body">‖a+b‖² = (a+b)·(a+b) = ‖a‖² + 2a·b + ‖b‖². Compare (‖a‖+‖b‖)² = ‖a‖² + 2‖a‖‖b‖ + ‖b‖². Equal iff a·b = ‖a‖‖b‖, i.e., cos θ = 1: same direction (or one is zero). Otherwise ‖a+b‖ is strictly smaller — the triangle inequality, which you just proved.</div></details>
+<details><summary>3. Velocity v = (5, −3) hits a wall with unit normal n = (0, 1). Compute the slide vector (v with its into-wall part removed) and the bounce vector (reflection, restitution 1).</summary><div class="body">Into-wall component: (v·n)n = (−3)(0,1) = (0,−3). Slide = v − (v·n)n = (5, 0). Reflect = v − 2(v·n)n = (5, 3). The reflection formula r = v − 2(v·n)n is worth memorizing — mirrors, bounces, and specular highlights all use it.</div></details>
+<details><summary>4. Given q = (0.2, 0.9, 0.4) and keys k₁ = (0.1, 1.0, 0.3), k₂ = (0.9, 0.1, 0.2), compute both attention logits q·kᵢ and interpret which token the query "attends" to and why this is projection language.</summary><div class="body">q·k₁ = 0.02 + 0.90 + 0.12 = 1.04. q·k₂ = 0.18 + 0.09 + 0.08 = 0.35. The query aligns with k₁ ≈ 3× more strongly — after softmax (Lesson 3's stable version), most attention mass goes to token 1. Each logit is "how much does q project onto this key's direction (scaled by its length)" — attention is projection scored at scale.</div></details>
+<details><summary>5. Show that the 2D cross value c = a.x·b.y − a.y·b.x equals ‖a‖‖b‖sin θ for a=(1,0), b=(cos θ, sin θ), and explain the "which side of a line is this point" test built from it.</summary><div class="body">c = 1·sin θ − 0·cos θ = sin θ = ‖a‖‖b‖ sin θ (both unit). For segment AB and point P: s = (B−A) × (P−A) (2D cross). s > 0 → P left of AB; s < 0 → right; s = 0 → collinear. Rasterizers decide "is this pixel inside the triangle" with three such tests — the fill rule of every frame ever rendered.</div></details>
+<details><summary>6. Your particle system stores struct {float3 pos; float3 vel;} per particle (AoS). A kernel updates only positions. Estimate the fraction of loaded bytes actually used, and propose the layout fix.</summary><div class="body">Each 24-byte struct straddles cache sectors; reading pos pulls the neighboring vel bytes in the same 32-byte sectors — roughly half the traffic is waste (and the 12-byte float3s also break 16-byte alignment). SoA fix: separate pos_x[], pos_y[], pos_z[], vel_* arrays (or float4-padded AoSoA). Position pass now reads 100% useful, coalesced bytes → up to ~2× bandwidth win on this kernel, no math changed. Layout is performance (proven with a profiler in 5.7).</div></details>
+<details><summary>7. Design: an "auto-aim assist" must find, among ≤ 4096 targets, the one most aligned with the aim direction d (unit), but only within 15° and 50 m. Specify the per-target math (minimize sqrt/trig), the precomputations, and the reduction — then note which parts are embarrassingly parallel.</summary><div class="body">Precompute once: c = cos 15° ≈ 0.966, R² = 2500. Per target: v = t.pos − player; r² = v·v; reject if r² > R² (no sqrt). Alignment without normalize: accept iff d·v > 0 AND (d·v)² ≥ c²·r² (squares the cone test; both sides non-negative after the sign check). Score survivors by (d·v)²/r² (monotone in cos²θ) — still sqrt-free. Reduction: max-score over survivors (a parallel max — Lesson 3's log₂ staircase; 4096 → 12 rounds). Every per-target evaluation is independent → perfect GPU/SIMD fan-out; only the final max is cooperative. Total cost: ~1 dot + 1 mul-compare chain per target, zero sqrt, zero trig.</div></details>
+
+<div class="pager">
+  <a href="lesson-04.html">← Geometry & trig</a>
+  <a href="lesson-06.html">Next: Matrices →</a>
+</div>
+<div class="footer">GPU Mastery · Module 1 · Lesson 5 — works offline · progress saved in your browser</div>
+</div>
+<script src="../assets/diagrams.js"></script>
+<script src="../assets/app.js"></script>
+</body>
+</html>

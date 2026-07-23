@@ -1,0 +1,251 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>2.5 NumPy & Vectorized Thinking — GPU Mastery</title>
+<link rel="stylesheet" href="../assets/style.css">
+</head>
+<body data-lesson="m2l5">
+<nav><div class="inner">
+  <a class="logo" href="../index.html">GPU<span>Mastery</span></a>
+  <a class="item" href="../index.html">Home</a>
+  <a class="item on" href="../curriculum.html">Curriculum</a>
+  <a class="item" href="../labs.html">Labs</a>
+  <a class="item" href="../setup.html">Lab setup</a>
+  <a class="item" href="../prompt.html">Generator prompt</a>
+</div></nav>
+<div class="wrap">
+
+<div class="lesson-top">
+  <div><span class="badge">Module 2 · Lesson 5</span><span class="badge dim">≈ 3–4 h · the bridge lesson</span></div>
+  <button id="donebtn" class="donebtn">Mark lesson complete</button>
+</div>
+<h1>NumPy & Vectorized Thinking — your first taste of throughput</h1>
+<p class="lead">This is the lesson where Module 1 and Module 2 fuse. NumPy packs numbers the way hardware wants them (M1 L1/L8: fixed-width, contiguous) and runs whole-array operations in compiled code (M1 L5: one op, many lanes). Learn to think in arrays here and CUDA will feel like a dialect, not a new language.</p>
+
+<h2>Concept</h2>
+
+<h3>Why: the 100× that's been waiting</h3>
+<div class="diagram" data-diagram="m2l5-overhead" data-caption="Per-element interpretation vs one dispatch into a compiled loop. Same math, ~100×."></div>
+<pre><code>import numpy as np
+data = np.arange(10_000_000, dtype=np.float32)     # 10M floats, 40 MB, CONTIGUOUS
+out = data * 2.0 + 1.0                              # whole-array expression: ~10-20 ms
+# the 2.2-style loop over a Python list of the same numbers: ~1-2 s. Measure it yourself.</code></pre>
+<p>2.4 §4 explained the mechanism in advance: a Python list is scattered boxed objects behind pointers; an ndarray is one contiguous block of machine numbers (M1 L1's memory-is-one-long-row, honored). Contiguous + fixed dtype ⇒ compiled loops, SIMD lanes, prefetch-friendly walks. NumPy is the CPU rehearsal of every GPU idea in this course.</p>
+
+<h3>dtype: Module 1's number formats become a parameter</h3>
+<pre><code>a = np.array([1, 2, 3])                    # dtype int64 by default (platform-dependent)
+b = np.array([1.0, 2.0])                   # float64 — Python's float (M1 L8)
+c = np.zeros((1080, 1920, 3), np.uint8)    # an IMAGE-shaped block: 0..255 (M1 L1!)
+d = np.ones(10**6, np.float32)             # GPU-native fp32: half the memory of fp64
+np.int8(127) + np.int8(1)                  # -128. Fixed width is BACK — with a warning
+np.float16(65504) * np.float16(2)          # inf — M1 L8's fp16 cliff, one line to touch it</code></pre>
+<p><strong>dtype is a decision, every time:</strong> memory (fp64=8B, fp32=4, fp16/bf16=2, uint8=1 — a 10⁸-element array is 800 vs 100 MB), precision (M1 L8's table), and speed (SIMD lanes per instruction double as width halves). NumPy 2.x makes overflow <em>louder</em> than it used to be (RuntimeWarning on scalar overflow) — but array-vs-array arithmetic still wraps silently. M1 L1's rules are law again; you have the training.</p>
+
+<h3>Shape, axes, and whole-array expressions</h3>
+<pre><code>A = np.arange(12, dtype=np.float32).reshape(3, 4)   # M1 L2's linearize, run backwards
+A.shape, A.ndim, A.size, A.dtype                    # (3,4), 2, 12, float32
+A + 10; A * A; np.sqrt(A); A > 5                     # elementwise; comparisons give bool arrays
+A[A > 5]                                             # boolean mask: SELECT WHERE — no loop
+np.sin(A)                                            # ufuncs: compiled elementwise engines (radians! M1 L4)</code></pre>
+<div class="diagram" data-diagram="m2l5-axis" data-caption="Reductions take axis= — name the dimension you want GONE."></div>
+<pre><code>A.sum()            # 66.0 — everything (one number)
+A.sum(axis=0)      # [12,15,18,21] — columns collapse down, shape (4,)
+A.mean(axis=1)     # per-row means, shape (3,)
+A.max(), A.argmax()  # 11.0 and its FLAT index 11 (unravel with divmod — M1 L2!)</code></pre>
+
+<h3>Broadcasting: the rule that writes your loops</h3>
+<div class="diagram" data-diagram="m2l5-broadcast" data-caption="Align shapes at the right; 1-sized axes stretch. (3,1)+(1,4) → (3,4)."></div>
+<pre><code>col = np.array([[0], [10], [20]])      # (3,1)
+row = np.arange(4)                     # (4,)  → treated as (1,4)
+col + row                              # (3,4) — the diagram's grid, computed
+X = np.random.rand(1000, 3)            # 1000 samples, 3 features (M1 L7's uniforms)
+X_centered = X - X.mean(axis=0)        # (1000,3) - (3,) → every NORMALIZATION ever
+img_f = img / np.float32(255.0)        # scalar broadcast: the simplest case</code></pre>
+<p>Rule, complete: compare shapes <strong>right-aligned</strong>, axis by axis — equal is fine, 1 stretches, missing counts as 1, anything else is an error. Broadcasting is a <em>description</em>, not a copy — no (3,4) intermediate is materialized for <code>col + row</code>; the loop indices just reuse the stretched axis (strides of 0, literally). It's M1 L6's stride machinery doing loop-writing for you.</p>
+
+<h3>Views vs copies: the sharp edge (you're pre-trained)</h3>
+<div class="diagram" data-diagram="m2l5-view" data-caption="Slices are windows onto the SAME buffer — offset + strides, no copy."></div>
+<pre><code>a = np.arange(12, dtype=np.float32)
+v = a[2:8]              # VIEW — unlike list slices (2.4), NO copy
+v[0] = 99.0             # a[2] is now 99. One buffer, two windows.
+w = a[::3]              # stride-3 view: a[0], a[3], a[6], a[9]
+t = a.reshape(3, 4).T   # transpose: free view, strides swapped (M1 L6 §6, live)
+m = a[a > 50]           # boolean/fancy indexing → COPY (values must be gathered)
+c = v.copy()            # explicit independence
+np.shares_memory(v, a)  # True → writing v can touch a. THE definitive test.
+v.base                  # quick heuristic: views carry a .base — but see deep dive §3</code></pre>
+<p>The contrast to burn in: <strong>list slices copy; array slices view.</strong> 2.4's aliasing chapter was the vaccine — same tag-vs-object reasoning, now on buffers. Views are why NumPy is fast (no gratuitous copies) and why a function that innocently writes into its input can corrupt data three call-frames away.</p>
+
+<h3>Matmul: the oracle meets the machine</h3>
+<pre><code>A = np.array([[1, 2, 3], [4, 5, 6]], dtype=np.float32)
+B = np.array([[7, 4], [8, 5], [9, 6]], dtype=np.float32)
+A @ B                    # [[50,32],[122,77]] — M1 L6 by hand, 2.4 by loop, now by BLAS
+np.allclose(A @ B, matmul_lists(A.tolist(), B.tolist()))   # oracle agrees ✓ (never ==, M1 L8)</code></pre>
+<p><code>@</code> calls a tuned BLAS — the same library family (cuBLAS) your CUDA capstone races in 5.11. Your 2.4 oracle just found its first customer.</p>
+
+<h2>Worked example</h2>
+<div class="card">
+<p><strong>Task:</strong> The bridge measurement — time <code>y = a*x + b</code> (10M fp32 elements) three ways, report medians per M1 L7's ritual, and compute achieved bandwidth like a GPU engineer.</p>
+<pre><code>import numpy as np, time
+
+def median_time(fn, warmup=2, repeats=9):
+    for _ in range(warmup): fn()                      # 2.2's harness skeleton
+    ts = sorted(time.perf_counter() - t0 for _ in range(repeats)
+                if (t0 := time.perf_counter()) or True for _ in [fn()])
+    return ts[len(ts)//2]
+
+N = 10_000_000
+xs_list = list(range(N))                              # Python-list contender
+x = np.arange(N, dtype=np.float32)                    # NumPy contender
+a_, b_ = 2.0, 1.0
+
+def py_loop():   return [a_*v + b_ for v in xs_list]
+def np_expr():   return a_*x + b_
+def np_fused():  y = np.empty_like(x); np.multiply(x, a_, out=y); np.add(y, b_, out=y); return y
+
+for name, fn in [("python list", py_loop), ("numpy", np_expr), ("numpy out=", np_fused)]:
+    t = median_time(fn)
+    gbps = (2 * N * 4) / t / 1e9                      # read x + write y, 4 B each
+    print(f"{name:>12}: {t*1000:7.1f} ms   {gbps:5.1f} GB/s effective")</code></pre>
+<p><strong>Representative output</strong> (a typical laptop — yours will differ, that's the point of measuring):</p>
+<pre><code> python list:  1100.0 ms    0.1 GB/s effective
+       numpy:    14.0 ms    5.7 GB/s effective
+   numpy out=:    11.0 ms    7.3 GB/s effective</code></pre>
+<p><strong>The reading, M1-style:</strong> ~80× from packing + compiled loops; the <code>out=</code> variant shaves the temporary that <code>a_*x + b_</code> materializes between ops (one extra 40 MB write+read — M1 L3: bytes are the budget). Now the roofline sanity check: 7 GB/s against a laptop's ~50 GB/s DRAM says even NumPy leaves ~7× on the table (temporaries, single-threadedness) — and a GPU's 1000 GB/s sits another 100× up (M1 L3's ladder). <strong>Decision made:</strong> we reported effective GB/s, not just ms — bandwidth is the honest currency for memory-bound ops (AI ≈ 0.25 FLOP/byte here — M1 L3 §4 says hopeless for compute, so judge it as data movement). You just performed a real performance analysis with 30 lines of Python.</p>
+</div>
+
+<h2>Key points</h2>
+<ul class="keypoints">
+<li>ndarray = one contiguous buffer + dtype + shape + strides; the packing (not magic) is the 100× over lists of boxed objects.</li>
+<li>dtype is a three-way decision — memory, precision (M1 L8's table), speed — and fixed-width overflow rules are back in force.</li>
+<li>Write whole-array expressions and axis reductions (<code>axis=</code> names the dimension that disappears); element loops in Python are for prototypes.</li>
+<li>Broadcasting: right-align shapes; 1 stretches (stride-0, no copy); (1000,3) − (3,) is every normalization you'll ever write.</li>
+<li>Array slices are VIEWS (list slices copy!): free like a.T, and they mutate the base; boolean/fancy indexing copies; <code>.base</code> tells the truth.</li>
+<li>Verify fast against slow: <code>np.allclose(fast, oracle)</code> with conscious tolerances — never ==, exactly as M1 L8 trained you.</li>
+</ul>
+
+<h2>Quiz</h2>
+<div class="quiz">
+  <div class="q">1. <code>x = np.zeros((3, 4)); y = x[1]; y += 5</code>. What is <code>x[1, 2]</code>, and what's the contrast with 2.4's lists?</div>
+  <button class="opt">0.0 — y was a copied row, like list slicing</button>
+  <button class="opt" data-c="1">5.0 — x[1] is a VIEW of row 1; += wrote through it into x's buffer</button>
+  <button class="opt">Error — rows can't be modified via names</button>
+  <button class="opt">5.0 — but only because += is special</button>
+  <div class="expl">Array indexing/slicing yields views onto the same buffer; += mutates in place through the view. A Python LIST slice would have copied (2.4 §1) — same syntax, opposite memory semantics, and knowing which you're holding is the sharp edge of this lesson. y.base is x confirms it.</div>
+</div>
+<div class="quiz">
+  <div class="q">2. <code>u = np.arange(3); v = u.reshape(3, 1); u + v</code> — what comes out, and why is this the "accidental broadcast" to fear?</div>
+  <button class="opt">shape (3,) — same three numbers added</button>
+  <button class="opt">An error — shapes (3,) and (3,1) don't match</button>
+  <button class="opt" data-c="1">shape (3,3) — (3,) right-aligns as (1,3), meets (3,1), both stretch: an outer sum you didn't ask for</button>
+  <button class="opt">shape (3,1) — the column wins</button>
+  <div class="expl">Right-align: (3,1) vs (1,3) → both 1-axes stretch → (3,3). Legal, silent, and at (100000,) vs (100000,1) it's a 10¹⁰-element, 80 GB "oops" (or, subtler, a wrong loss that still trains — the worst outcome). Defense: shape asserts at function boundaries (2.6) and .reshape(-1) / keepdims discipline. This single gotcha causes real production incidents in ML codebases.</div>
+</div>
+
+<h2>Exercises</h2>
+<details><summary>Exercise 1 — Monte-Carlo π, vectorized (2.2 Ex.1's loop, arrayified): generate N=1e7 (x,y) pairs with np.random.default_rng(42), estimate π with zero Python loops, and time both versions. Then compute the error and check it against M1 L7's 1.64/√N.</summary><div class="body">
+<pre><code>import numpy as np
+rng = np.random.default_rng(42)          # the modern seeded generator (M1 L7 ritual)
+N = 10_000_000
+pts = rng.random((N, 2), dtype=np.float32)          # (N,2) uniforms in [0,1)
+inside = (pts[:, 0]**2 + pts[:, 1]**2 &lt;= 1.0)       # bool array — squared dist, no sqrt (M1 L4)
+est = 4.0 * inside.mean()                            # mean of bools = fraction True
+err = abs(est - np.pi)
+print(f"π ≈ {est:.6f}  err {err:.2e}  σ_expected {1.64/np.sqrt(N):.2e}")
+# π ≈ 3.1417±, err ~ a few e-4, σ_expected 5.2e-4 — same ballpark ✓</code></pre>
+<p>Speed: ~0.1–0.3 s vs ~15–30 s for the pure loop at this N — and the code is SHORTER. Notes: <code>inside.mean()</code> on booleans counts Trues/N (a reduction over a comparison — two GPU primitives you'll fuse in Module 5); fp32 halves memory with precision to spare for this job (dtype as a decision); and the error matching the M1 L7 prediction is your statistics knowledge auditing your code.</p>
+</div></details>
+<details><summary>Exercise 2 — Layout forensics: <code>M = np.zeros((4096, 4096), np.float32)</code>. Time <code>M.sum(axis=1)</code> vs <code>M.sum(axis=0)</code>, then <code>M.T.sum(axis=1)</code>. Predict the ranking FIRST using M1 L6 §6 strides, then explain the observed ~2-5× gap and name the Module 5 concept this rehearses.</summary><div class="body">
+<pre><code>M = np.zeros((4096, 4096), dtype=np.float32)
+%timeit M.sum(axis=1)     # rows: walk memory stride-1        → fastest
+%timeit M.sum(axis=0)     # columns: stride 16 KB per step    → slower (2-5×)
+%timeit M.T.sum(axis=1)   # "rows of the transpose" = columns → same as axis=0</code></pre>
+<p>Prediction from strides: row-major buffer (M1 L6), so axis=1 reads consecutive bytes (cache lines fully used), axis=0 jumps 4096×4 bytes per element — each cache line delivers 4 useful bytes of 64 loaded (M4 will name this). M.T costs nothing itself (stride-swap view) but inherits the column walk. The same access-pattern physics, on a GPU, is called <em>coalescing</em> (5.7) — where the penalty isn't 3× but up to 32×. You just profiled your first memory-bound access pattern; the instrument (timing medians) and the theory (strides) were both already yours.</p>
+</div></details>
+
+<hr>
+<h1>Go deeper — the complete guide</h1>
+<p>The ndarray object model, broadcasting edge cases and keepdims, fancy indexing vs views formalized, temporaries and out=, random generation done right, and float rules imported wholesale from M1 L8.</p>
+
+<h2>1. The ndarray, formally (four fields explain everything)</h2>
+<pre><code>M = np.arange(12, dtype=np.float32).reshape(3, 4)
+M.__array_interface__["data"]   # (buffer address, readonly) — M1 L1's hex, in person
+M.strides                        # (16, 4): +1 row = 16 bytes, +1 col = 4 (M1 L6 §6 verbatim)
+M.T.strides                      # (4, 16): transpose = swap strides, zero copy
+M.reshape(4, 3).strides          # (12, 4): reshape of contiguous = restride, zero copy
+M[::2].strides                   # (32, 4): slicing = stride surgery</code></pre>
+<p><em>buffer + dtype + shape + strides</em> — every "trick" (views, T, reshape, broadcasting's stride-0) is arithmetic on these four. When a reshape CAN'T be pure restriding (e.g., reshaping a transposed view), NumPy quietly copies — and <code>np.ascontiguousarray</code> / <code>.copy()</code> make the copy explicit when a downstream consumer (a C kernel, 3.x; a GPU transfer, M5) demands contiguous bytes. PyTorch tensors have the same four fields with the same names; learning this here is learning that.</p>
+
+<h2>2. Broadcasting, edge cases included</h2>
+<pre><code>(5,)   op (5,)    → (5,)          # equal
+(3,1)  op (1,4)   → (3,4)         # both stretch
+(1080,1920,3) op (3,)   → OK      # right-align: channels line up — per-channel ops
+(1080,1920,3) op (1080,1920) → ERROR: (3,) vs (1920,) clash at the last axis
+fix:   img * mask[:, :, None]     # None/np.newaxis inserts a 1-axis → (1080,1920,1) stretches over channels
+means = X.mean(axis=1, keepdims=True)   # (N,1) not (N,) — keepdims PREVENTS the (N,N) accident</code></pre>
+<p><code>None</code>-indexing and <code>keepdims=True</code> are the two tools that make broadcasting deliberate instead of lucky. House rule: any reduction whose result will be subtracted/divided back into its source gets <code>keepdims=True</code> — it turns quiz 2's landmine into a compile-time-like shape error.</p>
+
+<h2>3. Views vs copies: the definitive table</h2>
+<table>
+<tr><th>Operation</th><th>View or copy?</th><th>Why</th></tr>
+<tr><td><code>a[2:8]</code>, <code>a[::3]</code>, <code>a.T</code>, <code>reshape</code> (if striding works)</td><td><strong>View</strong></td><td>expressible as offset+strides on the same buffer</td></tr>
+<tr><td><code>a[a > 5]</code>, <code>a[[0, 7, 3]]</code></td><td><strong>Copy</strong></td><td>selected elements aren't evenly strided — must gather</td></tr>
+<tr><td><code>a + 0</code>, <code>a.astype(np.float32)</code>, <code>np.sort(a)</code></td><td><strong>Copy</strong></td><td>new values need a new buffer</td></tr>
+<tr><td><code>a[mask] = 0</code>, <code>a[[0,3]] = 9</code> (assignment TO fancy index)</td><td><strong>Writes in place</strong></td><td>assignment targets scatter INTO the buffer — no copy involved</td></tr>
+</table>
+<p>The last row surprises people: fancy indexing copies on READ but scatters on WRITE. <code>a[mask] += 1</code> works; but chain it — <code>a[mask][0] = 9</code> — and you mutated a temporary copy that's immediately discarded: the classic silent no-op. One index expression per assignment, never two.</p>
+
+<h2>4. Temporaries, out=, and the fusion preview</h2>
+<pre><code>y = a*x**2 + b*x + c        # readable; materializes ~3 temporaries (each N floats of traffic)
+# tighter, when profiling says it matters:
+y = x*x; y *= a; y += b*x; y += c        # fewer temps (still one for b*x)
+np.multiply(x, x, out=y)                  # ufunc out= : zero-temp building blocks</code></pre>
+<p>Each temporary is a full write+read of N elements — pure M1 L3 bytes-budget arithmetic (the worked example measured it: ~20%). The deep point: NumPy executes op-by-op and <em>cannot fuse</em> across expressions; fusing y = a*x²+bx+c into ONE pass over memory is exactly what Numba, torch.compile, and your own CUDA kernels (M5, Track A9) exist to do. Write the readable version first; let a measurement, never a vibe, justify the ugly one — and know that the truly fast version isn't uglier NumPy, it's a fused kernel.</p>
+
+<h2>5. Random numbers, the modern way</h2>
+<pre><code>rng = np.random.default_rng(42)     # PCG64 — seeded, isolated, passable (M1 L7 §1-2)
+rng.random((3, 4))                   # uniforms [0,1)
+rng.normal(0.0, 1.0, size=10**6)     # Gaussians (M1 L7's bell)
+rng.integers(0, 256, (32, 32), dtype=np.uint8)   # random test "image"
+rng.choice(10**6, size=1000, replace=False)      # sampling without replacement</code></pre>
+<p>Prefer <code>default_rng(seed)</code> over the legacy <code>np.random.seed()</code>-plus-globals: the generator object travels explicitly (2.3's purity — state passed, not ambient), so two subsystems can't silently share/advance each other's streams — M1 L7 §2's correlated-streams disease, dodged by API design. Log the seed in every experiment printout; future-you is the beneficiary.</p>
+
+<h2>6. Float rules, imported wholesale</h2>
+<pre><code>np.float32(16_777_216) + np.float32(1)      # 16777216.0 — M1 L8's 2²⁴ absorption, on demand
+a.sum(dtype=np.float64)                      # accumulate wider than storage (M1 L8 §3's table)
+np.isclose(x, y, rtol=1e-5, atol=1e-8)       # the atol+rtol shape (M1 L8 §6); arrays version: allclose
+np.isnan(arr).any()                          # NaN patrol at pipeline boundaries (M1 L8 NaN rules)
+np.errstate(over="raise")                    # context: turn silent overflow into an exception locally</code></pre>
+<p>Worth knowing: NumPy's own <code>.sum()</code> on fp32 already uses pairwise (tree) summation internally — M1 L8 §3's "free accuracy" is production behavior, not just theory. When you write the CUDA reduction in 5.8 you'll be re-implementing, by hand, what this line does — and testing it against this line.</p>
+
+<h2>7. Gotchas</h2>
+<div class="gotcha"><strong>List habits on arrays.</strong> <code>arr.append</code> doesn't exist; <code>np.append</code> copies EVERYTHING each call — an accidental O(n²) (Gauss again). Grow in a list, convert once: <code>np.array(chunks)</code>; or preallocate <code>np.empty(N)</code> and fill.</div>
+<div class="gotcha"><strong>The chained-index silent no-op.</strong> <code>a[mask][0] = 9</code> writes into a discarded copy. One indexing expression per assignment: <code>a[np.flatnonzero(mask)[0]] = 9</code>.</div>
+<div class="gotcha"><strong>Integer images doing math.</strong> <code>img_a - img_b</code> on uint8 wraps at 0 (M1 L1!): 5 − 10 = 251. Cast first: <code>img.astype(np.int16)</code> (or float32) — the 2.8 project enforces this with a test.</div>
+<div class="gotcha"><strong>if on an array.</strong> <code>if arr > 5:</code> → "truth value is ambiguous." You meant <code>(arr > 5).any()</code> or <code>.all()</code> — say which. (A bool ARRAY has many truths; Python's if wants one — 2.2 §5.)</div>
+<div class="gotcha"><strong>float64 creep.</strong> Python scalars are fp64; <code>x * 2.0</code> keeps fp32 (scalars adapt), but <code>x + np.array([2.0])</code> promotes to fp64 — doubling memory mid-pipeline. Audit with <code>.dtype</code> prints at stage boundaries; NumPy 2.x's promotion rules (NEP 50) made this saner but not gone.</div>
+<div class="gotcha"><strong>Trusting == between implementations.</strong> Your loop matmul vs <code>@</code> differ in the last ulps (different summation order — M1 L8 §"order is an algorithm"). allclose with a budgeted rtol; == is for integers and indices only.</div>
+
+<h2>Scenario — the ETL job that fit in RAM after all</h2>
+<p>A friend's lab processes 4 GB of sensor readings nightly: load CSV, clean outliers, normalize per-channel, write back. Their pure-Python version takes 40 minutes and intermittently dies with MemoryError, and the lab is pricing a bigger server. You audit it with this lesson. (1) Data lives in lists of Python floats: ~4 GB of numbers costing ~13 GB of boxed objects (2.4 §4's 24-bytes-per-float tax) — the MemoryError was never about the data. As <code>np.float32</code>: 2 GB flat. (2) The cleaning loop (<code>for row in rows: if abs(v-mean) > 3*sigma ...</code>) becomes one masked expression: <code>keep = np.abs(X - mu) &lt;= 3*sigma</code> (M1 L7's 3σ rule as a boolean array); minutes → milliseconds. (3) Normalization was subtracting a LIST of channel means inside a loop — now <code>X -= X.mean(axis=0, keepdims=True)</code> … which immediately raises a shape error instead of broadcasting garbage, catching that one CSV had a 17th column nobody knew about (keepdims turning quiz 2's silence into a shout). (4) One subtle save: their old code compared cleaned files against golden outputs with ==; the NumPy version "fails" that check by last-ulp differences — you install <code>np.allclose(..., rtol=1e-6)</code> with a comment citing summation order (M1 L8), and document it. Final: 40 min → 55 seconds, same laptop, no new server, plus a found data bug. Every single move was this lesson's; the judgment about WHICH moves — that was Module 1's.</p>
+
+<h2>Practice</h2>
+<details><summary>1. Predict shape and one value each: <code>np.arange(6).reshape(2,3) + np.array([100, 200, 300])</code>; <code>np.arange(3)[:, None] * np.arange(4)[None, :]</code>; <code>np.ones((2,3,4)).sum(axis=(0,2)).shape</code>.</summary><div class="body">(2,3): [[100,201,302],[103,204,305]] — row broadcast. (3,4) outer product: row i × col j = i·j (a times table — and the outer-product shape from M1 L6 §5's backprop preview). (3,): axes 0 and 2 both die, each survivor = 2×4=8.0. Multi-axis reductions are how per-channel image stats are computed in one call (2.8).</div></details>
+<details><summary>2. Without running: which are views of <code>a = np.arange(24).reshape(4, 6)</code>? <code>a[1:3]</code>, <code>a[:, ::2]</code>, <code>a.T</code>, <code>a[a % 2 == 0]</code>, <code>a.reshape(6, 4)</code>, <code>a.T.reshape(24)</code>. For the last: why does it secretly copy?</summary><div class="body">Views: a[1:3], a[:, ::2], a.T, a.reshape(6,4) (contiguous restride). Copies: the boolean select (gather), and a.T.reshape(24) — T's strides are (4,32)... wait, element-order along the flattened result must be column-major relative to the buffer; no single (offset, stride) pattern yields it, so NumPy copies. Test yourself with <code>np.shares_memory(x, a)</code> — the definitive answer to "can writing x touch a?". The .base attribute is only a heuristic: views carry a .base (the buffer's OWNER — for chained views like arange().reshape()[1:3], the original arange, not the intermediate), but a forced-copy reshape ALSO carries a .base pointing at its own internal temporary, sharing nothing with the source. When correctness rides on it, ask shares_memory. The "reshape of a transpose copies" fact is exactly the .contiguous() story from M1 L6 §6, and it will reappear as a GPU transfer cost in Module 5.</div></details>
+<details><summary>3. Write ONE expression each, no loops: (a) count of values in <code>t</code> (ms timings) exceeding 3× the median; (b) per-column z-scores of X (subtract mean, divide std, axis=0, keepdims); (c) the flat index AND (row, col) of the max of a (H, W) array — using divmod (M1 L2!).</summary><div class="body">(a) <code>(t > 3*np.median(t)).sum()</code> — the outlier counter from 2.3's design, one line. (b) <code>(X - X.mean(axis=0, keepdims=True)) / X.std(axis=0, keepdims=True)</code> — M1 L7's σ, per column. (c) <code>i = arr.argmax(); r, c = divmod(i, arr.shape[1])</code> — argmax flattens row-major, and M1 L2's inverse un-flattens; or np.unravel_index(i, arr.shape) once you want the library to do it.</div></details>
+<details><summary>4. <code>x = np.float16(300.0); (x * x).item()</code> — predict from M1 L8, then explain what a "norm in fp16" bug looks like in a real embedding pipeline and the two-word fix.</summary><div class="body">300² = 90 000 > 65 504 → inf in fp16 (M1 L8's cliff; the M1 L8 scenario's exact mechanism). In a pipeline: cosine similarities become inf/NaN for long embeddings only — intermittent, data-dependent, maddening. Two-word fix: "accumulate wider" — norms/variances in fp32 (<code>np.linalg.norm(x.astype(np.float32))</code> or dtype= on the reduction), storage stays fp16. Tensor cores institutionalize this exact split (multiply fp16, accumulate fp32 — M1 L8 §3).</div></details>
+<details><summary>5. Your teammate's function <code>def normalize(v): v /= np.linalg.norm(v); return v</code> passes its unit test but corrupts the caller's data in production. Explain both facts (view/alias mechanics + why the test missed it), then write the correct version and the test that would have caught it.</summary><div class="body">/= mutates IN PLACE through the parameter — an alias of the caller's array (2.4's function-aliasing, array edition). The test passed because it only checked the RETURN value, which is the same (mutated) object — correct-looking output, corrupted input. Fix: <code>return v / np.linalg.norm(v)</code> (new array; also handle the zero-norm ValueError — M1 L5). The missing test: <code>before = v.copy(); normalize(v); assert np.array_equal(v, before)</code> — "did you touch my input?" belongs in every numerical function's test suite (2.6 formalizes as a fixture).</div></details>
+<details><summary>6. Estimate BEFORE running (M1 L3 discipline): <code>A @ B</code> for two (2048, 2048) fp32 matrices on a laptop CPU at ~100 GFLOP/s effective — FLOPs, time, and memory for operands+result. Then: the same at (16384,16384) — what breaks first, compute or RAM?</summary><div class="body">2·2048³ ≈ 1.72×10¹⁰ FLOPs → ~0.17 s. Memory: 3 × 2048² × 4 B = 50 MB — trivial. At 16384: 2·16384³ ≈ 8.8×10¹² → ~88 s (annoying but runs); memory 3 × 16384² × 4 = 3.2 GB (+ BLAS workspace) — tight on an 8 GB laptop with a browser open: RAM breaks first, as an OOM or swap-thrash, before compute becomes truly prohibitive. This two-line habit — FLOPs AND bytes before pressing Enter — is the difference between "my laptop froze" and an engineering decision. (GPU: the 88 s is ~0.35 s — M5's pitch, quantified by you.)</div></details>
+<details><summary>7. Design: an image "thumbnailer" spec for 2.8 — input (H, W, 3) uint8, output (H//2, W//2, 3) uint8 by 2×2 mean-pooling, no loops. Specify: the dtype dance (why you can't mean in uint8), the reshape trick with exact shapes (M2 diagram m2l8-pool generalizes), edge policy for odd H/W, and the three tests you'll write in 2.6.</summary><div class="body">Dtype: cast to float32 (mean of four uint8s truncates in integer math and can't be computed in-place without overflow at the sum — 4×255=1020 > 255; M1 L1), pool, then <code>np.clip(...+0.5, 0, 255).astype(np.uint8)</code> (round, saturate — M1 L1's pixel fix). Reshape: crop to even dims (<code>img[:H//2*2, :W//2*2]</code>, declared edge policy: drop the odd row/col), then <code>x.reshape(H2, 2, W2, 2, 3).mean(axis=(1, 3))</code> — the (blockrow, inrow, blockcol, incol, channel) split with channels untouched. Tests (2.6): (i) a hand-computed 4×4 fixture matches exactly; (ii) output dtype/shape contract holds for odd inputs; (iii) input unmutated (Practice 5's lesson). Everything here is this lesson + M1; in 2.8 you'll ship it.</div></details>
+
+<div class="pager">
+  <a href="lesson-04.html">← Data structures</a>
+  <a href="lesson-06.html">Next: Errors, debugging & testing →</a>
+</div>
+<div class="footer">GPU Mastery · Module 2 · Lesson 5 — works offline · progress saved in your browser</div>
+</div>
+<script src="../assets/diagrams2.js"></script>
+<script src="../assets/app.js"></script>
+</body>
+</html>

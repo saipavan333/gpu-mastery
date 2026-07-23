@@ -1,0 +1,158 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>1.7 Probability & Statistics Essentials — GPU Mastery</title>
+<link rel="stylesheet" href="../assets/style.css">
+</head>
+<body data-lesson="m1l7">
+<nav><div class="inner">
+  <a class="logo" href="../index.html">GPU<span>Mastery</span></a>
+  <a class="item" href="../index.html">Home</a>
+  <a class="item on" href="../curriculum.html">Curriculum</a>
+  <a class="item" href="../labs.html">Labs</a>
+  <a class="item" href="../setup.html">Lab setup</a>
+  <a class="item" href="../prompt.html">Generator prompt</a>
+</div></nav>
+<div class="wrap">
+
+<div class="lesson-top">
+  <div><span class="badge">Module 1 · Lesson 7</span><span class="badge dim">≈ 2–3 h</span></div>
+  <button id="donebtn" class="donebtn">Mark lesson complete</button>
+</div>
+<h1>Probability & Statistics — randomness as a tool, noise as a fact</h1>
+<p class="lead">GPUs meet randomness twice: as a <em>tool</em> (Monte Carlo simulation, dropout, weight init, path tracing) and as a <em>fact of life</em> (your kernel's timings jitter; your benchmark lies without statistics). This lesson covers exactly the probability a GPU professional uses weekly.</p>
+
+<h2>Concept</h2>
+
+<h3>Probability: the fraction of worlds</h3>
+<p>P(event) is a number in [0, 1]: across all the ways things could go, the fraction where the event happens. Fair die: P(roll 4) = 1/6. The three rules that generate everything you'll need:</p>
+<pre><code>complement:   P(not A)   = 1 − P(A)
+independent:  P(A and B) = P(A)·P(B)      // only when A tells you nothing about B!
+either:       P(A or B)  = P(A) + P(B) − P(A and B)</code></pre>
+<p>The multiplication rule is a compounding machine. A kernel that succeeds with P = 0.999 per launch, launched a million times a day: P(zero failures) = 0.999^1,000,000 ≈ e^(10⁶·ln 0.999) ≈ e^−1000 ≈ 0 (Lesson 3's logs turning products into sums). "Rare" times "many" equals "certain" — the mathematics of why flaky code always fails in production.</p>
+
+<h3>Random variables, expectation, variance</h3>
+<p>A random variable X is a number that depends on chance (a die roll, a kernel's runtime). Its <strong>expectation</strong> E[X] = Σ xᵢ·P(xᵢ) is the long-run average — the fair price of the gamble. Its <strong>variance</strong> Var(X) = E[(X − μ)²] measures spread (in squared units); the square root <strong>σ</strong> (standard deviation) restores the original units:</p>
+<pre><code>die: E[X] = (1+2+3+4+5+6)/6 = 3.5
+     Var  = E[X²] − μ² = 91/6 − 12.25 ≈ 2.92     σ ≈ 1.71
+useful identities:  E[aX + b] = aE[X] + b        Var(aX + b) = a²·Var(X)
+independent X, Y:   E[X+Y] = E[X]+E[Y]           Var(X+Y) = Var(X)+Var(Y)</code></pre>
+<p>That last line hides the most important √ in engineering: variances of independent things <em>add</em>, so the σ of a sum of N terms grows like √N — while the sum itself grows like N. Noise grows slower than signal. Averages therefore <em>sharpen</em>: the mean of N samples has σ/√N of the individual spread. Everything from "why more benchmark runs help" to "why Monte Carlo error is 1/√N" is this one fact.</p>
+
+<h3>Distributions: uniform and normal cover 90% of your needs</h3>
+<div class="diagram" data-diagram="m1l7-normal" data-caption="The normal (Gaussian) shape: mean centers it, σ scales it; 68/95/99.7% of samples within 1/2/3 σ."></div>
+<p><strong>Uniform:</strong> every value in a range equally likely — <code>curand_uniform()</code>, <code>rand()/RAND_MAX</code>, the raw material all other randomness is cooked from. <strong>Normal (Gaussian):</strong> the bell curve — arises whenever many small independent effects add up (the Central Limit Theorem), which is why measurement noise, initialization schemes, and aggregate timings all look bell-ish. Parameters: mean μ (center), σ (width). The 68/95/99.7 rule prices rarity: a sample 3σ from the mean happens ~0.3% of the time; at 5σ, ~1 in 3.5 million — "impossible" in tests, several times a day at datacenter scale.</p>
+
+<h3>Statistics: telling the truth about noisy measurements</h3>
+<div class="diagram" data-diagram="m1l7-meanmedian" data-caption="One cold-start run drags the mean 70% high; the median shrugs."></div>
+<p>The <strong>mean</strong> uses all data but follows outliers; the <strong>median</strong> (middle value when sorted) ignores magnitude of extremes. Kernel timing distributions are <em>right-skewed</em> — there's a floor (the kernel's true cost) and a long tail (JIT compilation, clock ramp-up, another process, thermal throttle) — so the pro convention is:</p>
+<pre><code>1. warm up: run the kernel a few times, discard those timings (JIT, caches, clocks)
+2. run N ≥ 20 times (100+ for microbenchmarks)
+3. report MEDIAN as the headline; report spread (IQR or σ) alongside
+4. investigate — don't delete — repeatable outliers: they're a finding, not dirt</code></pre>
+
+<h2>Worked example</h2>
+<div class="card">
+<p><strong>Task:</strong> Estimate π by Monte Carlo, size the error, and decide how many samples a GPU needs for 6-digit accuracy.</p>
+<div class="diagram" data-diagram="m1l7-montecarlo" data-caption="Darts in a square: the fraction landing inside the circle estimates π/4."></div>
+<p><strong>Setup:</strong> throw N uniform points in a square enclosing a circle. P(inside) = area ratio = π/4. So π ≈ 4·(hits/N). With the diagram's 24 darts: 4·19/24 ≈ 3.17 — right neighborhood, terrible precision.</p>
+<p><strong>Error math (the useful part):</strong> each dart is a yes/no with p = π/4 ≈ 0.785; variance of one dart = p(1−p) ≈ 0.169. The estimate averages N darts → σ_est = 4·√(0.169/N) ≈ 1.64/√N. Demand 6 digits (σ ≈ 5×10⁻⁷): N ≈ (1.64/5×10⁻⁷)² ≈ <strong>10¹³ samples</strong>.</p>
+<p><strong>GPU verdict:</strong> 10¹³ independent dart throws at ~10¹¹ simple ops/sec effective → ~2 minutes on one GPU — feasible, embarrassingly parallel, and each extra digit costs <em>100×</em> more work (1/√N strikes: 10× accuracy = 100× samples). <strong>Decision made:</strong> Monte Carlo buys dimension-independence and trivial parallelism, and pays with that brutal square root. Use it when the problem is high-dimensional or irregular (option pricing, path tracing, physics); use deterministic quadrature when it's smooth and low-dimensional. Knowing which regime you're in is the actual skill.</p>
+</div>
+
+<h2>Key points</h2>
+<ul class="keypoints">
+<li>P(A and B) = P(A)P(B) only under independence; compounding turns rare×many into certain — the math of flaky systems.</li>
+<li>E[X] is the long-run average; Var(X) = E[(X−μ)²]; for independent variables variances add, so noise of a sum grows √N while signal grows N.</li>
+<li>The sample mean has spread σ/√N: more runs sharpen estimates, but each accuracy digit costs 100× the samples (Monte Carlo's 1/√N law).</li>
+<li>Uniform is the raw randomness; normal emerges when many small independent effects add (CLT); 68/95/99.7 within 1/2/3σ prices rarity.</li>
+<li>Kernel timings are right-skewed: warm up first, run ≥20×, report the median with a spread measure; investigate repeatable outliers.</li>
+<li>At datacenter scale, 5σ events are daily events — design for the tail, not the mean.</li>
+</ul>
+
+<h2>Quiz</h2>
+<div class="quiz">
+  <div class="q">1. Two GPUs each fail on a given day with P = 0.001, independently. What's the probability your 2-GPU training job survives 30 days with neither failing?</div>
+  <button class="opt">1 − 60×0.001 = 0.94 — subtract all the failure chances</button>
+  <button class="opt" data-c="1">(0.999)⁶⁰ ≈ 0.942 — sixty independent survivals multiply</button>
+  <button class="opt">0.999² = 0.998 — days don't compound</button>
+  <button class="opt">≈ 0.999⁶⁰ ≈ 0.9994 — exponents make things safer</button>
+  <div class="expl">Survival = 0.999 per GPU-day; 2 GPUs × 30 days = 60 independent survivals: 0.999⁶⁰ = e^(60·ln0.999) ≈ e^−0.06 ≈ 0.9418. (Option A is the linear approximation — close here because P is small, but it's an approximation that fails as probabilities grow, and knowing WHICH is exact matters.) Checkpointing exists because this number decays with every added GPU and day.</div>
+</div>
+<div class="quiz">
+  <div class="q">2. Your benchmark of a kernel returns (ms): 2.1, 2.0, 2.1, 2.2, 14.9. The right way to report performance?</div>
+  <button class="opt">Mean 4.66 ms — statistics means averaging</button>
+  <button class="opt">Min 2.0 ms — the hardware's true capability</button>
+  <button class="opt" data-c="1">Median 2.1 ms, note the outlier and check whether it repeats (likely warmup/JIT)</button>
+  <button class="opt">Drop the 14.9 silently and report mean 2.1 ms</button>
+  <div class="expl">Median 2.1 resists the outlier and represents typical latency; the 14.9 is data ABOUT your system (first-call JIT? clock ramp? contention?) — investigate, don't hide. Min is defensible for "best case" microbenchmarks but overpromises for production; silent deletion is how benchmark fraud starts.</div>
+</div>
+
+<h2>Exercises</h2>
+<details><summary>Exercise 1 — A ray tracer shoots 64 sample rays per pixel and averages them. The per-ray brightness estimate has σ = 0.4 (image scale 0..1). Compute the per-pixel noise, the samples needed to halve it, and explain why denoisers beat brute force.</summary><div class="body">
+<p>Per-pixel σ = 0.4/√64 = 0.05 — visible speckle. Halving to 0.025 needs 4× the rays (256/pixel) — 1/√N again: each halving quadruples cost. That's why production path tracers stopped chasing N years ago: they render at 1–64 samples and hand the speckle to an ML denoiser (which exploits spatial correlation between neighboring pixels — information brute-force sampling ignores). Trade: bias (denoiser can smear) for a ~100× sample budget cut. Monte Carlo's economics created an entire ML product category.</p>
+</div></details>
+<details><summary>Exercise 2 — You A/B test a kernel optimization: old median 2.10 ms (σ = 0.06, N = 50), new median 2.04 ms (σ = 0.06, N = 50). Is the 3% win real? Compute the standard error of each estimate and reason it out.</summary><div class="body">
+<p>Standard error of each mean ≈ σ/√N = 0.06/√50 ≈ 0.0085 ms. The difference (0.06 ms) is ~7 standard errors of a single estimate (and ~5 of the difference, whose SE = √(0.0085²+0.0085²) ≈ 0.012) — far beyond noise: <strong>real win</strong>. Contrast: with N = 4 runs each, SE ≈ 0.03, difference = 2 SE — plausibly noise, don't ship the claim. The habit: never announce a perf win without (spread / √N) sanity math; sub-5% "improvements" from n=3 runs are how teams ship regressions with confetti.</p>
+</div></details>
+
+<hr>
+<h1>Go deeper — the complete guide</h1>
+<p>Where randomness on a deterministic machine comes from, GPU RNG done right, the CLT and why everything is Gaussian-ish, initialization variance (the σ that makes deep nets trainable), tail thinking, and honest benchmarking end-to-end.</p>
+
+<h2>1. Pseudo-randomness: deterministic chaos with a seed</h2>
+<p>Computers can't roll dice; they iterate functions whose outputs <em>look</em> independent: x_{n+1} = f(x_n). The <strong>seed</strong> picks the starting point — same seed, same sequence, forever. This is a feature: reproducible experiments, debuggable "randomness," regression tests for stochastic code. The catches: naive generators (old <code>rand()</code>, LCGs) have correlations that ruin simulations; parallel use requires care (next section); and <code>rand() % 6</code> is subtly biased (RAND_MAX+1 rarely divides by 6 — the low values are slightly more likely; use rejection or floating division). Modern defaults: PCG or Philox on CPU, Philox/XORWOW via cuRAND on GPU; Philox is <em>counter-based</em> — random(key, counter) with no state to carry — which is precisely what 100k threads need.</p>
+
+<h2>2. Randomness across 100,000 threads</h2>
+<pre><code>// WRONG: every thread seeds with time(NULL) → thousands of IDENTICAL streams
+// WRONG: seed + tid as seed for an LCG → correlated streams
+// RIGHT (cuRAND pattern): one seed, per-thread SUBSEQUENCE:
+curand_init(seed, /*subsequence=*/ tid, /*offset=*/ 0, &state);
+// RIGHT (Philox counter-based): value = philox(key=seed, ctr={tid, step})</code></pre>
+<p>The failure mode is quiet: correlated streams make Monte Carlo <em>converge confidently to the wrong answer</em> — variance looks small because everyone agrees, and everyone is wrong together. Rule: one seed per experiment (logged!), independent subsequences per thread, and a determinism note in your README: parallel reduction order still makes bitwise reproducibility a separate battle (Lesson 8's non-associativity).</p>
+
+<h2>3. The Central Limit Theorem, operationally</h2>
+<p>Sum (or average) many independent, similar-scale effects and the distribution of that sum approaches a Gaussian — <em>regardless</em> of each effect's own shape. Add 12 uniform randoms, subtract 6: a decent standard normal (an old-school trick). Operationally: (a) aggregate timings over many kernels/requests → Gaussian-ish, mean±σ meaningful; (b) per-kernel latency = floor + occasional spikes → NOT Gaussian (skewed), median territory; (c) sums of gradients over a batch → Gaussian-ish, which is why batch-gradient noise is modeled as Gaussian in optimization papers. Knowing when CLT applies is knowing which statistics to trust.</p>
+
+<h2>4. Initialization: the variance calculation that unlocked deep learning</h2>
+<p>A layer computes y = Σᵢ wᵢxᵢ over n inputs (a dot product — everything returns to Lesson 5). If wᵢ are independent with variance v and xᵢ have variance 1, then Var(y) = n·v (variances add). Stack 50 layers: signal variance multiplies by (n·v) each layer → explodes if n·v > 1, dies to zero if < 1. The fix is school algebra: choose <strong>v = 1/n</strong> (Xavier; or 2/n for ReLU — Kaiming/He — because ReLU zeroes half the variance):</p>
+<pre><code>W = torch.randn(n_out, n_in) * math.sqrt(2.0 / n_in)   # He init, in the flesh</code></pre>
+<p>That one line — "pick σ so variances neither explode nor vanish through depth" — is arguably the most consequential application of Var(aX) = a²Var(X) in history: without it, pre-2010s deep nets simply didn't train. When you see <code>std=0.02</code> in a GPT config, that's this calculation tuned for its layer widths (and there's a matching ×1/√d inside attention — same theorem, same reason).</p>
+
+<h2>5. Expectation as a design tool: dropout and stochastic estimates</h2>
+<p>Dropout zeroes each activation with probability p at train time. To keep the <em>expected</em> activation unchanged, survivors are scaled by 1/(1−p): E[output] = (1−p)·x/(1−p) + p·0 = x. This "unbiased estimator" pattern — inject randomness, correct in expectation — recurs across GPU computing: stochastic rounding (Lesson 8's cousin: round up with probability equal to the fraction, making rounding error mean-zero), Monte Carlo gradient estimators, randomized sketches for huge matrix problems, even GPU texture sampling with jitter. The discipline is always the same two lines: what's the expectation? what's the variance you paid?</p>
+
+<h2>6. Tails, percentiles, and the SLO mindset</h2>
+<p>Serving systems report P50/P95/P99 latency, not means: users experience the tail (one slow token stalls the whole streamed reply). Facts to carry: percentiles don't add (P99 of a two-stage pipeline ≠ sum of stage P99s — you must measure end-to-end or convolve); at 10⁶ requests/day, P99.9 events happen 1000 times a day; and a Gaussian assumption under-prices tails badly whenever effects multiply rather than add (skewed/log-normal-ish reality). GPU-specific tail sources you'll hunt in Track A10: JIT/compilation on first shape, clock/power state transitions, memory fragmentation, preemption by other tenants, and stragglers in multi-GPU collectives (NCCL waits for the slowest — max of N random variables, which has its own distribution and grows with N).</p>
+
+<h2>7. Gotchas</h2>
+<div class="gotcha"><strong>Assuming independence.</strong> Two "independent" failures sharing a power supply, thermal zone, or driver aren't. Multiplying P's without independence is how "impossible" outages get scheduled.</div>
+<div class="gotcha"><strong>Benchmarking without warmup.</strong> First iterations pay JIT (torch.compile!), cache fills, and clock ramp — folding them into the mean fabricates regressions. Discard, or report "cold start" as its own (valuable) number.</div>
+<div class="gotcha"><strong>Same seed everywhere.</strong> Thousands of threads or data loaders seeded identically → duplicated "random" work, correlated Monte Carlo, and augmentations that repeat across workers (a real PyTorch DataLoader pitfall — seed per worker).</div>
+<div class="gotcha"><strong>σ² vs σ.</strong> Variance is in squared units; reporting Var where σ is expected inflates spread quadratically. And sample variance divides by N−1 (Bessel), not N — small-N spreads are otherwise underestimated.</div>
+<div class="gotcha"><strong>rand() % n.</strong> Modulo bias whenever n doesn't divide the generator's range; fine for a game drop table, fatal for a simulation. Use the library's ranged API or rejection sampling.</div>
+<div class="gotcha"><strong>Deleting outliers.</strong> A repeatable 15 ms spike every ~64 calls is a finding (allocator? cache set conflict? clock governor?), not noise. Median it out of the headline, then chase it — that's where real perf work hides.</div>
+
+<h2>Scenario — the "flaky" benchmark that was three real bugs</h2>
+<p>You inherit a CI perf gate that teams ignore because "it's flaky — fails 1 run in 10 with a 30% regression that vanishes on retry." Statistics audit, using only this lesson. (1) The gate compares single runs: old vs new, one sample each. With per-run σ ≈ 8%, a 2-sample comparison flags phantom 20% regressions constantly (difference of two noisy numbers has σ√2 ≈ 11%; a 2σ event per comparison × dozens of comparisons per day = daily false alarms — rare×many). Fix: 20 warm runs each side, compare medians, alert at 5× the standard error. (2) The remaining repeatable spikes correlate with the first run after model reload — JIT compilation counted as regression. Fix: warmup pass, plus a separate tracked "cold start" metric (it matters for serving!). (3) One kernel's timings are bimodal — 2.1 ms or 3.4 ms, nothing between: two clock states; the box's power governor was "balanced." Fix: lock clocks for benchmarks (<code>nvidia-smi -lgc</code>), document that prod won't have locked clocks — report both. Result: gate goes from ignored to trusted, catches a real 4% regression the next month (5 standard errors — no argument possible). Nothing here needed calculus: multiplication rule, σ/√N, medians, and the refusal to delete outliers.</p>
+
+<h2>Practice</h2>
+<details><summary>1. Fair coin flipped 10 times: P(at least one head)? An H100 with P(uncorrectable ECC error) = 10⁻⁵ per day, fleet of 10 000: expected errors/day, and P(zero errors) — compute both.</summary><div class="body">P(≥1 head) = 1 − (1/2)¹⁰ = 1023/1024 ≈ 0.999. Fleet: expected = 10⁴·10⁻⁵ = 0.1 errors/day. P(zero) = (1−10⁻⁵)^10⁴ ≈ e^−0.1 ≈ 0.905 — one day in ten, somewhere, a job needs its checkpoint. (Expected value adds even when events aren't independent; the survival product needs independence.)</div></details>
+<details><summary>2. X uniform on [0, 1]: E[X] = 1/2. Compute Var(X) = E[X²] − μ² given E[X²] = 1/3, then σ of the average of 1200 such samples.</summary><div class="body">Var = 1/3 − 1/4 = 1/12 ≈ 0.0833; σ = 0.289. Average of 1200: σ/√1200 ≈ 0.289/34.6 ≈ 0.0083. (The 1/12 is worth recognizing: it's the variance behind "add 12 uniforms" ≈ normal with σ = 1.)</div></details>
+<details><summary>3. Timings (ms): 5.1, 5.0, 5.2, 5.1, 5.0, 9.7, 5.1, 5.2. Give mean, median, which to report, and TWO distinct hypotheses for the 9.7 with the test you'd run for each.</summary><div class="body">Mean = 5.68, median = 5.1. Report median 5.1 (±0.08-ish IQR). Hypotheses: (a) warmup/JIT — test: is the spike always the first iteration? re-run with explicit warmup; (b) periodic interference (another process, clock transition, allocator) — test: longer series, look for periodicity/correlation with position, lock clocks and isolate the GPU. If it's reproducibly positional, it's structure, not noise.</div></details>
+<details><summary>4. Prove the dropout scaling: activation a, dropout probability p = 0.2, survivors scaled by 1/0.8. Show E[output] = a and compute Var(output/a) — what did the variance cost?</summary><div class="body">Output = a/0.8 with P = 0.8, else 0. E = 0.8·a/0.8 = a ✓. E[out²] = 0.8·a²/0.64 = 1.25a² → Var = 1.25a² − a² = 0.25a², so relative σ = 0.5: unbiased in expectation, but you injected 50% relative noise per unit — the regularization IS the noise. Expectation-correct, variance-paid: the pattern's full price tag, visible.</div></details>
+<details><summary>5. A Monte Carlo light-transport estimate has σ = 2.0 at N = 1024 samples. Samples for σ = 0.1? If importance sampling reduces per-sample σ by 5×, samples then? What's the general lesson?</summary><div class="body">σ ∝ 1/√N: need (2.0/0.1)² = 400× → N ≈ 409 600. With 5× lower per-sample σ (0.4 base): (0.4/0.1)² = 16× → N ≈ 16 384 — 25× cheaper. Lesson: variance REDUCTION (importance sampling, stratification, control variates) beats sample brute force, because per-sample σ enters squared while N enters linearly. This is why every serious Monte Carlo system is a variance-reduction system.</div></details>
+<details><summary>6. Your service's per-request latency is roughly log-normal. The team sets an alert on mean latency. Name two concrete ways this alert lies, and what to monitor instead.</summary><div class="body">(1) Skew: mean sits well above median — alert fires on harmless tail wiggle or, tuned looser, misses median regressions users feel. (2) A few extreme outliers move the mean while P50/P95 are stable → pages for non-events (and the reverse: P99 doubling while the mean barely moves → silent user pain). Monitor percentiles (P50/P95/P99) end-to-end, alert on the ones tied to SLOs, keep an outlier-count metric separately.</div></details>
+<details><summary>7. Design: a GPU particle simulation needs 10⁷ independent random directions per frame, reproducible across runs and across GPU models, with no thread reading another's state. Specify generator choice, seeding scheme, uniform-direction method, and the reproducibility caveats you'd document.</summary><div class="body">Generator: counter-based Philox — value = f(key, counter), stateless per thread. Seeding: key = experiment_seed (logged); counter = (frame_id, particle_id, draw_index) — unique per draw, no collisions, no stored state. Uniform direction in 3D: draw z ~ U[−1,1], φ ~ U[0,2π), dir = (√(1−z²)cosφ, √(1−z²)sinφ, z) — Lesson 4's circle math; (naive normalize-a-cube-sample biases toward corners; rejection sampling wastes ~48% draws and breaks the fixed counter budget — reasons to prefer the direct method). Caveats to document: bitwise identical across runs on same binary/GPU ✓; across GPU models, floating-point contraction (FMA) and libm differences may flip last bits — pin math flags (-fmad=false for strictness) or promise statistical, not bitwise, reproducibility. (That caveat is Lesson 8, arriving next.)</div></details>
+
+<div class="pager">
+  <a href="lesson-06.html">← Matrices</a>
+  <a href="lesson-08.html">Next: Floating point — how GPUs really store numbers →</a>
+</div>
+<div class="footer">GPU Mastery · Module 1 · Lesson 7 — works offline · progress saved in your browser</div>
+</div>
+<script src="../assets/diagrams.js"></script>
+<script src="../assets/app.js"></script>
+</body>
+</html>

@@ -1,0 +1,193 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>A1 Calculus for Backprop — GPU Mastery</title>
+<link rel="stylesheet" href="../assets/style.css">
+</head>
+<body data-lesson="al1">
+<nav><div class="inner">
+  <a class="logo" href="../index.html">GPU<span>Mastery</span></a>
+  <a class="item" href="../index.html">Home</a>
+  <a class="item on" href="../curriculum.html">Curriculum</a>
+  <a class="item" href="../labs.html">Labs</a>
+  <a class="item" href="../setup.html">Lab setup</a>
+  <a class="item" href="../prompt.html">Generator prompt</a>
+</div></nav>
+<div class="wrap">
+
+<div class="lesson-top">
+  <div><span class="badge">Track A · Lesson 1</span><span class="badge dim">≈ 3 h</span></div>
+  <button id="donebtn" class="donebtn">Mark lesson complete</button>
+</div>
+<h1>Calculus for Backprop — from slopes to the algorithm that trains everything</h1>
+<p class="lead">The core made you fast at running math on GPUs; Track A is about the math that TRAINS models — and it is one idea, taught in school, industrialized: the slope. This lesson takes you from "what's a derivative" to "I can derive and verify backprop by hand," because every kernel you'll write in this track exists to move gradients.</p>
+
+<h2>Concept</h2>
+
+<h3>A derivative is a local exchange rate</h3>
+<pre><code>f(x + h)  ≈  f(x) + f'(x)·h        # M1 L2's "zoom in until it's linear"
+# f'(x) answers ONE question: if I nudge x by a tiny h, how many h's does
+# f move?  f'(x) = 3 → a 0.001 nudge in x buys a 0.003 move in f.
+# Training in one sentence: L(weights) is a number we hate (the loss);
+# dL/dw says which way to nudge EACH weight to shrink it. That's it.
+# Everything else in this track is making that sentence FAST at scale.</code></pre>
+
+<h3>The chain rule is bookkeeping, not magic</h3>
+<div class="diagram" data-diagram="a1-chain" data-caption="Composed functions multiply their slopes. A 1% nudge propagates through the pipe, getting scaled at every stage."></div>
+<pre><code>y = f(g(x))   →   dy/dx = f'(g(x)) · g'(x)      # slopes MULTIPLY along a chain
+# why: x nudges g by g'·h; that nudge enters f, which scales it by f'.
+# Exchange rates compose like currencies: rupees→dollars→yen = product.
+# A 40-layer network is just a 40-link chain: dL/dx = product of 40 locals.
+# (Two paths to the same output? ADD their products — Σ over paths, M1's Σ.)</code></pre>
+
+<h3>Gradients: all the knobs at once</h3>
+<pre><code>L(w₁, w₂, …, w₇ₑ₉)                 # a 7-billion-knob loss
+∇L = [∂L/∂w₁, ∂L/∂w₂, …]           # the gradient: one slope PER knob,
+                                    # each computed "wiggle wᵢ, freeze the rest"
+w ← w − lr·∇L                       # gradient descent: nudge every knob
+                                    # downhill, a little, repeatedly. Training.
+# The miracle you should NOT take for granted: backprop computes ALL 7e9
+# partials in ONE backward pass costing ~2× the forward — not 7e9 passes.
+# Quiz 1 makes you prove why. This factor-of-billions is the entire reason
+# deep learning is computationally possible.</code></pre>
+
+<h3>Backprop = the chain rule on a graph, with memoization</h3>
+<div class="diagram" data-diagram="a1-graph" data-caption="Forward computes and STORES; backward walks the same graph reversed, multiplying local slopes and reusing every stored value."></div>
+<pre><code># forward:  z = w·x → a = relu(z) → L = (a − y)²     (each node SAVES its inputs)
+# backward, right to left, one local slope per edge:
+#   dL/da = 2(a − y)          ← saved (a − y)
+#   da/dz = 1 if z &gt; 0 else 0  ← saved z's sign
+#   dz/dw = x                  ← saved x
+#   dL/dw = 2(a−y) · 1[z&gt;0] · x        products of locals — the chain rule
+# "Memoization": dL/da is computed ONCE and reused by every weight upstream
+# (3.9's ladder logic: never recompute what you can reuse). The stored
+# activations are the tape autograd builds — and A2 shows you that tape.</code></pre>
+
+<h2>Worked example</h2>
+<div class="card">
+<p><strong>Task:</strong> Differentiate a 2-layer net by hand, then make the computer confirm every digit (M1 L7: no claim without a measurement). x=1.5, w₁=0.8, w₂=−1.2, target y=1.0, L=(w₂·relu(w₁x) − y)².</p>
+<div class="diagram" data-diagram="a1-fdcheck" data-caption="The trust ladder: analytic formula vs central finite difference. Agreement to ~1e-10 is the handshake that your calculus is right."></div>
+<pre><code>forward:  z₁ = 0.8·1.5 = 1.2   a₁ = relu(1.2) = 1.2
+          ŷ = −1.2·1.2 = −1.44   L = (−1.44 − 1)² = 5.9536
+by hand:  dL/dw₂ = 2(ŷ−y)·a₁          = 2(−2.44)(1.2)      = −5.856
+          dL/dw₁ = 2(ŷ−y)·w₂·1[z₁&gt;0]·x = 2(−2.44)(−1.2)(1.5) =  8.784
+verify (central diff, h=1e-6, executed):
+          numeric dL/dw₁ = 8.784000   rel-err 8.0e-11  ✓
+          numeric dL/dw₂ = −5.856000  rel-err 1.5e-10  ✓</code></pre>
+<p><strong>Read the signs like an engineer:</strong> dL/dw₁ = +8.784 says "increasing w₁ increases the loss" — the optimizer will push w₁ DOWN. Trace why: ŷ is already far below the target, w₂ is negative, so growing w₁ grows a₁, which drags ŷ = w₂a₁ further negative — worse. The gradient encoded that whole causal story as one signed number. When you can narrate a gradient's sign, you understand backprop; when you can only compute it, you memorized it. And note what the verification bought: the two most common hand-derivation bugs (dropping the 2, dropping w₂ from the w₁ path) both produce numbers this check catches instantly.</p>
+</div>
+
+<h2>Key points</h2>
+<ul class="keypoints">
+<li>A derivative is a local exchange rate: f(x+h) ≈ f(x) + f'(x)h — the "zoom until linear" model from M1 L2, now aimed at a loss function.</li>
+<li>Chains multiply slopes; branches add the products (Σ over paths). A deep network's gradient is a long product of cheap local factors — nothing deeper than that.</li>
+<li>The gradient packs one slope per parameter; descent nudges every knob downhill at once. Training = forward, backward, nudge, repeat.</li>
+<li>Backprop computes ALL partials in one backward pass (~2× forward cost) by reusing shared upstream factors — vs one forward pass PER parameter for finite differences. That ratio is ~billions for real models.</li>
+<li>The backward pass consumes values SAVED during forward (z's sign, a−y, x) — that storage is autograd's tape (A2) and the memory bill checkpointing later negotiates (A7/A9).</li>
+<li>Every hand-derived gradient gets a central-difference check in fp64 before you trust it — rel-err ~1e-10 or you have a bug; this ritual becomes torch.autograd.gradcheck in A3.</li>
+</ul>
+
+<h2>Quiz</h2>
+<div class="quiz">
+  <div class="q">1. A colleague proposes skipping backprop entirely: "just compute each ∂L/∂wᵢ numerically — loss(w+h) minus loss(w−h), done. Simpler code, no calculus." For a 7B-parameter model where one forward pass takes 0.5 s on your cluster, price their idea against backprop — and name the structural reason backprop is so much cheaper.</div>
+  <button class="opt">It would work but lose some precision</button>
+  <button class="opt" data-c="1">Numeric: 2 forward passes PER parameter → 14e9 × 0.5 s ≈ 222 YEARS per training step. Backprop: one forward + one backward ≈ 1.5 s for ALL 7e9 partials. The structural reason: every parameter's gradient shares the same downstream factors (dL/da of later layers) — backprop computes each shared factor ONCE and reuses it (memoization on the graph); finite differences recompute the entire pipeline per knob, learning nothing from one probe that helps the next</button>
+  <button class="opt">GPUs can't evaluate loss functions twice</button>
+  <button class="opt">Numeric gradients are wrong for relu networks</button>
+  <div class="expl">The arithmetic is the argument: 222 years vs 1.5 seconds — a ×4.7e9 gap, which is why autodiff isn't an optimization, it's the enabling technology. Note that FD remains the perfect TEST (worked example) at a handful of parameters: probe a few knobs, compare, ship. Tool for training, tool for testing — different tools (M2 L6's oracle doctrine: the slow obvious method referees the fast clever one).</div>
+</div>
+<div class="quiz">
+  <div class="q">2. Your central-difference check of sin'(1), measured in fp64: error 9.0e-04 at h=1e-1, 9.0e-06 at 1e-2, 9.0e-08 at 1e-3 … then 2.6e-09 at 1e-8, and RISING to 1.8e-04 by h=1e-13. Explain both regimes of this V-shape, and why a teammate running gradient checks at h=1e-12 "to be extra accurate" keeps flagging correct gradients as broken.</div>
+  <button class="opt">Rounding bugs in the sin implementation</button>
+  <button class="opt" data-c="1">Left slope: truncation error — central difference is exact only in the h→0 limit; its leading error term is O(h²), hence the measured ×100 drop per decade. Right slope: cancellation — sin(x+h) and sin(x−h) agree in their leading ~15 digits, so subtracting them annihilates significance (M1 L8's catastrophic cancellation), and dividing by tiny 2h amplifies the surviving noise. The dip (~1e-5..1e-6 in fp64) is the only trustworthy zone; at h=1e-12 the teammate is measuring float noise, not calculus — their "extra accuracy" walked off the right side of the V</button>
+  <button class="opt">h=1e-12 underflows to zero</button>
+  <button class="opt">The O(h²) law is wrong below 1e-8</button>
+  <div class="expl">The V-shape is two error sources trading dominance — a pattern you'll re-meet everywhere (B1 measures the same V for simulation steps). The ×100-per-decade left slope is the O(h²) claim MEASURED, not cited (M1 L7). Practical constants worth memorizing: fp64 central diff → h ≈ 1e-5·max(1,|x|); fp32 is hopeless for gradient checks (the V's floor sits near 1e-3) — which is exactly why A3's gradcheck runs in double precision.</div>
+</div>
+
+<h2>Exercises</h2>
+<details><summary>Exercise 1 — Extend the worked example to a 3-layer net: L = (w₃·relu(w₂·relu(w₁x)) − y)², with x=1.5, w₁=0.8, w₂=−1.2, w₃=0.5, y=1.0. Derive all three ∂L/∂wᵢ by hand (watch the DEAD relu!), then verify each with central differences at h=1e-6. One of the three gradients is exactly zero — explain why that's correct, not a bug, and what it means for training.</summary><div class="body">
+<pre><code>forward: z₁=1.2, a₁=1.2, z₂=−1.44, a₂=relu(−1.44)=0, ŷ=0, L=1.0
+dL/dw₃ = 2(ŷ−y)·a₂ = 2(−1)(0) = 0        ← the zero!
+dL/dw₂ = 2(ŷ−y)·w₃·1[z₂&gt;0]·a₁ = anything·0·… = 0  ← ALSO zero (dead relu)
+dL/dw₁ = …·1[z₂&gt;0]·… = 0                  ← the deadness poisons upstream too</code></pre>
+<p>All three are zero (verify: numeric agrees to ~1e-12): z₂ &lt; 0 kills the relu, its local slope is 0, and every chain product through that edge carries the 0. Correct calculus, catastrophic training: this neuron gives NO signal to any weight feeding it — the "dead relu" problem, and your first taste of why gradients are a systems concern (a dead unit wastes its parameters forever unless something revives it). w₃'s zero has a different cause (a₂=0 → the weight currently does nothing). Two zeros, two mechanisms — distinguishing them by tracing the chain is exactly the skill this exercise builds. Leaky-relu/GELU exist substantially to keep these paths faintly alive (A5 evaluates GELU numerically).</p>
+</div></details>
+<details><summary>Exercise 2 — The V-shape lab: reproduce quiz 2's table yourself (NumPy, fp64) for f=sin at x=1, h=1e-1…1e-13, BOTH forward and central differences. Confirm the two slopes (×10 vs ×100 per decade), find each method's dip, then re-run in fp32 and write the two-line conclusion about gradient checking in each precision.</summary><div class="body">
+<pre><code>measured (fp64, executed for this lesson):
+  central: errors 9.0e-4 → 9.0e-6 → 9.0e-8 …  (×100/decade: O(h²) CONFIRMED)
+           dip ≈ 1e-5..1e-6 at err ~1e-11, then rises (cancellation)
+  forward: ×10/decade (O(h)), dip ≈ 1e-8 at err ~3e-9 — 100× worse floor
+fp32 rerun: the V's floor lands near 1e-3 — barely 3 digits of trust.</code></pre>
+<p>Conclusions to write in your notes: (1) central beats forward not just in error but in FLOOR — the O(h²) truncation lets you stop before cancellation bites hard; (2) fp32 finite differences can't certify gradients beyond ~1e-3, so all serious checking happens in fp64 (A3's gradcheck default) — and any tutorial showing fp32 gradient checks "passing at rtol=1e-2" is testing almost nothing. Keep the script; B1 reuses it verbatim on derivative stencils, where the same V decides simulation step sizes.</p>
+</div></details>
+
+<hr>
+<h1>Go deeper — the shape of differentiation at scale</h1>
+
+<h2>1. Jacobians, VJPs, and why we go BACKWARD</h2>
+<pre><code>layer: ℝⁿ → ℝᵐ   has an m×n Jacobian J (all the ∂outᵢ/∂inⱼ — a matrix of slopes)
+network: L = f₃(f₂(f₁(x)))  →  dL/dx = J₃ · J₂ · J₁     (chain rule, matrix form)
+# L is SCALAR → J₃ is 1×n₃ (a row). Multiply right-to-left:
+#   (1×n₃)(n₃×n₂) = 1×n₂ → (1×n₂)(n₂×n₁) = 1×n₁    every step: vector × matrix!
+# Left-to-right instead: (n₃×n₂)(n₂×n₁) = full MATRIX products — n× the FLOPs.
+# Reverse mode = always carrying the skinny side. That's the whole secret:
+#   reverse-mode cost ~ O(#outputs) sweeps → perfect for many-params→1-loss
+#   forward-mode cost ~ O(#inputs) sweeps → wins for few-params→many-outputs
+# "vector–Jacobian product" (VJP) is this row-times-J step — autograd never
+# BUILDS J (n₂×n₁ can be billions²); each op implements its VJP directly:
+# matmul's VJP is two matmuls (gᵀ→ g·Wᵀ and Xᵀ·g) — A3 makes you write one.</code></pre>
+
+<h2>2. Kinks, plateaus, and "differentiable enough"</h2>
+<pre><code>relu(0): no derivative exists (the kink). Frameworks pick a subgradient (0)
+and nobody's training has ever noticed: a float landing EXACTLY on 0.0 is
+measure-zero-meets-M1-L8. The kinks that DO hurt are the wide flat zones:
+  dead relu (Ex.1): plateau with zero slope → no signal, forever
+  saturated sigmoid/tanh: slopes ~e⁻|x| → vanishing products in long chains
+    (40 factors of 0.2 = 1e-28 — the chain rule's dark side, and why relu
+     replaced sigmoid: its live-side slope is exactly 1, product-stable)
+Gradient flow is CHAIN-PRODUCT HEALTH — most architecture inventions
+(residual connections! normalization!) are plumbing to keep products ~1.</code></pre>
+
+<h2>3. What backward costs: the memory bill</h2>
+<pre><code>Backward needs forward's saved values → training memory ≈ weights + optimizer
+state + ALL ACTIVATIONS of the batch (the tape). Activations dominate at
+scale: batch × seq × hidden × layers × bytes — often 3–10× the weights.
+The levers, all bought with recomputation or precision (4.6-style trades):
+  checkpointing: save every k-th activation, recompute between (≈33% more
+    compute for ÷√-ish memory — A7 prices it)
+  mixed precision: half-size activations (A6)
+  fusion: never materialize intermediates at all (A5's whole thesis)
+You now know why "training OOMs but inference fits" — inference has no tape.</code></pre>
+
+<h2>4. Gotchas</h2>
+<div class="gotcha"><strong>Loss goes down ≠ gradients are right.</strong> A half-wrong gradient is still often "downhill-ish" and SGD partially forgives it — models limp to mediocre convergence on broken backward passes weekly, somewhere. The scenario below is this gotcha with a body count; the defense is Ex-style FD checks as FIXTURES (M2 L6), never eyeballing loss curves.</div>
+<div class="gotcha"><strong>The dropped outer factor.</strong> d/dw of (f(w)−y)² is 2(f−y)·f' — the 2(f−y) gets dropped by every beginner once. The FD check catches it as a clean ×-factor mismatch; learn its signature.</div>
+<div class="gotcha"><strong>Checking gradients in fp32.</strong> Quiz 2's V has a ~1e-3 floor in fp32 — your check can't tell right from subtly-wrong. fp64 for checks, always (gradcheck's default, A3).</div>
+<div class="gotcha"><strong>Wiggling the wrong thing.</strong> ∂L/∂w (train the weight) vs ∂L/∂x (attack/saliency/diffusion guidance) are different columns of the same machinery — asking autograd for the wrong one silently succeeds and confuses for hours. Name WHICH derivative before computing any.</div>
+<div class="gotcha"><strong>h scaled absolutely, not relatively.</strong> h=1e-6 is great at x≈1, terrible at x≈1e6 (h drowns in x's ulp — M1 L8 spacing). Use h = ε·max(1,|x|).</div>
+<div class="gotcha"><strong>Expecting symbolic algebra.</strong> Autodiff doesn't simplify expressions like your calculus teacher — it evaluates NUMERIC local slopes through the actual graph. No expression swell, no simplification wins: a different beast from Mathematica, which is precisely why it scales.</div>
+
+<h2>Scenario — the model that trained "fine" on a wrong gradient</h2>
+<p>A recommendation-systems team ships a custom ranking loss as a hand-written CUDA op (the 5.x skills, deployed) with a hand-derived backward. Training converges, metrics look acceptable, everyone moves on. Six weeks later a new hire — building A3's habits — adds gradcheck fixtures to the op library "since they were missing," and the ranking op FAILS: rel-err 0.4 on one input's gradient. The hand-derived backward had transposed one factor in a matmul VJP (§1's exact pitfall); the resulting gradient was ~60% correlated with the true one — downhill enough to converge, wrong enough to converge WORSE. The fix was one transpose; the retrain bought +2.1% on the business metric, which for that team was a quarter's roadmap delivered by one fixture. Two morals, both this lesson's: (1) "the loss decreased" is the weakest possible evidence of gradient correctness — SGD is disturbingly forgiving of systematic error, and its forgiveness caps your model's quality silently; (2) gradient checks are not classroom exercises — they are the ONLY test that distinguishes right-and-converging from wrong-and-converging, and they take ten lines. The new hire didn't find the bug by being smarter; they found it by running the ritual nobody else bothered to run (M1 L7's oldest lesson, wearing autograd's clothes).</p>
+
+<h2>Practice</h2>
+<details><summary>1. Compute by hand, then narrate each sign: for L = (w·x − y)² at w=2, x=3, y=1 — ∂L/∂w and ∂L/∂x. Why do they differ by exactly the factor w/x… wait, do they? Check with numbers before answering.</summary><div class="body">ŷ=6, L=25, dL/dŷ=2(6−1)=10. ∂L/∂w = 10·x = 30; ∂L/∂x = 10·w = 20. They differ by the factor x/w = 3/2 (each partial carries the OTHER variable — the local slope of a product is "the thing you're not wiggling"). The trap in the question ("w/x") is deliberate: predicted 30/20 = x/w, and checking with numbers before theorizing is the lesson's reflex. Narration: both positive — ŷ=6 overshoots y=1, so increasing either w or x pushes ŷ further up, increasing loss; the optimizer would shrink w (and a saliency method would report "x pushes the score up").</div></details>
+<details><summary>2. A 30-layer chain where every layer's local slope is 0.5: what reaches layer 1's weights? Same question with slopes alternating 2.0 and 0.5. Then say which real architectures manufacture the second situation on purpose, and name the mechanism that DEFEATS both problems.</summary><div class="body">0.5³⁰ ≈ 9.3e-10 — layer 1 learns ~nothing (vanishing gradients: §2's chain-product health, quantified). Alternating 2·0.5 = 1 per pair → product exactly 1 after 30 layers: healthy. Real systems engineer toward the second: careful init (slopes ~1 on average), normalization layers (rescale activations so local slopes stay O(1)), and relu's slope-of-exactly-1 on its live side. The defeat mechanism: residual connections — y = x + f(x) makes the local Jacobian I + J_f, so the chain product contains an additive identity path: gradients can flow THROUGH the skip untouched even if f's path vanishes. One line of architecture, and 100-layer training became routine (2015's biggest lesson, expressed entirely in this lesson's vocabulary).</div></details>
+<details><summary>3. Backprop stores activations (the tape). For a toy transformer block — batch 8, seq 4096, hidden 4096, fp16 — estimate ONE layer's activation memory for just the attention scores matrix (batch × heads(32) × seq × seq, fp16) and explain why A5's FlashAttention deleting exactly that tensor from the tape matters more for TRAINING than inference.</summary><div class="body">Scores: 8 × 32 × 4096 × 4096 × 2 B = 8.6 GB — for ONE layer's ONE intermediate; ×32 layers ≈ 275 GB: impossible. That's why naive attention caps sequence length, and why FlashAttention's "never materialize S" (a5-flash) is a MEMORY story before it's a speed story: in training, S would otherwise live on the tape until backward consumes it (FlashAttention recomputes tile-wise in backward instead — checkpointing's trade, §3, applied surgically to the worst tensor). Inference has no tape (no backward), so the win there is bandwidth/latency only. Same kernel, two different superpowers — regime literacy (5.9 P6) applied to autograd.</div></details>
+<details><summary>4. Your FD check of a custom op reports rel-err 3e-3 at h=1e-5 (fp64). List, in the order you'd check them, the four distinct explanations this number is compatible with — and the one-line experiment that distinguishes each.</summary><div class="body">(1) Genuinely wrong backward (most likely at 3e-3): probe a DIFFERENT random direction/input — a real bug stays ~3e-3, noise moves. (2) Kink-crossing: the FD stencil straddled a relu/max boundary (the two probes took different branches — calculus is fine, the check is invalid there): re-run at inputs away from kinks or shrink h to 1e-6 and see the error jump AROUND, not shrink smoothly. (3) Internal nondeterminism (5.8's atomics in the forward!): run the same forward twice — if outputs differ in late digits, your baseline itself wobbles. (4) Wrong h regime for this input's scale (gotcha 5): rescale h relatively and re-measure. The ORDER matters: cheap discriminating experiments first (M1 L7's controlled-variable discipline). gradcheck automates 1, 2, and 4 — but YOU still have to suspect 3, because it can't.</div></details>
+<details><summary>5. Forward-mode autodiff computes d(everything)/d(one input) in one sweep; reverse computes d(one output)/d(everything). For each workload, pick the mode and justify in one line: (a) training a 7B LLM; (b) sensitivity of a rocket simulation's 50 outputs to its 3 design parameters; (c) computing a Hessian-vector product; (d) per-pixel saliency of a classifier's single logit w.r.t. a 1M-pixel image.</summary><div class="body">(a) Reverse — 7e9 inputs, 1 scalar output: the canonical case (quiz 1's ×billions). (b) Forward — 3 sweeps (one per parameter) beat 50 reverse sweeps: mode choice = min(#in, #out), and here inputs win. (c) BOTH, composed: forward-over-reverse (a JVP of a VJP) gives Hv in ~4 forward-equivalents without materializing H — the standard trick (torch.func in A9's world). (d) Reverse — 1 output, 1M inputs; one backward gives the whole saliency map (and it's ∂L/∂x, gotcha 4's OTHER derivative, on purpose this time). If you can answer (b) and (c) unprompted, you're past most interview bars for "explain autodiff."</div></details>
+<details><summary>6. Derive the VJP for matmul Y = X·W (shapes: X is m×k, W is k×n, upstream grad G = ∂L/∂Y is m×n): write ∂L/∂X and ∂L/∂W as matrix products, check both SHAPES, and connect to why the scenario's transpose bug was so easy to write and so hard to notice.</summary><div class="body">∂L/∂X = G·Wᵀ (m×n · n×k = m×k ✓ matches X); ∂L/∂W = Xᵀ·G (k×m · m×n = k×n ✓ matches W). Derivation sketch: L = Σᵢⱼ Gᵢⱼ·(ΣₚXᵢₚWₚⱼ)'s sensitivity — each Xᵢₚ touches row i of Y weighted by W's row p (hence Wᵀ); each Wₚⱼ touches column j weighted by X's column p (hence Xᵀ). The trap: G·W, Wᵀ·G, G·Xᵀ all EXIST for some shape combos (especially square matrices — m=k=n!) and are all wrong; shape-checking passes precisely when the bug is least visible. That's the scenario's six-week bug: square hidden dims made the transposed version shape-legal, and only gradcheck's NUMBERS (not shapes) could convict it. Backward of a matmul = two matmuls — also why backward costs ≈2× forward (quiz 1's constant, explained).</div></details>
+<details><summary>7. The interview closer: "Explain backpropagation." Deliver the 90-second answer: the one-sentence definition, the chain-rule mechanism with the memoization point, the cost claim (time AND memory) with numbers, the reverse-vs-forward justification, and the one-line verification story. Write it out, say it aloud, time it.</summary><div class="body">Skeleton to make your own: "Backprop is reverse-mode automatic differentiation: it computes the loss's slope with respect to every parameter in one backward pass. Forward evaluates the network and saves each op's inputs; backward walks the graph in reverse, multiplying each op's local derivative into a running gradient — the chain rule — and because all parameters share the downstream factors, each is computed once and reused: that's why 7 billion partials cost about two forwards, not 7 billion of them [quiz 1]. The price is memory: saved activations dominate training's footprint, which is what checkpointing and fusion negotiate [§3]. We go backward, not forward, because the loss is one scalar and parameters are billions — reverse mode's cost scales with outputs, and ops implement vector-Jacobian products directly so no Jacobian is ever materialized [§1, P6's matmul VJP as the example]. And I trust an implementation only when its analytic gradients match fp64 central differences at rel-err ~1e-7 — loss-goes-down is not a gradient test [scenario]." Every bracket is somewhere you can go DEEPER on follow-up — which is what the interviewer is actually probing for.</div></details>
+
+<div class="pager">
+  <a href="../curriculum.html">← Curriculum</a>
+  <a href="lesson-02.html">Next: PyTorch internals →</a>
+</div>
+<div class="footer">GPU Mastery · Track A · Lesson 1 — works offline · progress saved in your browser</div>
+</div>
+<script src="../assets/diagramsA.js"></script>
+<script src="../assets/app.js"></script>
+</body>
+</html>

@@ -1,0 +1,237 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>2.4 Lists, Tuples, Dicts & Sets — GPU Mastery</title>
+<link rel="stylesheet" href="../assets/style.css">
+</head>
+<body data-lesson="m2l4">
+<nav><div class="inner">
+  <a class="logo" href="../index.html">GPU<span>Mastery</span></a>
+  <a class="item" href="../index.html">Home</a>
+  <a class="item on" href="../curriculum.html">Curriculum</a>
+  <a class="item" href="../labs.html">Labs</a>
+  <a class="item" href="../setup.html">Lab setup</a>
+  <a class="item" href="../prompt.html">Generator prompt</a>
+</div></nav>
+<div class="wrap">
+
+<div class="lesson-top">
+  <div><span class="badge">Module 2 · Lesson 4</span><span class="badge dim">≈ 3 h</span></div>
+  <button id="donebtn" class="donebtn">Mark lesson complete</button>
+</div>
+<h1>Lists, Tuples, Dicts & Sets — organizing many values</h1>
+<p class="lead">One variable per value stops scaling at about five values. Collections are how programs hold thousands — and how Python's "names are tags" picture finally shows its teeth. Today you also multiply your first real matrices and verify them against Module 1's hand computation.</p>
+
+<h2>Concept</h2>
+
+<h3>Lists: the workhorse sequence</h3>
+<div class="diagram" data-diagram="m2l4-list" data-caption="Indexed slots, negatives from the end, and half-open slices that COPY."></div>
+<pre><code>times = [2.1, 2.0, 9.7, 2.2]          # ordered, mutable, any length
+times[0], times[-1]                    # 2.1, 2.2 — 0-based; -1 = last
+times[1:3]                             # [2.0, 9.7] — half-open slice, NEW list
+times.append(2.05); times.sort()       # grow; sort in place (returns None!)
+len(times), 9.7 in times               # 5, True
+total = sum(times); best = min(times)  # built-in reductions (M1 L3's Σ and min)</code></pre>
+<p>Two method families to keep straight: <strong>in-place mutators</strong> (<code>append, sort, reverse, pop</code> — change the object, return None) versus <strong>expression makers</strong> (<code>sorted(xs), reversed(xs), xs + ys</code> — build new objects). <code>xs = xs.sort()</code> assigns None to xs — a bug so common it's practically a rite of passage.</p>
+
+<h3>Aliasing: the tag picture gets dangerous</h3>
+<div class="diagram" data-diagram="m2l4-alias" data-caption="b = a points a second tag at the SAME list. Mutation is visible through every tag."></div>
+<pre><code>a = [1, 2, 3]
+b = a                      # alias — same object, two tags (2.1's picture)
+b.append(4)
+print(a)                   # [1, 2, 3, 4]  ← a "changed" without being touched
+c = list(a)                # shallow copy — new outer list
+a is b, a is c             # True, False — 'is' asks: same object?</code></pre>
+<p>This was harmless with ints (immutable — "changing" one makes a new object). Lists mutate in place, so every alias sees the change. Function calls alias too: <code>def f(xs): xs.append(0)</code> mutates the <em>caller's</em> list — parameters are tags on the same objects. Decide per function: mutate (document it!) or copy (<code>xs = list(xs)</code> first).</p>
+
+<h3>Tuples: immutable sequences, perfect returns</h3>
+<pre><code>shape = (1080, 1920, 3)               # fixed forever — safe to share, hash, alias
+H, W, C = shape                        # unpacking — three names, one line
+blocks, idle = launch_shape(10**6)     # 2.3's paired return, now official syntax
+r, c = divmod(11551 // 3, 1920)        # M1 L2's inverse, unpacked: (2, 10)... see note
+single = (42,)                         # one-element tuple NEEDS the comma</code></pre>
+<p>Tuples are lists that promise not to change: use them for fixed-shape records (coordinates, shapes, RGB triples) and multi-value returns. The promise is shallow — a tuple <em>containing</em> a list doesn't freeze the list. (Note on the divmod line: 11551//3 = 3850, divmod(3850, 1920) = (2, 10) — row 2, col 10, exactly M1 L2's worked decode.)</p>
+
+<h3>Dicts: names for data, O(1)-ish lookup</h3>
+<pre><code>gpu = {"name": "H100", "tflops_fp16": 989, "gb": 80, "gbps": 3350}
+gpu["gb"]                          # 80 — KeyError if absent
+gpu.get("price", None)             # None default instead of an error
+gpu["gb"] = 94                     # update / insert
+for key, val in gpu.items():       # iterate pairs (insertion order preserved)
+    print(f"{key}: {val}")
+specs = {g["name"]: g for g in gpu_list}     # index a list by name in one line</code></pre>
+<p>A dict maps keys → values via hashing (a scrambled fingerprint of the key decides its slot — M1 L1's bits at work), so lookup cost barely grows with size: the difference between scanning a list of 10⁶ records (10⁶ steps) and asking a dict (≈1 step) is M1 L3's growth-class table in production. Keys must be immutable (strings, numbers, tuples — not lists). Namespaces themselves are dicts: 2.3's scope machinery is this structure, running your program.</p>
+
+<h3>Sets: membership and dedup, nothing else, blazingly</h3>
+<pre><code>seen = {512, 1024, 2048}
+1024 in seen                       # True — hashed, ~O(1) like dict keys
+dims = [64, 128, 64, 256, 128]
+unique = set(dims)                 # {64, 128, 256} — dedup in one call
+supported &amp; requested              # intersection; | union; - difference</code></pre>
+
+<h3>Comprehensions: build collections as expressions</h3>
+<pre><code>ms      = [t * 1000 for t in times]                  # map: transform each
+fast    = [t for t in times if t &lt; 3.0]              # filter: keep some
+table   = {n: (n + 255) // 256 for n in sizes}       # dict comprehension (ceil_div!)
+matrix  = [[0.0] * W for _ in range(H)]              # H fresh rows — see the trap below
+flops   = sum(2 * m * n * k for (m, n, k) in gemms)  # generator: Σ without a temp list</code></pre>
+<p>Comprehensions are Python's native "vectorized thinking" — say <em>what</em> each element is, not <em>how</em> to loop (the mental model NumPy will compile for real in 2.5). Keep them one level deep and readable; a comprehension you have to squint at should be a loop.</p>
+
+<div class="warnbox"><strong>The shared-row trap</strong> — the most famous data-structure bug in Python:
+<div class="diagram" data-diagram="m2l4-sharedrow" data-caption="[[0]*3]*2 makes TWO tags on ONE row. The comprehension makes fresh rows."></div>
+<code>[[0]*W]*H</code> replicates the <em>tag</em>, not the row: write to any cell and every "row" shows it, because there is only one row. The inner <code>[0]*W</code> is safe (ints are immutable — copying tags to ints is fine); the outer <code>*H</code> is the crime. Fix: <code>[[0.0]*W for _ in range(H)]</code>. Same disease as 2.3's mutable default argument — one object where you believed there were many.</div>
+
+<h2>Worked example</h2>
+<div class="card">
+<p><strong>Task:</strong> Implement matrix multiply on lists of lists — the triple loop from M1 L6 — and verify it against the values you computed by hand there. This function is your correctness oracle for the entire rest of the course.</p>
+<pre><code>def matmul(A, B):
+    """C = A·B for lists of lists. (M, K) × (K, N) → (M, N)."""
+    M, K = len(A), len(A[0])
+    K2, N = len(B), len(B[0])
+    if K != K2:
+        raise ValueError(f"inner dims differ: {K} vs {K2}")   # M1 L6 shape rule
+    C = [[0.0] * N for _ in range(M)]          # fresh rows — NOT [[0.0]*N]*M !
+    for i in range(M):
+        for j in range(N):
+            s = 0.0
+            for k in range(K):                 # one dot product (M1 L5)
+                s += A[i][k] * B[k][j]
+            C[i][j] = s
+    return C
+
+A = [[1, 2, 3], [4, 5, 6]]
+B = [[7, 4], [8, 5], [9, 6]]
+assert matmul(A, B) == [[50, 32], [122, 77]]   # M1 L6's diagram, machine-checked ✓
+print("matches the hand computation from Module 1")</code></pre>
+<p><strong>What just happened:</strong> the values you multiplied by hand in M1 L6 — 50, 32, 122, 77 — came out of a machine you built. Every optimized matmul you write from here (NumPy's <code>@</code> in 2.5, C in 3.9, five CUDA versions in 5.11) gets tested against this honest, slow function. <strong>Decisions made:</strong> shape validation up front with a message that names both numbers (2.3's boundary rule); the comprehension for fresh rows (trap dodged, commented so reviewers know it was deliberate); the k-loop innermost so the accumulator stays in one cell — and a cost note in passing: this is 2·M·N·K FLOPs of pure interpreted Python, ~1 second per 128³ (M1 L3 estimation). Slow is fine. Oracles are allowed to be slow; they're not allowed to be wrong.</p>
+</div>
+
+<h2>Key points</h2>
+<ul class="keypoints">
+<li>Lists: 0-based, negative-from-end, half-open slices that copy; mutators (sort/append) return None, expression-makers (sorted/+) return new objects.</li>
+<li><code>b = a</code> never copies — mutation through any alias is visible through all; functions receive aliases too. <code>list(a)</code>/<code>a.copy()</code> for shallow copies, <code>copy.deepcopy</code> when nesting demands it.</li>
+<li>Tuples are immutable sequences: fixed-shape records and multi-value returns, unpacked as <code>a, b = f()</code>; one element needs <code>(x,)</code>.</li>
+<li>Dicts hash keys → ~O(1) lookup (M1 L3's growth table applied); keys must be immutable; insertion order is preserved.</li>
+<li>Sets = dict keys without values: membership tests and dedup at hash speed; list <code>in</code> is a linear scan.</li>
+<li><code>[[0]*W]*H</code> shares ONE row H times; <code>[[0]*W for _ in range(H)]</code> makes H rows — the comprehension re-runs its expression each iteration.</li>
+</ul>
+
+<h2>Quiz</h2>
+<div class="quiz">
+  <div class="q">1. <code>runs = [3, 1, 2]</code>; <code>result = runs.sort()</code>; <code>print(result, runs)</code> outputs?</div>
+  <button class="opt">[1, 2, 3] [1, 2, 3] — sort returns the sorted list</button>
+  <button class="opt" data-c="1">None [1, 2, 3] — sort mutates in place and returns None</button>
+  <button class="opt">[3, 1, 2] [1, 2, 3] — result keeps the original</button>
+  <button class="opt">[1, 2, 3] [3, 1, 2] — sorted copy, original intact</button>
+  <div class="expl">In-place mutators return None by convention — Python's way of saying "the effect WAS the result." Want an expression? sorted(runs). The assign-the-None bug then propagates: result[0] crashes with 'NoneType is not subscriptable' — now you know what that message means before you've ever seen it.</div>
+</div>
+<div class="quiz">
+  <div class="q">2. You need "does this dtype string belong to the supported set" checked a million times against 5 supported dtypes. Which is right, and why does it barely matter HERE but matter enormously at 10⁶ supported items?</div>
+  <button class="opt">List + in — simplest wins at every scale</button>
+  <button class="opt" data-c="1">Set + in — hashed O(1)-ish vs linear scan; at 5 items both are instant, at 10⁶ the list scan is ~10⁶× more work per query</button>
+  <button class="opt">Dict with True values — sets are just legacy</button>
+  <button class="opt">Sorted list + manual binary search — always fastest</button>
+  <div class="expl">Membership: set hashes to the answer; list scans element by element. Five items: nanoseconds either way (constants dominate — M1 L3 §3 honesty). A million items × a million queries: 10¹² comparisons vs 10⁶ hashes — the growth-class table decides. Binary search (log n) is a fine middle path but you'd be hand-building what set already is. Default: set for membership, and know WHY.</div>
+</div>
+
+<h2>Exercises</h2>
+<details><summary>Exercise 1 — Implement <code>stats(times)</code> from 2.3's design: return (median, iqr, outliers) for a list of timings using sorting and slicing — no imports. Verify on [2.1, 2.0, 9.7, 2.2, 2.05] against hand computation (M1 L7 discipline).</summary><div class="body">
+<pre><code>def stats(times):
+    """(median, iqr, count of runs &gt; 3× median). Pure — does not touch its input."""
+    ts = sorted(times)                      # sorted() copies: caller's list untouched
+    n = len(ts)
+    median = ts[n // 2] if n % 2 else 0.5 * (ts[n//2 - 1] + ts[n//2])
+    iqr = ts[3*n//4] - ts[n//4]             # simple quartile take — fine for benches
+    outliers = len([t for t in ts if t > 3 * median])
+    return median, iqr, outliers
+
+m, i, o = stats([2.1, 2.0, 9.7, 2.2, 2.05])
+assert m == 2.1 and o == 1                  # sorted: [2.0,2.05,2.1,2.2,9.7] → median 2.1 ✓
+print(m, i, o)                              # 2.1  0.15  1  (iqr = ts[3]-ts[1] = 2.2-2.05)</code></pre>
+<p>Design notes: <code>sorted()</code> not <code>.sort()</code> keeps the function pure (the caller's timing log survives); the even/odd median branch is the classic off-by-one habitat — hand-check n=4 and n=5 (2.2's edge discipline); returning a tuple lets callers unpack. The outlier is COUNTED, not deleted — M1 L7's ethics, hard-coded.</p>
+</div></details>
+<details><summary>Exercise 2 — Alias forensics: predict the final state of all names. <code>base = [[1, 2], [3, 4]]</code>; <code>same = base</code>; <code>shallow = list(base)</code>; then <code>same.append([5, 6])</code>; <code>shallow[0][0] = 99</code>; <code>shallow.append([7, 8])</code>. Draw the tags (or reason carefully), then explain which copy would have prevented the 99 leak.</summary><div class="body">
+<p><code>base</code> and <code>same</code>: one outer list — the append([5,6]) shows in both → <code>[[99,2],[3,4],[5,6]]</code>. Wait — why 99? Because <code>shallow = list(base)</code> copied the OUTER list only; its slots still tag the SAME inner rows. So <code>shallow[0][0] = 99</code> wrote through the shared row [1,2] → visible in base/same too. <code>shallow.append([7,8])</code> touched only shallow's own outer list. Final: <code>base is same → [[99,2],[3,4],[5,6]]</code>; <code>shallow → [[99,2],[3,4],[7,8]]</code>.</p>
+<p>Prevention: <code>import copy; deep = copy.deepcopy(base)</code> — copies the whole nesting. Rule of thumb: shallow copy protects the CONTAINER's shape, deepcopy protects the CONTENTS. This exact question, with these exact three names, is a genuinely common interview screen — because production data pipelines die of it.</p>
+</div></details>
+
+<hr>
+<h1>Go deeper — the complete guide</h1>
+<p>Slice mechanics in full, how dicts actually hash, choosing containers like an engineer, list performance internals, nested-structure patterns, and the equality-vs-identity dossier.</p>
+
+<h2>1. Slices, completely</h2>
+<pre><code>xs = list(range(10))        # [0..9]
+xs[2:8:2]                   # [2, 4, 6]      — start:stop:step, all half-open
+xs[::-1]                    # reversed COPY (the original is untouched)
+xs[-3:]                     # last three     xs[:-3] — all but last three
+xs[3:100]                   # [3..9] — slices CLAMP; indexing xs[100] raises. Know the asymmetry!
+xs[2:5] = [99]              # slice ASSIGNMENT: splice — xs shrinks; lists can resize mid-life</code></pre>
+<p>Python list slices <strong>copy</strong> (unlike NumPy's views, next lesson — a deliberate contrast to plant now: same syntax, opposite memory behavior, and 2.5 will make you state which one you're getting before you run any cell). The clamp-vs-raise asymmetry is a real bug habitat: a slice quietly returns fewer elements than you assumed while an index would have screamed.</p>
+
+<h2>2. How dicts really work (interview-grade version)</h2>
+<p>A dict is an array of slots. <code>hash(key)</code> — a deterministic integer fingerprint — is masked down to a slot index (literally <code>hash &amp; (size−1)</code>, M1 L1's power-of-two mask). Collisions probe to another slot; when ~2/3 full, the table doubles and everything rehashes (which is why inserts are "amortized" O(1) — occasional O(n) spikes paid off across many cheap ones, M1 L2's geometric-series amortization). Three consequences you can now derive rather than memorize: <strong>keys must be immutable</strong> (a mutated key changes its hash → parked in the wrong slot → unfindable forever; that's why lists can't be keys but tuples can); <strong>equal objects must hash equal</strong> (1 == 1.0, and indeed <code>{1: "a"}[1.0]</code> works); and <strong>float keys inherit float equality problems</strong> (M1 L8: <code>d[0.1+0.2]</code> misses <code>d[0.3]</code>) — key on ints, strings, or rounded tuples instead.</p>
+
+<h2>3. Choosing a container: the decision table</h2>
+<table>
+<tr><th>Need</th><th>Use</th><th>Because</th></tr>
+<tr><td>Ordered values, will grow/change</td><td><code>list</code></td><td>the default sequence</td></tr>
+<tr><td>Fixed-shape record, multi-return, dict key</td><td><code>tuple</code></td><td>immutability = safety + hashability</td></tr>
+<tr><td>Lookup by name/id</td><td><code>dict</code></td><td>hashed access, self-documenting keys</td></tr>
+<tr><td>Membership / dedup / overlap math</td><td><code>set</code></td><td>hashed, expresses intent</td></tr>
+<tr><td>Bulk numbers, any math on them</td><td><em>NumPy array (2.5)</em></td><td>lists of Python floats are ~8× the memory and 100× the compute cost</td></tr>
+<tr><td>FIFO queue (pop from the front)</td><td><code>collections.deque</code></td><td>list.pop(0) shifts every element — O(n) per pop</td></tr>
+</table>
+<p>That last row generalizes: <code>list.insert(0, x)</code>, <code>pop(0)</code>, and <code>x in list</code> inside a loop are the three list operations that turn linear algorithms quadratic. M1 L3's table says you'll feel it precisely when the demo becomes production.</p>
+
+<h2>4. What a list is underneath (and why append is cheap)</h2>
+<p>A Python list is a contiguous array <em>of pointers</em> (tags! — M1 L1's addresses) to objects scattered around memory. Append is amortized O(1) because the array over-allocates (~1.125× growth) — occasional recopy, mostly free (geometric series again). But note what this means for numbers: a "list of floats" is pointers → boxed float objects, each ~24 bytes plus indirection. One million floats: ~32 MB scattered, versus NumPy's 8 MB contiguous (or 4 in fp32). The scatter is the deeper crime: M1 L3's ladder said memory trips dominate — pointer-chasing is ALL memory trips, and it's why the same arithmetic runs 100× faster the moment 2.5 packs it contiguously. You now know, one lesson early, exactly why NumPy wins: not magic — layout.</p>
+
+<h2>5. Nested structures: the shapes of real data</h2>
+<pre><code>kernels = [                                   # list of dicts — the universal log format
+    {"name": "naive", "ms": 300.0, "block": 256},
+    {"name": "tiled", "ms": 12.5,  "block": 128},
+]
+fastest = min(kernels, key=lambda k: k["ms"])          # 2.3's key= at work
+by_name = {k["name"]: k for k in kernels}              # index it once, look up forever
+grid    = {(r, c): val for ...}                        # tuple KEYS: sparse matrices live here</code></pre>
+<p>Patterns to recognize: list-of-dicts = table with named columns (JSON's native shape — 2.7 reads/writes exactly this); dict-of-lists = columns (NumPy/pandas orientation, and the AoS→SoA choice from M1 L5 §4 in Python clothing); dict-with-tuple-keys = sparse grid (Track B3's sparse matrices, first draft). Choosing between the first two IS the layout decision that becomes coalescing in Module 5 — you're already making it.</p>
+
+<h2>6. == vs is, hashing, and the equality dossier</h2>
+<pre><code>[1, 2] == [1, 2]        # True  — same VALUE (element-wise)
+[1, 2] is [1, 2]        # False — different objects
+x = None; x is None      # the ONE approved use of is
+(1, 2) == (1.0, 2.0)     # True — numeric equality crosses types (and hashes agree)
+{[1]: "no"}              # TypeError: unhashable — mutable keys forbidden (see §2)</code></pre>
+<p>Container equality is deep and element-wise; identity (<code>is</code>) is M1 L1's "same address." Corollary for tests (2.6): assert on ==, never is — CPython's small-int caching makes <code>is</code> "work" in demos and betray you in production (2.1 deep-dive's 256/257 cliff).</p>
+
+<h2>7. Gotchas</h2>
+<div class="gotcha"><strong><code>xs = xs.sort()</code></strong> — None assigned; the list sorted but the name lost. Mutators return None; expression-makers return objects. Symptom: 'NoneType' has no attribute/subscript, one line later.</div>
+<div class="gotcha"><strong>Mutating while iterating.</strong> <code>for t in times: if t > 3: times.remove(t)</code> skips elements (the iterator's index marches over a shifting list). Fix: build the survivor list with a comprehension, or iterate a copy.</div>
+<div class="gotcha"><strong>Shallow when you needed deep.</strong> <code>list(grid)</code> copies the outer list; rows remain shared (Exercise 2's 99). Nesting + mutation ⇒ deepcopy or restructure.</div>
+<div class="gotcha"><strong><code>(x)</code> is not a tuple.</strong> <code>(42)</code> is just 42 — the COMMA makes tuples: <code>(42,)</code>. Bites hardest in function calls: <code>f(("a"))</code> passes a string.</div>
+<div class="gotcha"><strong>dict[key] on a maybe-missing key.</strong> KeyError in production logs at 3am. Reads with a sane default: <code>.get(k, default)</code>; reads that MUST exist: <code>d[k]</code> and let it raise loudly (2.6's philosophy: choose your failure mode on purpose).</div>
+<div class="gotcha"><strong>Keying on floats.</strong> <code>cache[0.3]</code> vs <code>cache[0.1+0.2]</code> — different keys (M1 L8). Key on ints (indices, scaled integers) or strings; if you must key on computed reals, round to a declared precision first.</div>
+
+<h2>Scenario — the corrupted occupancy table</h2>
+<p>A study-group friend builds a CUDA occupancy explorer: a 2D table, <code>table[regs][block]</code>, filled by loops — and every column shows identical values, which is obviously wrong (more registers should mean fewer resident blocks — 2.3's Practice 3). You're called in. The construction line reads <code>table = [[0] * len(blocks)] * len(reg_options)</code> — the shared-row trap, verbatim: every "row" is one object, so the last row computed overwrote them all, everywhere. The fix is the comprehension (<code>for _ in range(...)</code>), and the table instantly disagrees with itself the way physics demands. But the debrief is the valuable part: you show <code>id(table[0]) == id(table[1])</code> → True before the fix, False after — proof, not vibes (2.2's make-it-visible). Then you refactor the whole thing one step further: the 2D list indexed by <em>positions</em> becomes a dict keyed by <em>meanings</em> — <code>occ[(regs, block)] = blocks_resident</code> — killing the row-sharing class of bug outright (tuple keys can't alias rows that don't exist) and making queries read like the question: <code>occ[(64, 256)]</code>. Two container decisions — fresh rows, then honest keys — and a haunted table becomes a tool the group still uses in Module 5. Bugs of this family cost real teams days; you now diagnose them from the symptom alone.</p>
+
+<h2>Practice</h2>
+<details><summary>1. Predict: <code>xs = [1,2,3,4,5]</code> → <code>xs[1:-1]</code>, <code>xs[::2]</code>, <code>xs[::-1][0]</code>, <code>xs[3:1]</code>, <code>xs[10:]</code>.</summary><div class="body"><code>[2,3,4]</code>, <code>[1,3,5]</code>, <code>5</code>, <code>[]</code> (backwards range without negative step = empty, silently!), <code>[]</code> (clamped, silently). The two silent empties are the trap: slices never raise for bad ranges — add asserts when emptiness would be a bug.</div></details>
+<details><summary>2. One comprehension each: (a) the squares of odd numbers below 20; (b) a dict mapping n → n's bit length for n in [1, 255, 256, 4096] (hint: <code>n.bit_length()</code>, which is M1 L1's ⌈log₂⌉ for the bits-needed question); (c) the set of dtypes under 4 bytes from <code>{"fp32": 4, "fp16": 2, "bf16": 2, "fp8": 1}</code>.</summary><div class="body">(a) <code>[n*n for n in range(1, 20, 2)]</code>. (b) <code>{n: n.bit_length() for n in [1, 255, 256, 4096]}</code> → {1:1, 255:8, 256:9, 4096:13} — note 256 needs 9 bits, the fencepost M1 L1 warned about. (c) <code>{d for d, b in table.items() if b &lt; 4}</code> → {'fp16','bf16','fp8'}.</div></details>
+<details><summary>3. Why does <code>def bench(fn, results=[]): results.append(fn()); return results</code> report kernel A's timings in kernel B's report? Connect it to the shared-row diagram and give the idiom.</summary><div class="body">The default list is created ONCE at def time — one object, every default-using call appends to it (identical mechanism to [[0]*3]*2: many believers, one object). A's and B's timings interleave in the same list. Idiom: <code>results=None</code> → <code>if results is None: results = []</code> (fresh per call), or better here: always return a NEW list and let callers aggregate. This is 2.3's gotcha, now explainable from first principles.</div></details>
+<details><summary>4. Build (paper is fine) the dict-of-lists "SoA" version of the kernels list-of-dicts from §5, and state one operation each layout wins. Which M1/M5 concept is this?</summary><div class="body"><code>{"name": ["naive","tiled"], "ms": [300.0, 12.5], "block": [256, 128]}</code>. AoS (list of dicts) wins record-at-a-time work: append one run, pass one kernel around. SoA (dict of lists) wins column math: <code>min(data["ms"])</code>, plotting all ms, vectorizing (2.5 turns these columns into arrays directly). This is M1 L5 §4's AoS-vs-SoA, and in Module 5 the same choice becomes memory coalescing — one decision, three costumes.</div></details>
+<details><summary>5. <code>cfg = ("H100", 80)</code> vs <code>cfg = ["H100", 80]</code>: give one concrete thing the tuple version can do that the list can't, and one bug it prevents, with the §2 mechanism.</summary><div class="body">Can do: serve as a dict/set key — <code>results[cfg] = 2.75</code> — because it hashes (immutable ⇒ stable hash ⇒ findable slot; a list's hash would rot on mutation, so Python refuses). Prevents: any function you pass it to mutating your config behind your back (the aliasing-into-functions surprise) — the tuple is a promise enforced by TypeError. Records that shouldn't change should be MADE unable to change.</div></details>
+<details><summary>6. The matmul oracle at work: using this lesson's matmul, compute C = A·B for A = [[0,1],[1,0]] (the swap matrix, M1 L6 practice) and B = [[1,2],[3,4]], predict the answer from the "columns view" BEFORE running, then state the oracle's job in 2.5/3.9/5.11.</summary><div class="body">Swap-rows matrix on the left permutes ROWS: predict [[3,4],[1,2]] — run: matmul gives exactly that ✓ (M1 L6 practice 1, mechanized). Oracle's job downstream: every fast implementation (NumPy @, C, five CUDA kernels) must match it within a float tolerance (allclose, NOT == — M1 L8) on random inputs. Slow + obviously-correct beats fast + hopeful, and you keep BOTH: that pairing is the professional testing pattern for numerical code.</div></details>
+<details><summary>7. Design: a "kernel registry" for the course — you'll register implementations (name → function, 2.3's functions-as-values) as you write them, list them, fetch one by name with a helpful error naming near-misses, and forbid duplicate registration. Choose containers, sketch the four operations, and justify each choice from this lesson.</summary><div class="body"><code>REGISTRY: dict[str, callable] = {}</code> — lookup by name is the primary operation (dict, §3 table). register(name, fn): <code>if name in REGISTRY: raise ValueError(f"duplicate {name!r}")</code> — duplicates are bugs, fail loudly (dict would silently overwrite; the check is the design). get(name): try REGISTRY[name]; on KeyError raise with suggestions: <code>close = [k for k in REGISTRY if name in k or k in name]</code> — a comprehension-powered error message that names candidates (the 3am-log kindness). list_all(): <code>sorted(REGISTRY)</code> — deterministic output for humans and tests. Names are strings (immutable keys §2); functions are first-class values (2.3); and this exact structure — a decorated registry of kernels — is how Triton/PyTorch custom-op tables actually work in Track A. You'll build the real one in 2.7 as a module.</div></details>
+
+<div class="pager">
+  <a href="lesson-03.html">← Functions & scope</a>
+  <a href="lesson-05.html">Next: NumPy & vectorized thinking →</a>
+</div>
+<div class="footer">GPU Mastery · Module 2 · Lesson 4 — works offline · progress saved in your browser</div>
+</div>
+<script src="../assets/diagrams2.js"></script>
+<script src="../assets/app.js"></script>
+</body>
+</html>

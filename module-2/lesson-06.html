@@ -1,0 +1,300 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>2.6 Errors, Debugging & Testing — GPU Mastery</title>
+<link rel="stylesheet" href="../assets/style.css">
+</head>
+<body data-lesson="m2l6">
+<nav><div class="inner">
+  <a class="logo" href="../index.html">GPU<span>Mastery</span></a>
+  <a class="item" href="../index.html">Home</a>
+  <a class="item on" href="../curriculum.html">Curriculum</a>
+  <a class="item" href="../labs.html">Labs</a>
+  <a class="item" href="../setup.html">Lab setup</a>
+  <a class="item" href="../prompt.html">Generator prompt</a>
+</div></nav>
+<div class="wrap">
+
+<div class="lesson-top">
+  <div><span class="badge">Module 2 · Lesson 6</span><span class="badge dim">≈ 3 h</span></div>
+  <button id="donebtn" class="donebtn">Mark lesson complete</button>
+</div>
+<h1>Errors, Debugging & Testing — engineering trust</h1>
+<p class="lead">Code that runs is a rumor; code that's tested is a claim. This lesson makes you fluent in Python's error machinery, systematic (not superstitious) at debugging, and armed with pytest — including the float-tolerance discipline that separates numerical engineers from numerical gamblers.</p>
+
+<h2>Concept</h2>
+
+<h3>Tracebacks: read the autopsy bottom-up</h3>
+<div class="diagram" data-diagram="m2l6-traceback" data-caption="Bottom line = what and where. Frames above = the route (2.3's call stack, printed)."></div>
+<p>A traceback is the call stack (2.3) at the moment of death, oldest frame first. Professional reading order: ① bottom line — exception type + message; ② the deepest frame <em>in your code</em> — the prime suspect; ③ the chain above — how execution got there. The error type narrows the search instantly:</p>
+<table>
+<tr><th>Exception</th><th>Almost always means</th></tr>
+<tr><td><code>NameError</code> / <code>AttributeError</code></td><td>typo, or the object isn't what you think (None from 2.4's <code>.sort()</code>!)</td></tr>
+<tr><td><code>TypeError</code></td><td>wrong kind of thing: called an int, added str+int, passed f() not f (2.3)</td></tr>
+<tr><td><code>ValueError</code></td><td>right type, bad value: <code>int("40k")</code>, shape mismatch in your own checks</td></tr>
+<tr><td><code>IndexError</code> / <code>KeyError</code></td><td>bounds/membership: the fencepost (2.2) or the missing key (2.4)</td></tr>
+<tr><td><code>ZeroDivisionError</code></td><td>an empty input or degenerate case reached arithmetic (M1 L5's normalize(0))</td></tr>
+</table>
+
+<h3>Raising and handling: exceptions are control flow for failure</h3>
+<div class="diagram" data-diagram="m2l6-except" data-caption="One matched handler runs; finally always runs; unmatched exceptions climb the stack."></div>
+<pre><code>def load_config(path):
+    try:
+        text = open(path, encoding="utf-8").read()
+    except FileNotFoundError:
+        raise ValueError(f"config missing: {path!r} — copy config.example first") from None
+    ...
+
+# the caller decides what failure MEANS; the callee just refuses garbage loudly:
+if b &lt;= 0:
+    raise ValueError(f"block size must be positive, got {b}")     # 2.3's boundary rule</code></pre>
+<p>Rules that keep this clean: catch the <strong>narrowest type</strong> you can handle (never bare <code>except:</code>); catch <strong>only where you can do something about it</strong> (top of the script, retry loops, resource cleanup) — everywhere else, let it climb; <code>raise ... from None</code>/<code>from e</code> controls the "during handling of..." chain; and <code>finally</code> (or better, <code>with</code> — 2.7) guarantees cleanup. Exceptions beat error-code returns because they <em>cannot be silently ignored</em> — the failure travels until someone deals with it.</p>
+
+<h3>Debugging: the scientific method, not the shotgun</h3>
+<pre><code>1. REPRODUCE   — smallest input that fails, deterministically (seed it! M1 L7)
+2. HYPOTHESIZE — one specific claim: "rows is empty by line 40"
+3. INSTRUMENT  — print(f"{len(rows)=}"), or breakpoint()
+4. TEST        — run; hypothesis dies or survives
+5. FIX + LOCK  — repair, then add the test that would have caught it</code></pre>
+<pre><code>breakpoint()          # drop into pdb right here
+# (pdb) p len(rows)   → inspect     n → next line     s → step into
+# (pdb) c             → continue    q → quit          up/down → walk frames</code></pre>
+<p>Print debugging is legitimate (every professional does it) — <em>targeted</em> prints with <code>f"{name=}"</code>, removed after. The shotgun version (random prints, random edits, "maybe this fixes it") is how afternoons die. Step 5 is the professional tell: every bug becomes a test, so the bug can never return unannounced.</p>
+
+<h3>Assertions: executable assumptions</h3>
+<pre><code>def zscore(X):
+    assert X.ndim == 2, f"expected (samples, features), got shape {X.shape}"
+    mu = X.mean(axis=0, keepdims=True)
+    sd = X.std(axis=0, keepdims=True)
+    assert not np.isnan(sd).any(), "NaN in std — upstream data corrupt?"
+    return (X - mu) / sd</code></pre>
+<p><code>assert cond, msg</code> crashes early and honestly where the assumption broke — converting 2.5's silent shape accidents into loud, located failures. Contract: asserts guard <em>internal invariants</em> ("this cannot happen if my logic is right"); <code>raise ValueError</code> guards <em>user-facing inputs</em> ("callers might legitimately get this wrong"). Never put side effects in asserts — <code>python -O</code> deletes them.</p>
+
+<h3>pytest: tests as tiny facts</h3>
+<pre><code># test_gpu_math.py — pytest auto-discovers test_*.py files and test_* functions
+from gpu_math import ceil_div, clamp, is_pow2
+import pytest
+
+def test_ceil_div_ragged():   assert ceil_div(10, 4) == 3
+def test_ceil_div_exact():    assert ceil_div(8, 4) == 2       # the edge M1 L2 warned about
+def test_ceil_div_rejects():
+    with pytest.raises(ValueError):
+        ceil_div(10, 0)                                         # failures are part of the contract
+
+@pytest.mark.parametrize("n,expect", [(1, True), (1024, True), (1000, False), (0, False)])
+def test_is_pow2(n, expect):  assert is_pow2(n) is expect</code></pre>
+<pre><code>$ pytest -q
+.....                                                    [100%]
+5 passed in 0.03s</code></pre>
+<p>Run <code>pytest -q</code> in the folder; it finds everything. <code>parametrize</code> turns a table of cases into separate tests (edges get names, not comments). In Colab: <code>%%writefile test_x.py</code> then <code>!pytest -q</code>.</p>
+
+<h3>Testing floats: tolerances are engineering, not settings</h3>
+<div class="diagram" data-diagram="m2l6-tolerance" data-caption="atol floors near zero; rtol scales with magnitude — M1 L8 §6, enforced by CI."></div>
+<pre><code>assert fast_result == oracle_result                    # WRONG for floats, forever (M1 L8)
+assert np.allclose(fast, oracle, rtol=1e-5, atol=1e-8) # right shape; budget the numbers
+assert result == pytest.approx(2.75, rel=1e-6)         # scalar version</code></pre>
+<p>Budget, then set (M1 L8 §6): estimate error ≈ ops-on-critical-path × ulp × magnitude, add ~10× headroom. An fp32 dot over 4096 terms with pairwise summation: ~log₂(4096)·ε ≈ 12·1.2e-7 ≈ 1.4e-6 relative → rtol=1e-5 is principled. Copy-pasting fp64 defaults into an fp16 test (ε≈1e-3!) manufactures flakes; loosening until green manufactures lies.</p>
+
+<h2>Worked example</h2>
+<div class="card">
+<p><strong>Task:</strong> Tests-first development of <code>normalize(v)</code> (M1 L5's operation): write the contract as tests, watch them fail, implement, watch them pass.</p>
+<pre><code># test_vec.py — written BEFORE vec.py
+import numpy as np, pytest
+from vec import normalize
+
+def test_length_one():
+    v = np.array([3.0, 4.0], dtype=np.float32)
+    u = normalize(v)
+    assert np.isclose(np.linalg.norm(u), 1.0, rtol=1e-6)        # the defining property
+
+def test_direction_preserved():
+    v = np.array([3.0, 4.0], dtype=np.float32)
+    assert np.allclose(normalize(v), [0.6, 0.8], rtol=1e-6)     # M1 L5's exact numbers
+
+def test_input_untouched():                                      # 2.5 Practice 5's scar
+    v = np.array([3.0, 4.0], dtype=np.float32); before = v.copy()
+    normalize(v)
+    assert np.array_equal(v, before)
+
+def test_zero_vector_refused():                                  # M1 L5's NaN factory
+    with pytest.raises(ValueError, match="zero"):
+        normalize(np.zeros(3, dtype=np.float32))
+
+def test_dtype_preserved():
+    u = normalize(np.array([1.0, 0.0], dtype=np.float32))
+    assert u.dtype == np.float32                                 # no fp64 creep (2.5 gotcha)</code></pre>
+<pre><code># vec.py — now write the code the tests demand
+import numpy as np
+
+def normalize(v):
+    """Unit vector in v's direction. Raises ValueError on the zero vector."""
+    n = np.linalg.norm(v.astype(np.float32))
+    if n == 0.0:                       # == against literal 0 is legitimate here:
+        raise ValueError("cannot normalize the zero vector")     # exact underflow-or-zero check
+    return (v / n).astype(v.dtype)</code></pre>
+<p><strong>What the order bought:</strong> the tests are the <em>contract</em> — length 1, direction kept, input untouched, zero refused, dtype stable — and each encodes a scar this course already showed you (aliasing 2.5, NaN M1 L5/L8, fp64 creep 2.5). Run <code>pytest -q</code>: 5 passed. Now every future "optimization" of normalize — NumPy tricks, a C version in M3, a CUDA kernel in M5 — inherits this exact suite as its acceptance gate. <strong>Decision made:</strong> tests-first isn't ceremony; it forced the zero-vector decision (raise, not NaN) and the mutation policy (pure) <em>before</em> code existed to be defended.</p>
+</div>
+
+<h2>Key points</h2>
+<ul class="keypoints">
+<li>Read tracebacks bottom-up: type + message, then your deepest frame; the exception type alone narrows the bug class (traceback = 2.3's stack, printed).</li>
+<li>Catch narrow, catch late, raise loudly at boundaries with messages that name the bad value; bare <code>except:</code> converts bugs into mysteries.</li>
+<li>Debug scientifically: reproduce (seeded, minimal) → hypothesize → instrument (<code>f"{x=}"</code>, breakpoint()) → test → fix AND add the regression test.</li>
+<li>assert = internal invariant (deletable by -O, side-effect-free); raise ValueError = input validation; the two are different contracts.</li>
+<li>pytest: test_*.py + plain asserts + parametrize for edge tables + <code>pytest.raises</code> for contracted failures — expected failures are part of the API.</li>
+<li>Float tests use allclose/approx with BUDGETED tolerances (ops × ulp × 10 headroom, per dtype); loosen-until-green is fraud with extra steps.</li>
+</ul>
+
+<h2>Quiz</h2>
+<div class="quiz">
+  <div class="q">1. A 40-line script wraps everything in <code>try: main() except Exception: print("error, retrying")</code> and loops. Production reports it "hangs at 100% CPU, no logs." What happened?</div>
+  <button class="opt">Exceptions are slow; the retry loop is fine</button>
+  <button class="opt" data-c="1">A real bug (say, KeyError) is caught, its traceback destroyed, and the doomed call retried forever — the handler turned a crash into an infinite silent loop</button>
+  <button class="opt">print buffers; adding flush=True fixes the design</button>
+  <button class="opt">Exception doesn't catch KeyError; something else is wrong</button>
+  <div class="expl">Catch-all + retry is the classic bug laundering machine: deterministic bugs retry identically forever, and the evidence (traceback) is discarded each time. Fixes: catch only the retryable types (network timeouts), log the FULL traceback (logging.exception), cap retries with backoff, and let everything else crash loudly. "Catch late, catch narrow" is this quiz in four words.</div>
+</div>
+<div class="quiz">
+  <div class="q">2. Your fp32 kernel test <code>assert np.allclose(fast, oracle, rtol=1e-7)</code> passes on 100-element inputs but fails on 1M-element inputs. The most likely verdict?</div>
+  <button class="opt">The kernel has a bug that only manifests at scale</button>
+  <button class="opt" data-c="1">The tolerance is wrong: accumulated rounding grows with n (order differs between implementations), and 1e-7 is below fp32's error floor for million-term sums — budget it, don't loosen blindly</button>
+  <button class="opt">allclose is broken above 65536 elements</button>
+  <button class="opt">The oracle is wrong at scale</button>
+  <div class="expl">rtol=1e-7 is BELOW fp32's single-op ε (1.19e-7) — no two differently-ordered million-term fp32 reductions can meet it (M1 L8: non-associativity, error ~ log n · ε at best). The fix is a computed budget (e.g., rtol=1e-5 for pairwise sums), documented in the test. A scale-dependent bug IS possible — which is why you budget first, then investigate residuals above budget. The test was wrong before the kernel was.</div>
+</div>
+
+<h2>Exercises</h2>
+<details><summary>Exercise 1 — Write the test file for 2.3/2.4's <code>stats(times)</code> (median, iqr, outliers): normal case, even-length median, the all-equal edge (iqr 0, outliers 0), the single-element edge, input-untouched, and the empty-list contract (you decide: raise or return None — defend the choice in a comment).</summary><div class="body">
+<pre><code># test_stats.py
+import pytest
+from bench import stats
+
+def test_normal_case():
+    m, i, o = stats([2.1, 2.0, 9.7, 2.2, 2.05])
+    assert m == 2.1 and o == 1
+
+def test_even_length_median():
+    m, _, _ = stats([1.0, 2.0, 3.0, 4.0])
+    assert m == pytest.approx(2.5)          # the n%2==0 branch — 2.4's off-by-one habitat
+
+def test_all_equal():
+    assert stats([5.0]*8) == (5.0, 0.0, 0)  # degenerate spread must not divide-by-zero anywhere
+
+def test_single_element():
+    assert stats([3.0]) == (3.0, 0.0, 0)    # n=1: quartile indices all collapse to 0
+
+def test_input_untouched():
+    xs = [3.0, 1.0, 2.0]; stats(xs)
+    assert xs == [3.0, 1.0, 2.0]            # sorted() not .sort() — the purity test
+
+def test_empty_refused():
+    # DECISION: empty timing lists are a caller bug, not a value — raise, loudly.
+    # (Returning None would let a broken benchmark print "None ms" into a report.)
+    with pytest.raises(ValueError):
+        stats([])</code></pre>
+<p>Note what the suite is: every 2.2–2.5 scar (edges n=0/1/2, purity, degenerate spread) written down as executable memory. If stats currently crashes on [] with an IndexError instead of your chosen ValueError — congratulations, the test found its first bug: add the guard.</p>
+</div></details>
+<details><summary>Exercise 2 — Debug from evidence alone: a teammate's report says "the benchmark harness crashes randomly." The traceback bottom reads <code>IndexError: list index out of range</code> at <code>med = ts[len(ts)//2]</code> in <code>bench()</code>, and above it, their timing loop contains <code>if t &lt; 0.001: continue</code>. Reconstruct the bug mechanism, explain "randomly," and give the two-layer fix.</summary><div class="body">
+<p><strong>Mechanism:</strong> the <code>continue</code> skips appending timings under 1 ms ("filtering noise") — on a fast machine or a tiny input, EVERY run is under 1 ms, <code>ts</code> ends empty, and <code>ts[0//2]</code> → IndexError. "Randomly" = machine/load-dependent, the classic environment-sensitive crash (it never fails on the author's slow laptop — 2.7's "works on my machine," previewed).</p>
+<p><strong>Two-layer fix:</strong> (1) the policy bug: don't silently discard data — measurements below a threshold are a FINDING (timer resolution! use more repetitions per timing, or perf_counter_ns), never a deletion (M1 L7's ethics); (2) the robustness bug: <code>bench()</code> must assert its own invariant — <code>assert ts, "no timings collected — check filters/repeats"</code> — so the failure names itself at the source instead of crashing two lines later in index arithmetic. Then, per the method: add <code>test_bench_fast_function()</code> that benches <code>lambda: None</code> and asserts a sane result — the regression test that makes this bug unrepeatable.</p>
+</div></details>
+
+<hr>
+<h1>Go deeper — the complete guide</h1>
+<p>The exception hierarchy and custom exceptions, fixtures and test structure, property-based thinking, logging vs print, and the numerical-testing playbook this course uses from here to the CUDA capstone.</p>
+
+<h2>1. The hierarchy, and making your own</h2>
+<pre><code>BaseException
+ ├── KeyboardInterrupt / SystemExit        # NOT children of Exception — on purpose
+ └── Exception
+      ├── ArithmeticError → ZeroDivisionError, OverflowError, FloatingPointError
+      ├── LookupError     → IndexError, KeyError
+      ├── ValueError, TypeError, RuntimeError, OSError → FileNotFoundError ...
+class ShapeError(ValueError):
+    """Array shape violates a documented contract."""</code></pre>
+<p><code>except Exception</code> spares Ctrl-C and sys.exit() — that's why it, not bare <code>except:</code>, is the widest net you may ever cast (and only at top level, with logging). Custom exceptions are cheap documentation: <code>except ShapeError</code> reads as policy. Catching by parent works (<code>except LookupError</code> takes both Index and Key) — occasionally exactly right, usually too wide.</p>
+
+<h2>2. Fixtures: shared setup without shared state</h2>
+<pre><code>import pytest, numpy as np
+
+@pytest.fixture
+def rng():                       return np.random.default_rng(42)          # seeded! (M1 L7)
+@pytest.fixture
+def random_matrices(rng):        return rng.random((64, 32), np.float32), rng.random((32, 16), np.float32)
+
+def test_matmul_matches_oracle(random_matrices):
+    A, B = random_matrices
+    assert np.allclose(A @ B, matmul_lists(A.tolist(), B.tolist()), rtol=1e-5)</code></pre>
+<p>Each test receives a <em>fresh</em> fixture — no test can dirty another's data (the shared-state disease of 2.3's scenario, solved structurally). Fixtures compose (random_matrices uses rng). The seeded-rng fixture is THE pattern for numerical suites: random enough to explore, deterministic enough to reproduce a failure by rerunning.</p>
+
+<h2>3. Property-based thinking (test laws, not examples)</h2>
+<pre><code>def test_normalize_idempotent(rng):
+    v = rng.normal(size=8).astype(np.float32)
+    u = normalize(v)
+    assert np.allclose(normalize(u), u, rtol=1e-5)        # normalizing twice = once
+
+def test_matmul_associative_within_budget(rng):
+    A, B, C = (rng.random((16, 16), np.float32) for _ in range(3))
+    assert np.allclose((A @ B) @ C, A @ (B @ C), rtol=1e-4)   # exact in ℝ, budgeted in fp32 (M1 L8!)
+
+def test_ceil_div_covers():
+    for n in range(1, 300):
+        for b in (1, 2, 3, 7, 32):
+            g = ceil_div(n, b)
+            assert g*b >= n and (g-1)*b &lt; n                # the DEFINING property, exhaustively</code></pre>
+<p>Example tests pin known answers; <strong>property tests pin laws</strong> — idempotence, inverses (linearize↔divmod, M1 L2), algebraic identities with float budgets, covering properties. They catch bug classes you didn't foresee, which examples never do. (The <code>hypothesis</code> library automates input generation when you're ready; the mindset matters more than the tool.) Note the middle test doubling as an M1 L8 demonstration: associativity holds only within tolerance — your test suite now encodes floating-point theory.</p>
+
+<h2>4. logging: print that scales</h2>
+<pre><code>import logging
+log = logging.getLogger("bench")
+logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
+log.info("median %.3f ms over %d runs", med*1000, len(ts))
+log.warning("outlier: %.1f ms (3× median)", t*1000)
+try: ...
+except OSError:
+    log.exception("device query failed")      # logs the FULL traceback, then you decide</code></pre>
+<p>Print is for interactive debugging (delete after); logging is for programs that run unattended: levels you can filter (DEBUG→CRITICAL), timestamps for correlating with GPU monitor logs (Track A10), destinations beyond stdout, and — the killer — <code>log.exception</code> preserving evidence inside handlers (quiz 1's fix). Habit: any script that will ever run in a loop or on a schedule gets logging on day one.</p>
+
+<h2>5. The numerical-testing playbook (used for every kernel from here on)</h2>
+<table>
+<tr><th>Layer</th><th>What</th><th>Example from this course</th></tr>
+<tr><td>1. Oracle</td><td>slow, obviously-correct reference</td><td>2.4's list matmul; the naive loop before every vectorization</td></tr>
+<tr><td>2. Fixed fixtures</td><td>hand-computed exact cases + edges</td><td>[[50,32],[122,77]]; n=0/1; zero vector; 65504 in fp16</td></tr>
+<tr><td>3. Randomized + seeded</td><td>fresh shapes/values each run, reproducible on failure</td><td>fixture rng(42), shapes drawn from a list including ragged ones</td></tr>
+<tr><td>4. Budgeted tolerance</td><td>rtol from ops × ulp × headroom, per dtype</td><td>fp32 pairwise sum of 4096: rtol 1e-5, documented in the assert</td></tr>
+<tr><td>5. Contract tests</td><td>dtype/shape preserved, input unmutated, errors raised</td><td>the normalize suite, wholesale</td></tr>
+<tr><td>6. Regression tests</td><td>one per bug, forever</td><td>Exercise 2's empty-timings test</td></tr>
+</table>
+<p>This table is the course's testing constitution. In 3.9 the C matmul gets layers 1–4 against the Python oracle; in 5.11, five CUDA kernels each pass the identical suite before any performance claim is admitted into the report. Correctness gates performance — in that order, always.</p>
+
+<h2>6. Gotchas</h2>
+<div class="gotcha"><strong>Bare <code>except:</code> / silent <code>pass</code>.</strong> Catches Ctrl-C, typos, everything; the bug survives, the evidence dies. Narrowest type, and if you truly must swallow, log it first.</div>
+<div class="gotcha"><strong>Catching where you can't act.</strong> A library function that try/excepts its own ValueError into a printed apology denies callers the ability to handle failure. Raise there; catch at the edge that owns the decision.</div>
+<div class="gotcha"><strong>Tests sharing mutable state.</strong> Module-level <code>DATA = []</code> mutated across tests → order-dependent passes (and pytest may reorder!). Fixtures give fresh objects; test independence is non-negotiable.</div>
+<div class="gotcha"><strong>assert with side effects / for validation.</strong> <code>assert cleanup()</code> vanishes under -O, and user-input checks don't belong in asserts at all (they're deletable). Effects on their own line; ValueError for inputs.</div>
+<div class="gotcha"><strong><code>pytest.raises</code> around too much.</strong> Wrap ONE line. Wrapping ten lets an earlier unrelated TypeError satisfy the expectation and hide the real regression; add <code>match="..."</code> to pin the message.</div>
+<div class="gotcha"><strong>Loosen-until-green.</strong> rtol crept from 1e-6 to 1e-2 across five commits and the suite now certifies garbage. Tolerances change only with a budget recomputation in the diff — treat the number as load-bearing engineering, because it is.</div>
+
+<h2>Scenario — the test that failed every fiftieth Tuesday</h2>
+<p>Your study group's shared repo has one "flaky" test — <code>test_softmax_matches_reference</code> fails roughly 1 in 50 CI runs, and the group's fix so far has been "rerun it," which is how flakes train humans to ignore alarms. You take it apart with this lesson. Reproduce: the failing seed is in the CI log because the fixture prints it (bless layer 3) — <code>default_rng(seed)</code> reruns the failure on demand; it's real, not cosmic rays. Hypothesize: the assert is <code>allclose(fast, ref, rtol=1e-6)</code> on fp32 over 8192-term rows — quiz 2's smell. Budget: pairwise fp32, log₂(8192)=13 halvings → ~13·ε ≈ 1.5e-6 <em>typical</em>, but the reference is a sequential Python sum with O(n·ε) worst case… the budget says the TEST is wrong: two correct implementations can legally disagree past 1e-6. But before loosening, you check the residuals (playbook discipline): failures cluster on rows containing values near 88 — and there it is, a second, REAL bug: the reference softmax lacks the max-subtraction (M1 L3's log-sum-exp), so e⁸⁸ pushes fp32 to the edge and its rounding explodes. Two fixes ship: the reference gets the stable formula (with its own new regression test), and the tolerance becomes rtol=1e-5 <em>with the budget arithmetic in a comment</em>. The test hasn't flaked in months, and the group learned the meta-lesson: a flaky numerical test is either a wrong tolerance or a real bug wearing a tolerance costume — and the budget is how you tell which. That diagnosis skill, interviewers pay for.</p>
+
+<h2>Practice</h2>
+<details><summary>1. Name the exception and the likely 2.x-lesson cause: (a) <code>'NoneType' object is not subscriptable</code> right after a sort; (b) <code>unhashable type: 'list'</code> at a dict insert; (c) <code>The truth value of an array with more than one element is ambiguous</code>; (d) <code>UnboundLocalError</code> on a variable that's "clearly global."</summary><div class="body">(a) TypeError — <code>xs = xs.sort()</code> assigned None (2.4 gotcha). (b) TypeError — a list used as a dict key; make it a tuple (2.4 §2). (c) ValueError — <code>if arr &gt; 5:</code> on an array; use .any()/.all() (2.5 gotcha). (d) the assignment-anywhere-makes-it-local rule (2.3): an <code>x = ...</code> later in the function shadows the global for the whole body. Recognizing exceptions on sight = half of all debugging time refunded.</div></details>
+<details><summary>2. Convert this shotgun session into the 5-step method: "my z-scores are all NaN → added prints everywhere → deleted the std line → rewrote with a loop → now it's slow AND NaN." The data is a CSV with one constant column.</summary><div class="body">Reproduce: 3-row fixture with a constant column → NaN appears deterministically. Hypothesize: std of a constant column is 0 → division 0/0 → NaN (M1 L8: 0/0). Instrument: <code>print(f"{sd.min()=}")</code> → 0.0 confirmed. Test: drop the column → NaNs gone. Fix + lock: decide policy (raise on zero-variance features, or add eps with a warning — a real modeling decision, made explicitly), implement, and add <code>test_constant_column_policy()</code>. Five moves, no rewrites, and the slow loop never happens. The NaN itself was M1 L8 knowledge; the PROCESS was this lesson.</div></details>
+<details><summary>3. Write the pytest for the "must fail" contracts of 2.5's pooling thumbnailer (Practice 7): wrong ndim, wrong dtype policy (you chose: accept uint8 only? or any?), and zero-size input. Use raises with match=.</summary><div class="body"><code>with pytest.raises(ValueError, match="ndim"): pool(np.zeros((4,6)))</code> — a (H,W) gray image violates the documented (H,W,3) contract (or you widen the contract — but then TEST the widened one). <code>with pytest.raises(TypeError, match="uint8"): pool(np.zeros((4,6,3), np.float32))</code> if you contracted uint8-only. <code>with pytest.raises(ValueError, match="empty"): pool(np.zeros((0,6,3), np.uint8))</code>. The deeper point: writing these forces the contract DECISIONS (accept-and-convert vs reject) that the happy-path never asks — same as normalize's zero-vector. Failures are API.</div></details>
+<details><summary>4. Your fp16 test budget: elementwise <code>y = a*x + b</code> (one multiply, one add per element, no accumulation). Compute a principled rtol and atol, and justify each from M1 L8 numbers.</summary><div class="body">Per element: 2 rounded ops → error ≲ 2·ε_fp16 = 2·9.77e-4 ≈ 2e-3 relative; ×10 headroom → <strong>rtol=2e-2… too loose?</strong> No: headroom ×5 is defensible for 2 ops → rtol=1e-2; document the choice. atol: for outputs near 0 (a*x ≈ −b, catastrophic cancellation possible — M1 L8 §2), relative error explodes; set atol ≈ ε_fp16 × typical |a*x| scale (e.g., 1e-3 for unit-scale data), stated in the test. The exercise's real deliverable is the COMMENT: `# budget: 2 ops × ε₁₆(9.8e-4) × 5 headroom` — auditable numbers, not vibes.</div></details>
+<details><summary>5. logging vs print triage: for each, which and why — (a) inspecting a suspicious stride while debugging in Colab; (b) the nightly ETL job's per-stage row counts; (c) a caught-and-handled retryable timeout; (d) the seed of every benchmark run.</summary><div class="body">(a) print (interactive, ephemeral — delete after). (b) logging.info (unattended, needs timestamps + filtering). (c) log.warning with log.exception on final failure — evidence preserved even when handled (quiz 1's lesson). (d) logging.info at minimum — reproducibility metadata belongs in the permanent record (M1 L7's ritual); many teams put it in the results file itself too. Rule compressed: humans-now → print; machines-later → logging.</div></details>
+<details><summary>6. A property test for M1 L2's pair: linearize(r, c, W) = r*W+c and delinearize(i, W) = divmod(i, W). State the two round-trip laws, the domain constraint that makes them true, and write one as pytest.</summary><div class="body">Laws: delinearize(linearize(r,c,W), W) == (r,c) for 0 ≤ c &lt; W (the constraint — c ≥ W aliases into the next row, M1 L2 §3's "requires" column!); and linearize(*delinearize(i,W), W) == i for i ≥ 0. <code>@pytest.mark.parametrize("W", [1, 4, 1920])</code> / <code>def test_roundtrip(W): for r in range(3):  for c in range(min(W, 5)): assert divmod(r*W+c, W) == (r, c)</code>. Note W=1 in the table — the degenerate width that breaks hand-rolled index math embarrassingly often. Inverse-pair round-trips are the highest-value property tests in all of numerical indexing.</div></details>
+<details><summary>7. Design: the CI quality gate for this course's repo from here on. Specify: what runs on every push (time budget 60 s), what runs nightly, how numerical tolerances are governed, what a "flaky" label triggers, and the one metric you refuse to gate on. Justify from this lesson + M1 L7.</summary><div class="body">Every push: pytest -q on unit + contract + fixed-fixture suites (fast, deterministic, &lt; 60 s — layers 1, 2, 5, 6); lint + a no-bare-except grep. Nightly: randomized suites with fresh seeds (logged), property tests at larger sizes, and the benchmark harness with medians + spread archived (trend data, M1 L7). Tolerance governance: every allclose carries a budget comment; changing rtol/atol requires the recomputation in the PR description (the anti-loosen-until-green law). Flaky label: quarantine ≠ ignore — auto-open an issue with the failing seed attached; two weeks unfixed → the test's owner presents the budget analysis (scenario's discipline, institutionalized). Refuse to gate on: raw performance numbers per-push — shared CI machines make ms noise (M1 L7's variance), so perf regressions gate NIGHTLY on median deltas &gt; 5 standard errors (M1 L7 Ex.2's arithmetic), never on single runs. This design is small enough for a study group and is, structurally, how serious GPU teams actually run.</div></details>
+
+<div class="pager">
+  <a href="lesson-05.html">← NumPy & vectorization</a>
+  <a href="lesson-07.html">Next: Files, modules & environments →</a>
+</div>
+<div class="footer">GPU Mastery · Module 2 · Lesson 6 — works offline · progress saved in your browser</div>
+</div>
+<script src="../assets/diagrams2.js"></script>
+<script src="../assets/app.js"></script>
+</body>
+</html>

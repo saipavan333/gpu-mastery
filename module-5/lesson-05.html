@@ -1,0 +1,180 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>5.5 Shared Memory & Tiling — GPU Mastery</title>
+<link rel="stylesheet" href="../assets/style.css">
+</head>
+<body data-lesson="m5l5">
+<nav><div class="inner">
+  <a class="logo" href="../index.html">GPU<span>Mastery</span></a>
+  <a class="item" href="../index.html">Home</a>
+  <a class="item on" href="../curriculum.html">Curriculum</a>
+  <a class="item" href="../labs.html">Labs</a>
+  <a class="item" href="../setup.html">Lab setup</a>
+  <a class="item" href="../prompt.html">Generator prompt</a>
+</div></nav>
+<div class="wrap">
+
+<div class="lesson-top">
+  <div><span class="badge">Module 5 · Lesson 5</span><span class="badge dim">≈ 3.5 h</span></div>
+  <button id="donebtn" class="donebtn">Mark lesson complete</button>
+</div>
+<h1>Shared Memory & Tiling — the programmable cache you've been promised since 4.5</h1>
+<p class="lead">CPU caches guess what to keep (4.5's LRU bets). The GPU hands you the SRAM and says: <em>you decide.</em> Today you take 4.2's blocking trick, move it on-chip, and watch matmul's arithmetic intensity climb the roofline exactly as 4.7 predicted. One new keyword, one new barrier, one old idea.</p>
+
+<h2>Concept</h2>
+
+<h3>__shared__: per-block scratchpad, explicitly yours</h3>
+<pre><code>__global__ void k(...) {
+    __shared__ float tile[16][16];    // ONE copy per BLOCK (not per thread!),
+    ...                                // lives in the SM's SRAM (4.5's ~20-cycle
+}                                      // tier), gone when the block retires.
+// Three scopes now in play (M2 L3's namespace discipline, on silicon):
+//   registers  — per-THREAD, automatic locals (fastest, 4.4)
+//   __shared__ — per-BLOCK, declared like this (fast, tiny: ~48–228 KB budget)
+//   global     — per-GPU, cudaMalloc'd (huge, slow: 4.5's ~400 cycles)</code></pre>
+<p>The budget is real and arch-specific: 48 KB per block by default, opt-in higher (T4 tops at 64 KB, H100 at 227 KB — your 5.1 machine-model file has YOUR number). Blocks can't see each other's shared memory — which is exactly why 5.2 said blocks must be independent, and exactly what makes shared memory scalable: no cross-SM coherence traffic to pay for (4.3's MESI tax, dodged by design).</p>
+
+<h3>Why it exists: reuse, the roofline lever</h3>
+<div class="diagram" data-diagram="m5l5-reuse" data-caption="Naive matmul: every operand fetched from HBM every time. Tiled: fetch once into shared, reuse TILE times. Same FLOPs, 1/TILE the traffic — 4.7's intensity lever, pulled."></div>
+<pre><code>naive matmul inner loop:  2 FLOP per 8 B of HBM traffic → AI = 0.25 FLOP/B
+   4.7's verdict: memory-bound cellar, ~2% of peak, no launch config saves it
+tiled with TILE=16:       each loaded element reused 16× → AI ≈ 4 FLOP/B
+   16× less HBM traffic, same math — the kernel MOVES on the roofline
+// This is 4.2's cache-blocking with one upgrade: no more HOPING the cache
+// keeps the block. You PLACE it. The hardware guess became a guarantee.</code></pre>
+
+<h3>__syncthreads(): the barrier that makes sharing safe</h3>
+<div class="diagram" data-diagram="m5l5-race" data-caption="Thread 5 reads tile[7] — did thread 7 write it yet? Without the barrier: sometimes. Racecheck's whole caseload is this diagram."></div>
+<pre><code>tile[threadIdx.y][threadIdx.x] = A[...];   // each thread writes ONE slot
+__syncthreads();      // barrier: EVERY thread of the block arrives before ANY proceeds
+sum += tile[threadIdx.y][k] * ...;         // now reading OTHER threads' slots: safe
+__syncthreads();      // and before overwriting the tile next round: sync AGAIN
+                      // (write-after-read is a race too — both fences matter)</code></pre>
+<p>Two laws. <strong>Law 1:</strong> any time one thread reads a shared slot another thread wrote, a barrier stands between — write-then-sync-then-read, and sync again before the next overwrite. Miss either and you have 4.3's data race, at block scope, intermittent by scheduling: <code>compute-sanitizer --tool racecheck</code> (5.4's panel) names the exact pair. <strong>Law 2:</strong> __syncthreads() must be reached by ALL threads of the block or NONE — a barrier inside <code>if (i &lt; n)</code> deadlocks the threads that took the other path (synccheck's caseload; 5.6 explains the warp-level why). The safe pattern: sync OUTSIDE the conditional, always.</p>
+
+<h3>The tiled-loop skeleton</h3>
+<div class="diagram" data-diagram="m5l5-tiles" data-caption="C's 16×16 output tile = a walk across A-row-of-tiles and B-column-of-tiles: load pair → sync → multiply → sync → next pair."></div>
+<pre><code>for (int t = 0; t &lt; N/TILE; ++t) {           // walk the K dimension tile by tile
+    As[ty][tx] = A[row*N + (t*TILE + tx)];   // cooperative load: 256 threads,
+    Bs[ty][tx] = B[(t*TILE + ty)*N + col];   //   256 slots, one element each
+    __syncthreads();                          // tile complete before anyone computes
+    for (int k = 0; k &lt; TILE; ++k)
+        sum += As[ty][k] * Bs[k][tx];         // 16 MACs per element loaded — the reuse
+    __syncthreads();                          // tile consumed before anyone reloads
+}
+C[row*N + col] = sum;                         // one write, after the walk</code></pre>
+
+<h2>Worked example</h2>
+<div class="card">
+<p><strong>Task:</strong> Matmul v1 (naive, from 5.2's pattern) vs v2 (tiled, TILE=16), N=1024, T4 Colab. Predict with 4.7's roofline BEFORE running — then run.</p>
+<pre><code>Prediction (T4 machine model, 5.1's file: 320 GB/s HBM spec, ~220 achievable
+            (4.7's ~70% derate); 8.1 TF fp32 peak → ridge at ~37 FLOP/B):
+  v1: AI 0.25 → bound at 0.25 × 220 GB/s ≈ 55 GFLOP/s      (deep memory cellar)
+  v2: AI ≈ 4  → bound at 4 × 220 ≈ 880 GFLOP/s  (16× headroom unlocked; still
+      memory-bound — the ladder to compute-bound continues in 5.11)
+Measured (representative Colab T4 run, 5.9-style event timing):
+  v1: 2.1 GFLOP/s… far below even the 55 bound — uncoalesced B accesses (4.5!)
+      stack a second crime on top of low AI (5.7 untangles it)
+  v2: ~600 GFLOP/s — 280× over v1, ~70% of its own roofline bound   ✓ model works
+Correctness: v2 vs v1 vs CPU oracle — MAX ULP DIFF ≠ 0! Tiling reorders the
+  K-sum → M1 L8's non-associativity, EXPECTED: budget comparison (rtol 1e-5),
+  not bitwise. The fixture from M2 L6 already knew how.</code></pre>
+<p><strong>What to internalize:</strong> the roofline predicted the ORDER OF MAGNITUDE and the LEVER (traffic, not FLOPs) before any code ran — that's 4.7 paying rent. The v1 measurement coming in far below its own bound is a lesson too: bounds are ceilings, and uncoalesced access (5.7's subject) can keep you under them. And the ULP diff is your first live encounter with a truth that governs all GPU numerics: <em>faster almost always means reordered, and reordered means different bits</em> — budgets (M1 L8) are how adults compare.</p>
+</div>
+
+<h2>Key points</h2>
+<ul class="keypoints">
+<li>__shared__ = per-block SRAM you place data into explicitly — 4.2's cache blocking with a guarantee instead of a guess; invisible across blocks by design.</li>
+<li>Tiling's whole point is reuse: load once, use TILE times → HBM traffic ÷ TILE → arithmetic intensity × TILE → the kernel moves rightward on 4.7's roofline.</li>
+<li>Write-sync-read, and sync-again-before-overwrite: both barriers are load-bearing; racecheck catches the missing ones, scheduling luck hides them until it doesn't.</li>
+<li>__syncthreads() in divergent code deadlocks or corrupts — barriers live OUTSIDE conditionals, all threads or none (synccheck's beat, 5.6's mechanism).</li>
+<li>Shared memory is a launch-limiting resource (48 KB default, arch-dependent max): tile size trades reuse factor against occupancy — 5.6's dial makes it quantitative.</li>
+<li>Tiled results differ in ULPs from naive: reordering ≠ wrong; fixtures compare with budgets (M1 L8), never bitwise, for any kernel that resequences floats.</li>
+</ul>
+
+<h2>Quiz</h2>
+<div class="quiz">
+  <div class="q">1. A tiled kernel is correct at TILE=16 but intermittently wrong at TILE=32 — ONLY on large inputs, maybe 1 run in 20. Racecheck flags a write-after-read hazard on As. The second __syncthreads() (after the inner k-loop) was omitted. Why did TILE=16 appear correct?</div>
+  <button class="opt">TILE=16 doesn't need the second barrier</button>
+  <button class="opt" data-c="1">Luck with scheduling: the race exists at BOTH sizes, but at 16 the warps' timing happened to order writes after reads on this hardware. Bigger tiles → more warps per block in flight between barriers → more interleavings → the loss ticket finally gets drawn. Correctness by schedule is 4.3's race lesson: absence of symptom ≠ absence of race — racecheck's verdict outranks 19 green runs</button>
+  <button class="opt">TILE=32 overflows shared memory</button>
+  <button class="opt">Bank conflicts corrupt data at 32</button>
+  <div class="expl">Bank conflicts (below) cost TIME, never correctness — eliminating option 4 is itself a tested skill. 32×32×2 tiles×4 B = 8 KB, nowhere near the budget. The race was always there; the schedule was kind at 16. This exact "worked for months, broke on the new GPU" story is a CUDA rite of passage — skip it by trusting the tool, not the streak (5.4's sanitizer-clean doctrine, mirrored).</div>
+</div>
+<div class="quiz">
+  <div class="q">2. Halving HBM traffic 16× with TILE=16 took ~10 lines. A teammate proposes TILE=64 for "64× reuse". Three separate walls stand in the way — name them with their lesson citations.</div>
+  <button class="opt">Nothing — bigger tiles are strictly better</button>
+  <button class="opt" data-c="1">(1) Shared budget: two 64×64 float tiles = 32 KB — squeezes to ≤1 block on 48 KB default parts, gutting occupancy (5.6's dial). (2) Threads/block ceiling: 64×64 = 4096 threads &gt; the 1024 hard limit (4.4) — each thread must now compute MULTIPLE outputs (register tiling, 5.11's rung). (3) Diminishing returns: at AI ≈ 16, matmul nears the T4 ridge — the bottleneck moves to compute/registers, and more reuse buys ~nothing (4.7's law: optimize the BINDING constraint)</button>
+  <button class="opt">Only the 1024-thread limit</button>
+  <button class="opt">Bank conflicts make big tiles slower</button>
+  <div class="expl">The complete answer braids three modules — resource budget (this lesson), hardware ceiling (4.4), economics (4.7) — which is why it's a real interview question at ML-infra shops. The escape hatch (one thread : many outputs) is precisely how production kernels (and 5.11's ladder) break the coupling between tile size and thread count. "Strictly better" answers to tuning questions are almost always missing a constraint.</div>
+</div>
+
+<h2>Exercises</h2>
+<details><summary>Exercise 1 — Build v1→v2 yourself on Colab with the 5.3 harness and 5.4 brackets: naive matmul, then tiled TILE=16. Before running v2, write down your roofline prediction (YOUR machine model's numbers). Measure both (events per 5.9's preview — or bracket with deviceSync + CPU clock for now), verify vs CPU oracle with rtol=1e-5, and file the prediction-vs-measured gap with one sentence naming the suspect.</summary><div class="body">
+<p>Expected shape: v2 lands 100–400× over v1 and 50–80% of its roofline bound. Your gap sentence should name coalescing (5.7) or launch overhead at small N — and the point of writing it BEFORE 5.7 is to experience having a QUANTIFIED mystery (4.7's "the gap is the to-do list", M1 L7's predict-first ritual). Also stage the missing-second-sync bug from quiz 1 deliberately and confirm racecheck names line and hazard type — 90 seconds now buys instant recognition when a real one bites. Keep both kernels: they are rungs 1–2 of 5.11's capstone ladder, and this file becomes that project's git history.</p>
+</div></details>
+<details><summary>Exercise 2 — Bank conflicts, measured: write a shared-memory kernel where each thread reads tile[threadIdx.x][0] (all 32 warp threads hit column 0 = same bank... wait, is that a conflict or a broadcast? predict first!), then tile[0][threadIdx.x], then tile[threadIdx.x*2 % 32][...] stride-2. Time all three, explain the one that surprises everyone, cite 4.5 §banks.</summary><div class="body">
+<pre><code>tile[0][threadIdx.x]      row read, 32 different banks     → full speed
+tile[threadIdx.x][0]      column: 32 SAME addresses? NO —  → 32 DIFFERENT
+                          addresses (stride 32 floats) = same bank, 32-way
+                          conflict → ~32× serialized (4.5's turnstile)
+tile[threadIdx.x*2%32][…] stride-2: 2-way conflict → ~2× tax
+SURPRISE case: ALL threads read tile[5][3] — the SAME address — that's a
+BROADCAST: one fetch, free. Same bank ≠ conflict when it's the same WORD.</code></pre>
+<p>The broadcast exception is the one that flunks whiteboard rounds: conflict = same bank, DIFFERENT words. Fix for the column read: pad to tile[32][33] — the +1 rotates each row's bank alignment (4.2 P3's leading-dimension trick, now with a hardware reason). You'll deploy the padding for real in 5.7's transpose. Measured deltas on T4 land within 2× of the predicted ratios — banks are 4.5's most mechanical model, and it shows.</p>
+</div></details>
+
+<hr>
+<h1>Go deeper — the shared-memory craft sheet</h1>
+
+<h2>1. Dynamic shared memory (size decided at launch)</h2>
+<pre><code>extern __shared__ float smem[];               // UNSIZED — one such array per kernel
+kernel&lt;&lt;&lt;grid, block, smemBytes&gt;&gt;&gt;(...);      // the third launch parameter, at last
+// Needed when tile size is a runtime knob (autotuners sweep it — 5.11).
+// One extern array only: carve multiple views by offset arithmetic
+//   float *As = smem; float *Bs = smem + TILE*TILE;    (3.4's pointer math, employed)
+// Beyond 48 KB/block additionally requires cudaFuncSetAttribute opt-in — the
+// API nudge that says "you're now tuning for a specific machine" (5.1's model file).</code></pre>
+
+<h2>2. When shared memory does NOT pay</h2>
+<pre><code>no reuse, no win:  saxpy through shared = same HBM traffic + barrier tax + occupancy tax
+                   (AI unchanged → roofline position unchanged → 4.7 says: don't)
+L1 already wins:   read-once-broadcast patterns often served by L1/constant cache free
+modern rivals:     cp.async pipelines (Ampere+), Tensor-Core paths (Track A) change
+                   the calculus — but ALL of them still exist to raise AI. The lens
+                   (traffic vs FLOPs) outlives every particular trick. Rule: state the
+                   reuse factor BEFORE writing the tile code. No factor, no tile.</code></pre>
+
+<h2>3. Gotchas</h2>
+<div class="gotcha"><strong>Barrier inside a divergent branch.</strong> The guard-then-sync habit from 5.2 turns lethal here: threads that exited early never reach the barrier → deadlock/UB. Pattern: ALL threads run the tile loop; guard only the final store. (Look back at the skeleton — that's why the guard is at the WRITE.)</div>
+<div class="gotcha"><strong>Missing the second barrier.</strong> Quiz 1's write-after-read race — the most-shipped shared-memory bug in the wild, because the FIRST barrier is intuitive and the second isn't. Both fences, every loop iteration.</div>
+<div class="gotcha"><strong>Assuming shared is zero-initialized.</strong> It's recycled SRAM — 3.2's ghosts at 20-cycle latency. Initialize what you read, especially padding slots in edge tiles (or edge blocks read garbage into real sums).</div>
+<div class="gotcha"><strong>Ragged edges half-handled.</strong> N not divisible by TILE: guard the LOADS (clamp + zero-fill the tile's out-of-range slots) AND the final store — zero-filled slots contribute 0 to the sum, keeping the inner loop branch-free (5.6's divergence economy). 5.2's tail discipline, two-dimensional.</div>
+<div class="gotcha"><strong>Occupancy blindness.</strong> Shared bytes/block is a divisor in 5.6's resident-blocks math: a 40 KB tile on a 48 KB part = 1 block/SM = latency-hiding starvation (4.4). Always compute blocks-per-SM when sizing tiles.</div>
+<div class="gotcha"><strong>volatile-free spin loops on shared.</strong> Threads communicating through shared WITHOUT barriers (flag-polling) meet 4.3's visibility physics + compiler caching — that's cooperative-groups/atomics territory (5.8), not raw loads. Barriers or atomics; never vibes.</div>
+
+<h2>Scenario — the inherited kernel and the one-line diagnosis</h2>
+<p>New job, week three: you inherit a "mysteriously slow" attention-adjacent kernel. Previous owner's comment: <code>// TODO: tried shared memory, made it SLOWER, reverted. GPUs are weird.</code> You do not touch the code. You open a sheet and compute what this course has drilled: reuse factor of the shared-memory version — and find each loaded element was used exactly 1.3 times (the access pattern had almost no overlap between threads). Verdict in one line: tiling a no-reuse pattern buys the barrier tax and the occupancy tax and saves nothing — section 2's rule, violated; "GPUs are weird" was actually "AI didn't change, 4.7 said so". The actual win, found the same afternoon with the SAME sheet: the input layout was AoS (M2 L7's interleaved fields), so every load dragged 3 unwanted fields through the bus — an SoA repack (5.7's beat) tripled effective bandwidth, no shared memory involved. Two lessons for the price of one war story: <em>compute the reuse factor before writing tile code</em>, and <em>the fastest kernel change is often a data-layout change upstream of the kernel entirely.</em> The previous owner wasn't dumb — they were toolless. You have the sheet.</p>
+
+<h2>Practice</h2>
+<details><summary>1. For each, state reuse factor and the tile/no-tile verdict: (a) vector add; (b) 1D stencil radius 3 (each output reads 7 inputs); (c) matmul row×col; (d) histogram of a byte image; (e) elementwise GELU on activations.</summary><div class="body">(a) Each input read once: factor 1 → no tile (saxpy's cousin). (b) Each INPUT feeds 7 outputs → factor ~7 within a block's span (plus halo reads) → tile pays; this is the canonical stencil-tiling case (and Ex.6's halo subject). (c) Factor TILE by construction → the lesson. (d) Inputs read once (factor 1) — but the OUTPUT bins are hammered concurrently → shared-memory PER-BLOCK HISTOGRAMS (privatization, 5.8's atomics section) — shared memory for contention relief, not reuse: the second legitimate use, distinct mechanism. (e) Factor 1, pure elementwise → no tile; GELU's cost is the HBM round-trip, and the real fix is FUSION with neighbors (Track A's constant refrain, first named here).</div></details>
+<details><summary>2. TILE=16 kernel, blockDim (16,16). Derive: shared bytes/block (two float tiles), max resident blocks on a 64 KB-shared SM from the shared constraint alone, then the binding constraint when the SM also caps at 1536 threads. Which resource is the dial?</summary><div class="body">2×16×16×4 = 2 KB/block → 64/2 = 32 blocks by shared. Threads: 1536/256 = 6 blocks — BINDING (and the 16-blocks/SM arch cap sits between). Shared is nowhere near limiting at TILE=16; it becomes the dial at TILE=48+ (2×48²×4 = 18 KB → 3 blocks) or with double-buffering (×2 again). The exercise's real teaching: occupancy is a MIN over three fractions (threads, registers, shared — 5.6 formalizes), and you just learned to spot the argmin by arithmetic before any profiler run (4.4's spreadsheet habit).</div></details>
+<details><summary>3. Prove the skeleton's cooperative load is coalesced for As (row-major A) by writing the addresses touched by threads (ty=0, tx=0..15) — then show B's load in the SAME skeleton and explain why it's also coalesced, even though B is walked "down a column of tiles".</summary><div class="body">As load, ty=0: A[row·N + t·16 + tx], tx=0..15 → 16 CONSECUTIVE floats — one memory transaction (4.5's bus law, 5.7's pattern #1). Bs load, ty=0: B[(t·16+0)·N + col] with col = blockIdx.x·16 + tx → also consecutive in tx! The trick: the TILE walks down B's rows, but WITHIN each row-of-the-tile, adjacent THREADS (tx) read adjacent addresses — coalescing cares about the intra-warp pattern, not the loop's global direction (the single most common coalescing misconception, retired here, formalized in 5.7). Both loads coalesced + both reused 16× = the whole v2 win in two address formulas.</div></details>
+<details><summary>4. Your block loads a tile, syncs, computes, syncs, loops. A colleague suggests removing the SECOND sync and instead double-buffering (two tiles, ping-pong). Explain how that removes a barrier legitimately, the cost, and which resource-dial consequence to check before celebrating.</summary><div class="body">With buffers A/B alternating, iteration i computes FROM buffer (i%2) while loading INTO buffer ((i+1)%2) — write-after-read on the SAME buffer never occurs between adjacent iterations, so the second barrier's job disappears (one sync per iteration remains, for the just-loaded buffer). Cost: 2× shared bytes → practice-2's blocks-per-SM math may drop (check the MIN!) — trading barrier stalls for occupancy is only a win if occupancy stays above the latency-hiding floor (4.4). This is a real technique (pipelined kernels, cp.async's whole design) introduced as what it is: a RESOURCE TRADE, priced on the dial, not a free lunch.</div></details>
+<details><summary>5. Racecheck reports "WAR hazard between line 14 (read of As) and line 11 (write of As), threads (3,0,0) and (12,0,0), 400 hazards". The kernel "passes" its fixture. Reconstruct what execution order racecheck is warning about, why 400 (not 1), and write the fix-and-verify sequence including which run should show hazard count 0.</summary><div class="body">Warning: thread 12's NEXT-iteration write (line 11) can execute before thread 3's CURRENT-iteration read (line 14) of the same slot — missing second barrier lets iterations bleed (quiz 1's anatomy, now in report form). 400 = hazard PAIRS across threads × iterations, not distinct bugs — one missing fence, many collisions (read sanitizer counts as "instances of one crime scene", 5.4's log-reading skill). Fix: restore __syncthreads() after the k-loop → rerun racecheck (expect 0) → rerun fixture (still green — and note the fixture ALONE was insufficient evidence: it was green during the race too, the exact two-layer lesson of M2 L6 + 5.4 gotcha 4). File the pair (fixture + racecheck) as the shared-memory definition of done.</div></details>
+<details><summary>6. Design the shared-memory plan for a radius-3 1D stencil, block of 256 outputs: tile size WITH halos, which threads load the halo cells, the barrier placement, edge-of-ARRAY handling (M2 L4's modes reappear!), and the reuse factor that justifies it all. Sketch code for the load phase only.</summary><div class="body">Tile = 256 + 2×3 = 262 floats. Load plan: each thread loads its own center cell (smem[tid+3] = in[gbase+tid], coalesced); threads 0..2 additionally load left halo, 253..255 the right (or one strided second load — either way, the EXTRA loads are the halo tax). Edge of array: clamp indices (M2 L4's 'nearest' mode) or zero-fill ('constant' mode) — the fixture must pin WHICH, because they differ numerically at borders (M2 L4's exact lesson, now in silicon). One barrier after loading; compute phase reads smem[tid..tid+6] barrier-free (each thread READS overlapping slots but WRITES only its own output — no write-sharing, no second fence needed before the loop ends: contrast with matmul, and say WHY in your notes). Reuse: each interior cell read by 7 threads → factor ~7 ÷ (1 + halo overhead 6/256) ≈ 6.8 — comfortably worth it (practice 1b's promise, engineered).</div></details>
+<details><summary>7. The interview closer: "Walk me from 'matmul is slow' to 'matmul is tiled' using only quantities — no code." Deliver the six-number chain (AI naive → bound → measured → tile factor → AI tiled → new bound), then name the two verification artifacts you'd show before calling it shipped.</summary><div class="body">Chain (T4 flavor): AI=0.25 FLOP/B → bound 0.25×220 ≈ 55 GFLOP/s → measured 2 (uncoalesced compounding — name it!) → TILE=16 ⇒ traffic÷16 → AI≈4 → bound ≈880, expect 60–80% of it (~600). Every arrow is a lesson: 4.7, 4.7, M1 L7, this one, this one, 4.4-flavored derate. Artifacts: (1) fixture pass vs CPU oracle at rtol 1e-5 WITH a sentence on why not bitwise (M1 L8 — reordered sums); (2) racecheck clean run (both barriers proven, not vibed). Numbers first, code second, proof always — that's the whole course in one interview answer, and it's 5.11's capstone script in miniature.</div></details>
+
+<div class="pager">
+  <a href="lesson-04.html">← Errors & compute-sanitizer</a>
+  <a href="lesson-06.html">Next: Warps, divergence & occupancy →</a>
+</div>
+<div class="footer">GPU Mastery · Module 5 · Lesson 5 — works offline · progress saved in your browser</div>
+</div>
+<script src="../assets/diagrams5.js"></script>
+<script src="../assets/app.js"></script>
+</body>
+</html>

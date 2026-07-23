@@ -1,0 +1,248 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>2.2 Control Flow — GPU Mastery</title>
+<link rel="stylesheet" href="../assets/style.css">
+</head>
+<body data-lesson="m2l2">
+<nav><div class="inner">
+  <a class="logo" href="../index.html">GPU<span>Mastery</span></a>
+  <a class="item" href="../index.html">Home</a>
+  <a class="item on" href="../curriculum.html">Curriculum</a>
+  <a class="item" href="../labs.html">Labs</a>
+  <a class="item" href="../setup.html">Lab setup</a>
+  <a class="item" href="../prompt.html">Generator prompt</a>
+</div></nav>
+<div class="wrap">
+
+<div class="lesson-top">
+  <div><span class="badge">Module 2 · Lesson 2</span><span class="badge dim">≈ 2–3 h</span></div>
+  <button id="donebtn" class="donebtn">Mark lesson complete</button>
+</div>
+<h1>Control Flow — decisions and repetition</h1>
+<p class="lead">Straight-line programs compute one thing. Add <em>if</em> (choose) and <em>loops</em> (repeat) and you can compute anything — that's not rhetoric, it's a theorem. Today you also run your first simulated GPU launch: 12 threads, a ragged last block, and the guard that saves it.</p>
+
+<h2>Concept</h2>
+
+<h3>Booleans: conditions are values</h3>
+<pre><code>n = 4096
+n > 1024            # True — a bool you can store, print, combine
+0 &lt;= i &lt; N          # chained comparison: Python allows the math notation!
+is_pow2 = n > 0 and (n &amp; (n - 1)) == 0     # M1 L1's power-of-two test, live
+not finished, a or b                        # the three combinators</code></pre>
+<p><code>and</code>/<code>or</code> <strong>short-circuit</strong>: <code>b > 0 and a/b > 2</code> never divides by zero, because if <code>b > 0</code> is False the right side is never evaluated. That ordering is a real correctness tool, not trivia. Python also treats some values as truthy/falsy (<code>0</code>, <code>0.0</code>, <code>""</code>, <code>[]</code>, <code>None</code> are falsy) — idiomatic for emptiness checks (<code>if rows:</code>), dangerous for numbers (deep dive §5).</p>
+
+<h3>if / elif / else — and indentation IS the syntax</h3>
+<div class="diagram" data-diagram="m2l2-flow" data-caption="Top to bottom, first True wins, at most one branch runs."></div>
+<pre><code>if intensity > balance:
+    verdict = "compute-bound"        # 4 spaces of indentation = "inside the if"
+    limit_ms = t_compute
+elif intensity > 0.5 * balance:
+    verdict = "borderline"
+else:
+    verdict = "memory-bound"
+    limit_ms = t_memory</code></pre>
+<p>Where C uses <code>{ }</code> (Module 3), Python uses indentation — the block <em>is</em> the whitespace. Consequences: consistent 4 spaces (never tabs mixed with spaces), and a dedent silently ends the block — the most common beginner logic bug is a line that drifted out of its block. One-liner form for tiny choices: <code>tag = "big" if n > 4096 else "small"</code> (you used it in 2.1).</p>
+
+<h3>while: repeat until the world changes</h3>
+<pre><code>remaining = 173                      # M1 L1's repeated-division converter, alive
+bits = ""
+while remaining > 0:
+    bits = str(remaining % 2) + bits # remainder = next bit (prepend!)
+    remaining //= 2                  # //= : divide and re-point, floor
+print(bits)                          # 10101101 ✓</code></pre>
+<p><code>while</code> runs as long as its condition holds. The loop body must move toward making it False — forget <code>remaining //= 2</code> and you've built an infinite loop (Colab: interrupt with the stop button; you will do this once, everyone does). <code>break</code> exits immediately; <code>continue</code> skips to the next iteration; <code>while True: ... break</code> is the idiomatic "loop until an inner condition says stop."</p>
+
+<h3>for + range: counted repetition, half-open by design</h3>
+<div class="diagram" data-diagram="m2l2-range" data-caption="range never yields its stop — M1 L2's half-open intervals as a language feature."></div>
+<pre><code>total = 0.0
+for i in range(n):        # i = 0, 1, ..., n-1 — exactly n iterations
+    total += a_i          # Σ as a loop: M1 L2's bridge, now yours to type
+for step in range(10, 0, -2):   # 10 8 6 4 2 — countdowns exclude stop too
+for x in [2.1, 2.0, 9.7]:       # for iterates ANY sequence, not just ranges</code></pre>
+
+<h3>Nested loops: grids, and who spins fastest</h3>
+<div class="diagram" data-diagram="m2l2-nested" data-caption="Inner loop = fastest index. Visit order is exactly i = r·width + c."></div>
+<pre><code>for r in range(H):
+    for c in range(W):
+        i = r * W + c          # M1 L2's linearization — you'll type this in CUDA
+        process(r, c, i)</code></pre>
+<p>The inner loop completes fully for each outer step — H·W iterations total (M1 L3: know your loop's cost class before you run it; a third nesting is H·W·D). Which loop is inner decides memory order (M1 L6 row-major) — in Python it's style, in Module 4 it becomes a measurable 10× (cache lines), and in Module 5 it becomes coalescing.</p>
+
+<h3>The four loop patterns that are 90% of all loops</h3>
+<table>
+<tr><th>Pattern</th><th>Shape</th><th>M1 root</th></tr>
+<tr><td>Accumulate</td><td><code>s = 0</code> then <code>s += term</code></td><td>Σ (L2) — and float order matters (L8)</td></tr>
+<tr><td>Count</td><td><code>hits = 0</code> then <code>if cond: hits += 1</code></td><td>Monte Carlo's inside-counter (L7)</td></tr>
+<tr><td>Best-so-far</td><td><code>best = -inf</code> then <code>if x > best: best = x</code></td><td>max-reduction (L3's tree, serial form)</td></tr>
+<tr><td>Search &amp; exit</td><td><code>for ...: if found: break</code> <code>else:</code> not found</td><td>early-exit saves work; the loop-else runs only on no-break</td></tr>
+</table>
+
+<h2>Worked example</h2>
+<div class="card">
+<p><strong>Task:</strong> Simulate a CUDA launch in pure Python: N = 10 tasks, block size B = 4. Compute the block count with ceiling division, run every thread, and prove the guard is what keeps the ragged block safe. (This is M1 L2's diagram, executing.)</p>
+<pre><code>N, B = 10, 4
+blocks = (N + B - 1) // B                   # ceil(10/4) = 3 — M1 L2, in the flesh
+print(f"launching {blocks} blocks × {B} threads = {blocks*B} threads for N={N}")
+
+done, idle = 0, 0
+for block in range(blocks):                 # the GPU runs these CONCURRENTLY;
+    for t in range(B):                      # Python runs them in order — same math
+        i = block * B + t                   # global thread id
+        if i &lt; N:                           # THE GUARD
+            done += 1                       # (real kernel: out[i] = f(in[i]))
+            print(f"block {block} thread {t} → element {i}")
+        else:
+            idle += 1
+            print(f"block {block} thread {t} → idle (guard caught i={i})")
+print(f"processed {done}, idle {idle}")     # processed 10, idle 2</code></pre>
+<p><strong>What to notice:</strong> threads 10 and 11 exist (the hardware launches whole blocks) and do nothing — <em>by your explicit instruction</em>. Delete the <code>if i &lt; N</code> and this Python version would process 12 elements — harmless here, but the CUDA version writes past the end of an array: corruption or a crash, the #1 rookie kernel bug. You have now written, in a language you learned yesterday, the exact skeleton of every kernel launch in Module 5. <strong>Decision made:</strong> we printed the idle threads instead of hiding them — making invisible behavior visible is the debugging habit that separates people who understand their programs from people who hope.</p>
+</div>
+
+<h2>Key points</h2>
+<ul class="keypoints">
+<li>Conditions are bool values you can store and combine; <code>and</code>/<code>or</code> short-circuit, which is a correctness tool (guard the divide), not a footnote.</li>
+<li>Indentation is the block structure: 4 spaces, no tab/space mixing, and watch for lines that drift out of their block on edit.</li>
+<li><code>while</code> needs visible progress toward False; <code>for i in range(n)</code> runs exactly n times over the half-open [0, n).</li>
+<li>Chained comparisons (<code>0 &lt;= i &lt; N</code>) are legal Python and read like the math they are.</li>
+<li>Nested loops multiply costs (H·W·D — M1 L3's classes); the inner loop is the fastest-moving index and will someday decide your memory performance.</li>
+<li>The launch skeleton — ceil-divide, nested block/thread loops, <code>if i &lt; N</code> guard — is the same code in Python today and CUDA in Module 5.</li>
+</ul>
+
+<h2>Quiz</h2>
+<div class="quiz">
+  <div class="q">1. What does this print? <code>for i in range(2, 11, 3): print(i, end=" ")</code></div>
+  <button class="opt">2 5 8 11 — step until you pass stop</button>
+  <button class="opt" data-c="1">2 5 8 — 11 would equal stop, and stop is never produced</button>
+  <button class="opt">3 6 9 — range(2,…) starts after 2</button>
+  <button class="opt">2 5 8 10 — the last step clips to stop−1</button>
+  <div class="expl">Values are start, start+step, … strictly below stop: 2, 5, 8 (next would be 11 = stop, excluded — half-open). Count check: (11−2+3−1)//3 = 3 ✓ — M1's ceiling division predicts loop lengths.</div>
+</div>
+<div class="quiz">
+  <div class="q">2. This loop is meant to find the first power of two ≥ N: <code>p = 1</code> then <code>while p &lt; N: p *= 2</code>. For which N does it misbehave, and how?</div>
+  <button class="opt">N = 0 — infinite loop, p never reaches 0</button>
+  <button class="opt">Large N — p overflows int and wraps negative</button>
+  <button class="opt" data-c="1">No N misbehaves in Python — but N ≤ 0 returns p = 1, which may be a WRONG answer rather than a crash</button>
+  <button class="opt">N = 1 — returns 2 instead of 1</button>
+  <div class="expl">For N ≤ 0 the condition is False immediately and p = 1 comes back — silently claiming 1 is a power of two ≥ N (true mathematically for N ≤ 1, but is it what the caller meant for N = -5?). Python ints don't overflow (M1 L1), and N = 1 correctly returns 1. The lesson: loops rarely crash on edge cases — they return plausible wrong answers. Decide and document behavior for the edges (and in C, the overflow answer WOULD be a live bug — Module 3).</div>
+</div>
+
+<h2>Exercises</h2>
+<details><summary>Exercise 1 — Monte-Carlo π (M1 L7's worked example, yours now): using <code>import random</code> and <code>random.random()</code> (uniform [0,1)), throw 100 000 darts at the unit square and estimate π from the quarter-circle. Print the estimate and the error. Then double N and confirm the error shrinks like 1/√N-ish.</summary><div class="body">
+<pre><code>import random, math
+random.seed(42)                      # reproducibility ritual (M1 L7)
+N = 100_000
+inside = 0
+for _ in range(N):                   # _ = "loop variable unused" convention
+    x, y = random.random(), random.random()
+    if x*x + y*y &lt;= 1.0:             # squared distance — no sqrt (M1 L4!)
+        inside += 1
+est = 4 * inside / N
+print(f"π ≈ {est:.5f}   error {abs(est - math.pi):.5f}")   # ≈ 3.14 ± ~0.005</code></pre>
+<p>Expected error scale: σ ≈ 1.64/√N ≈ 0.005 at N=1e5 (M1 L7's formula) — your measured error should be in that ballpark, and 4× the darts should roughly halve it. Note the three M1 habits embedded: seed logged, squared-distance test, error quoted next to the estimate. This exact loop, translated symbol-for-symbol to CUDA in Track B4, saturates a GPU.</p>
+</div></details>
+<details><summary>Exercise 2 — Diagnose and fix: this "find the run length of equal leading values" loop sometimes returns the wrong answer and sometimes crashes. <code>vals = [7,7,7,3,7]; i = 0</code> then <code>while vals[i] == vals[0]: i += 1</code>. What are BOTH bugs, and what's the corrected loop?</summary><div class="body">
+<p><strong>Bug 1 (crash):</strong> if ALL values equal <code>vals[0]</code> (e.g. <code>[7,7,7]</code>), <code>i</code> walks past the end and <code>vals[i]</code> raises IndexError — the loop lacks a bounds guard. <strong>Bug 2 (order):</strong> the guard must come FIRST in the condition to protect the access via short-circuiting.</p>
+<pre><code>i = 0
+while i &lt; len(vals) and vals[i] == vals[0]:   # bounds check BEFORE access
+    i += 1
+# i is now the run length: 3 for [7,7,7,3,7]; 3 for [7,7,7] — no crash</code></pre>
+<p>Swap the two conditions and the crash returns — <code>and</code> evaluates left to right. "Bounds guard first, then dereference" is the same discipline as the CUDA <code>if i &lt; N</code>, and interviewers probe it with exactly this kind of loop.</p>
+</div></details>
+
+<hr>
+<h1>Go deeper — the complete guide</h1>
+<p>Loop mechanics you'll actually be quizzed on: else-on-loops, enumerate/zip, the float-loop ban, truthiness precision, match, and the cost discipline for nested loops.</p>
+
+<h2>1. Loop tools that mark you as fluent</h2>
+<pre><code>for idx, v in enumerate(vals):        # index AND value — never range(len(vals))
+for a, b in zip(xs, ys):              # parallel iteration (stops at the shorter!)
+for r in range(H):
+    for c in range(W): ...            # fine; but see itertools.product(range(H), range(W))
+total = sum(x*x for x in vals)        # generator expression: Σx² in one line (2.4 formalizes)</code></pre>
+<p><code>zip</code> stopping at the shorter input silently truncates mismatched data — pass <code>strict=True</code> (Python ≥3.10) to make length mismatch a loud error. Loud beats silent, always.</p>
+
+<h2>2. The loop-else: obscure, occasionally perfect</h2>
+<pre><code>for d in range(2, int(n**0.5) + 1):
+    if n % d == 0:
+        print(f"{n} = {d} × {n//d}"); break
+else:                                  # runs ONLY if the loop finished WITHOUT break
+    print(f"{n} is prime")</code></pre>
+<p>Read it as "if the search completed unfound." Two notes: the √n bound is M1 L3 thinking (a factor pair straddles √n); and if the else confuses your team, an explicit <code>found</code> flag is honest too — clarity outranks cleverness.</p>
+
+<h2>3. Never loop on floats</h2>
+<pre><code>t = 0.0
+while t != 0.3:          # NEVER terminates: t hits 0.30000000000000004
+    t += 0.1
+# correct: integer steps, derive the float
+for k in range(3):
+    t = (k + 1) * 0.1    # or better: k * dt with one multiply — no accumulation drift</code></pre>
+<p>This is M1 L8's inexactness plus accumulation error wearing a loop costume — the same disease as the game-time bug (M1 L8 Ex.2). Rule: <strong>loop counters are integers; floats are derived from them</strong>. NumPy's <code>linspace</code> (2.5) exists because even library authors kept getting <code>arange</code>-with-float-step wrong.</p>
+
+<h2>4. Nested-loop cost discipline</h2>
+<p>Before running any nested loop, price it (M1 L3): 1080×1920 pixels = 2.07M inner bodies — fine compiled, ~1–2 s of pure Python overhead at 100 ns each, disastrous ×100 frames. The professional sequence you'll live by from 2.5 onward: <strong>write the honest nested loop first</strong> (clarity, correctness oracle), <strong>then vectorize</strong> (NumPy), <strong>then, if it matters, kernel it</strong> (Module 5). Each stage is checked against the previous — the naive loop is never wasted work; it's your ground truth (the role the CPU matmul plays in 3.9 and 5.11).</p>
+
+<h2>5. Truthiness, precisely</h2>
+<table>
+<tr><th>Falsy</th><th>Truthy</th><th>Trap</th></tr>
+<tr><td><code>0, 0.0, "", [], {}, set(), None</code></td><td>everything else — including <code>"0"</code>, <code>[0]</code>, NaN!</td><td><code>if x:</code> when x can be a legitimate 0</td></tr>
+</table>
+<pre><code>if result:              # WRONG if result can be 0 (a valid count!) — skips it
+if result is not None:  # RIGHT: "did I get a value?" is a None-check, not truthiness
+if rows:                # GOOD: emptiness of a list — idiomatic and clear</code></pre>
+<p>And a NaN reminder from M1 L8 that now executes: <code>float("nan") != float("nan")</code> is True, and <code>bool(float("nan"))</code> is True. Sanitize at ingestion; don't branch on values that might be NaN.</p>
+
+<h2>6. match: the modern multi-way branch</h2>
+<pre><code>match dtype:
+    case "fp32": bytes_per = 4
+    case "fp16" | "bf16": bytes_per = 2       # alternatives with |
+    case "fp8": bytes_per = 1
+    case _: raise ValueError(f"unknown dtype {dtype!r}")</code></pre>
+<p><code>match</code> (Python ≥3.10) is if/elif with pattern power (it can destructure tuples — handy after 2.4). The <code>case _:</code> catch-all that <em>raises</em> is the discipline: an unknown dtype should be a loud error, not a silent default of 4 bytes. Silent defaults in dtype tables have shipped real 2× memory bugs.</p>
+
+<h2>7. Gotchas</h2>
+<div class="gotcha"><strong>The drifting dedent.</strong> A line meant for inside the loop sits one level out (or vice versa) — runs once instead of n times, or n times instead of once. Python can't read your intent; re-indent deliberately after every edit inside blocks.</div>
+<div class="gotcha"><strong><code>range(len(xs))</code> then <code>xs[i]</code>.</strong> Works, but <code>enumerate</code> says what you mean and can't misindex. Reserve index loops for when you genuinely need index arithmetic (like r*W+c).</div>
+<div class="gotcha"><strong>Modifying the loop variable doesn't steer <code>for</code>.</strong> <code>for i in range(10): i += 5</code> — the next iteration re-points i from range regardless. Need to skip? Use <code>while</code>, or restructure.</div>
+<div class="gotcha"><strong>while with no progress.</strong> Every while needs a line whose job is to move the condition toward False; if you can't point at that line, you've written a hang. (Colab stop button; Ctrl+C locally.)</div>
+<div class="gotcha"><strong>Off-by-one at the edges.</strong> "From 1 to n inclusive" is <code>range(1, n+1)</code>. When unsure, test the loop on n=0, n=1, n=2 and count by hand — thirty seconds that prevents the classic fencepost.</div>
+<div class="gotcha"><strong>Floating-point loop conditions.</strong> <code>while t != end</code> or <code>while t &lt; end</code> with float steps: mis-counts iterations across magnitudes (M1 L8 ulps). Integers count; floats are computed.</div>
+
+<h2>Scenario — the binary converter that met its edge cases</h2>
+<p>You turn the while-loop converter from this lesson into a tool for your study group, and the bug reports arrive within the hour. <em>n = 0</em>: your loop body never runs, and the function prints an empty string instead of "0" — the classic "loop handles the general case, forgets the identity case"; fix with an explicit <code>if n == 0: return "0"</code>. <em>n = −5</em>: infinite loop! <code>-5 // 2 = -3</code> (Python floors — M1 L2's table), so remaining never reaches 0; you decide negatives are out of scope and fail loudly: <code>raise ValueError("n must be ≥ 0")</code> — a wrong answer refused beats a wrong answer returned. <em>n = 10**80</em>: works perfectly (Python ints — M1 L1), just 266 digits of output; you add a width check to the pretty-printer instead. Three reports, three distinct lesson-grade fixes: identity case, floor-division semantics, arbitrary precision. Then a friend asks for hex output and you smile: change <code>% 2</code> and <code>// 2</code> to 16 and index <code>"0123456789abcdef"</code> — the algorithm was always base-agnostic (M1 L1 §2). Tools meet users; users find edges; edges teach more than the happy path ever did.</p>
+
+<h2>Practice</h2>
+<details><summary>1. Predict the output: <code>i = 0</code>; <code>while i &lt; 8: i += 3</code>; <code>print(i)</code>. Then: how many times did the body run? Verify with the ceiling formula.</summary><div class="body">Prints 9 (loop exits when i ≥ 8; last add overshoots — while checks BEFORE each pass, not after). Body ran 3 times: ceil(8/3) = (8+2)//3 = 3 ✓. Overshoot on exit is normal; relying on the exact exit value is the bug.</div></details>
+<details><summary>2. Write the "best-so-far" pattern to find the index AND value of the max in <code>times = [2.1, 2.0, 9.7, 2.2]</code> without using max(). Why initialize from the first element rather than 0?</summary><div class="body"><code>best_i, best = 0, times[0]</code> then <code>for i, t in enumerate(times[1:], start=1): if t > best: best_i, best = i, t</code>. Initializing best = 0 breaks on all-negative data (returns index of nothing); the first element is always a valid answer. (Same reason CUDA reductions init from the identity or the first lane, not from a guessed constant — except for max, where -inf IS the identity and also works.)</div></details>
+<details><summary>3. FizzBuzz with a GPU twist, order matters: for i in 1..30 print "warp" if i%32==0? never fires — explain, then print "tile" for multiples of 4, "block" for multiples of 8, both for multiples of 8 only if you test in the RIGHT order. What's the ordering rule?</summary><div class="body">i%32 never hits in 1..30 — know your ranges before writing branches. For 4/8: multiples of 8 are also multiples of 4, so test the MORE SPECIFIC condition first (<code>if i%8==0: "block-tile" elif i%4==0: "tile"</code>) or use independent ifs if labels stack. Rule (from the flow diagram): first True wins → order conditions most-specific first. Classic interview screen, dressed here in warp/block clothing.</div></details>
+<details><summary>4. How many iterations TOTAL does this run: <code>for r in range(1080):</code> <code>for c in range(1920):</code> <code>for ch in range(3): ...</code> — and at 100 ns per inner body, how long? What's the 2.5 preview conclusion?</summary><div class="body">1080·1920·3 = 6 220 800 ≈ 6.2M iterations → ~0.62 s of pure interpreter overhead before ANY useful work (M1 L3 estimation). Per frame. The identical arithmetic as one NumPy expression: ~5–10 ms. Conclusion: pixel loops in Python are for prototyping the logic on a 10×10 crop, then vectorizing.</div></details>
+<details><summary>5. The loop <code>while abs(x_new - x) > 1e-12: ...</code> (Newton's method style) sometimes never exits when x is huge, e.g. x ≈ 1e9. Diagnose with M1 L8 and fix the condition.</summary><div class="body">Near 1e9, fp64's ulp ≈ 2·10⁻⁷ — consecutive iterates can never get within 1e-12 of each other; the absolute tolerance is below representable spacing → infinite loop. Fix: relative tolerance — <code>while abs(x_new - x) > 1e-12 * max(1.0, abs(x)):</code> (atol+rtol shape, M1 L8 §6). Every convergence loop you ever write gets this treatment; iteration caps (<code>for _ in range(200)</code> + break-on-converge) are the belt to this suspender.</div></details>
+<details><summary>6. Using the loop-else, write a "first block with a free slot" search over <code>free = [0, 0, 3, 1]</code> (free slots per block): print the first index with free[i] &gt; 0, or "grid full" if none. Then restate why the else isn't attached to the if.</summary><div class="body"><code>for i, f in enumerate(free):</code> / <code>if f > 0: print(f"block {i}"); break</code> / <code>else: print("grid full")</code> — prints "block 2". The else belongs to the FOR (aligned with it) and runs only when the loop exhausts without break — "search completed unfound." Indentation decides which construct owns the else; mis-indenting it under the if changes the meaning entirely (the drifting-dedent gotcha with teeth).</div></details>
+<details><summary>7. Design: write the control-flow skeleton (pseudo-Python, ~12 lines) of a benchmark harness per M1 L7's ritual: warmup runs (discarded), N timed runs, median + spread reported, and a repeatable-outlier alarm if any run exceeds 3× the median after warmup. Name the M1 lessons each part encodes.</summary><div class="body">
+<pre><code>times = []
+for _ in range(3):  run_kernel()              # warmup: JIT/caches/clocks (M1 L7)
+for i in range(N):                            # N ≥ 20 (M1 L7)
+    t = time_one_run()
+    times.append(t)
+times.sort()
+med = times[N//2]                             # median, not mean (M1 L7: outliers)
+spread = times[3*N//4] - times[N//4]          # IQR as honest spread
+outliers = 0
+for t in times:
+    if t > 3 * med: outliers += 1             # count pattern
+print(f"median {med:.3f} ms, IQR {spread:.3f}")
+if outliers: print(f"⚠ {outliers} runs &gt; 3× median — investigate, don't delete (M1 L7)")</code></pre>
+<p>Every line is a pattern from this lesson wrapped around an M1 statistic. In 2.6 this grows asserts and tests; in 5.10 it wraps real CUDA events. You will still be using this skeleton in ten years.</p>
+</div></details>
+
+<div class="pager">
+  <a href="lesson-01.html">← Your first program</a>
+  <a href="lesson-03.html">Next: Functions & scope →</a>
+</div>
+<div class="footer">GPU Mastery · Module 2 · Lesson 2 — works offline · progress saved in your browser</div>
+</div>
+<script src="../assets/diagrams2.js"></script>
+<script src="../assets/app.js"></script>
+</body>
+</html>

@@ -1,0 +1,205 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>B7 Clusters — SLURM, Modules, Apptainer — GPU Mastery</title>
+<link rel="stylesheet" href="../assets/style.css">
+</head>
+<body data-lesson="bl7">
+<nav><div class="inner">
+  <a class="logo" href="../index.html">GPU<span>Mastery</span></a>
+  <a class="item" href="../index.html">Home</a>
+  <a class="item on" href="../curriculum.html">Curriculum</a>
+  <a class="item" href="../labs.html">Labs</a>
+  <a class="item" href="../setup.html">Lab setup</a>
+  <a class="item" href="../prompt.html">Generator prompt</a>
+</div></nav>
+<div class="wrap">
+
+<div class="lesson-top">
+  <div><span class="badge">Track B · Lesson 7</span><span class="badge dim">≈ 2.5 h</span></div>
+  <button id="donebtn" class="donebtn">Mark lesson complete</button>
+</div>
+<h1>Clusters — the etiquette, economics, and survival kit of shared supercomputers</h1>
+<p class="lead">A cluster is a shared machine with a queue, a filesystem hierarchy, and a walltime guillotine. The skills are unglamorous and career-critical: ask the scheduler precisely, freeze your environment reproducibly, write to the right filesystem, and checkpoint on a formula instead of a feeling — because at 512 ranks × 40 hours, failure isn't a risk, it's a schedule.</p>
+
+<h2>Concept</h2>
+
+<h3>A job's life</h3>
+<div class="diagram" data-diagram="b7-slurm" data-caption="sbatch declares what you need; the queue prices your ask; the allocation runs your ranks; results land on scratch. Every line of the ask is an economics decision."></div>
+<pre><code>#!/bin/bash
+#SBATCH --job-name=heat2d --nodes=2 --ntasks-per-node=4    # 8 ranks (B5)
+#SBATCH --gres=gpu:4 --cpus-per-task=8                     # 4 GPUs/node + CPU
+#SBATCH --time=04:00:00 --partition=gpu                    # the guillotine
+#SBATCH --output=%x_%j.out                                  # logs by job id
+module load nvhpc/25.x openmpi/5.0-cuda                     # the SITE's stack
+srun ./heat2d --config run.yaml                             # srun places ranks
+# srun vs mpirun: srun IS slurm's launcher — it knows the allocation's
+# topology (B5's placement flags come from here); prefer it on SLURM sites.
+# job ARRAYS (#SBATCH --array=0-99) = 100 jobs from one script, indexed by
+# $SLURM_ARRAY_TASK_ID — B4's seed sweeps and B10's scaling studies in one
+# line, and the scheduler backfills them into gaps a monolith can't fit.</code></pre>
+
+<h3>Queue economics: ask precisely</h3>
+<pre><code>the scheduler BACKFILLS: small/short jobs slip into gaps while big jobs wait
+  → overask time 7d "to be safe" = wait DAYS for a slot a 4 h ask gets in
+    minutes (and sites bill/prioritize on ASKED, not used)
+  → underask = the guillotine at t=walltime, mid-run (checkpoint or die)
+the ask-precision loop: measure a pilot (1 node, 30 min) → extrapolate with
+  B5's workbook → ask 1.3× the estimate → refine per run. Requesting
+  resources is ESTIMATION, a skill this course has drilled since M1 L7 —
+  the queue just puts a price on being bad at it.</code></pre>
+
+<h3>Environments: modules vs Apptainer</h3>
+<div class="diagram" data-diagram="b7-modules" data-caption="Modules = the site's curated stack (fast, fabric-matched, changes under you). Apptainer = your frozen bytes (portable, reproducible, still borrows the host's MPI/driver)."></div>
+<pre><code>module load cuda/13.x openmpi/5.0-cuda    # site-tuned (UCX built for THIS
+                                           # fabric — B5 quiz 2's fix lives here)
+apptainer exec --nv container.sif ./app    # YOUR stack, byte-frozen (.sif),
+                                           # --nv injects the host driver
+                                           # (A10's container law, HPC spelling)
+the hybrid truth of 2026: containers for YOUR dependencies (python stacks,
+  libraries), site modules for the FABRIC layer (MPI compiled against the
+  interconnect — a containerized generic MPI can silently lose GPUDirect:
+  B5's staging trap in a .sif). B8's reproducibility wants BOTH recorded:
+  container hash + module list = the methods section's environment spec.</code></pre>
+
+<h3>Filesystems and the checkpoint formula</h3>
+<div class="diagram" data-diagram="b7-checkpoint" data-caption="Checkpoint on Young's formula, trap SIGTERM, restart from the last good state. Preemption stops being a threat and becomes a discount."></div>
+<pre><code>filesystem etiquette (the unwritten exam every new user fails once):
+  $HOME     tiny, backed up, NEVER for job I/O (quota'd; hammering it
+            throttles EVERYONE — the login-node corollary: no compute there)
+  $SCRATCH  fast parallel FS (Lustre-class): job I/O lives here; PURGED on
+            a schedule — move results out or lose them
+  node-local NVMe: fastest, dies with the job — staging + checkpoints' first hop
+checkpointing (b7-checkpoint): interval* = √(2 · t_write · MTBF)  (Young)
+  e.g. 90 s writes, ~133 h effective MTBF → ckpt every ~2.6 h → total fault
+  tax ≈ 4% vs 12 h expected loss without (B5 P5's arithmetic — an OPTIMIZATION,
+  not paranoia). Trap SIGTERM (SLURM's 60-ish-second warning before the
+  guillotine): write the final checkpoint, exit clean, requeue.</code></pre>
+
+<h2>Worked example</h2>
+<div class="card">
+<p><strong>Task:</strong> The complete production job script for B10's scaling study — every line annotated with the incident it prevents. This artifact ships in the capstone repo.</p>
+<pre><code>#SBATCH --array=0-4                        # 5 scaling points, one script (backfill-friendly)
+#SBATCH --time=02:00:00                    # pilot-measured 65 min × 1.3 + ckpt margin
+#SBATCH --signal=B:TERM@120                # SIGTERM 120 s before the wall → trap fires
+module load nvhpc openmpi/5.0-cuda &&  module list &gt; env_${SLURM_JOB_ID}.txt
+apptainer --version &gt;&gt; env_…               # environment RECORDED per-job (B8's contract)
+export RANKS=$((2**SLURM_ARRAY_TASK_ID))   # 1,2,4,8,16-node points from the array index
+trap 'checkpoint_now; exit 0' TERM         # the guillotine becomes a save point
+srun ./heat2d --restart-if-exists \        # idempotent start: crash-safe by DESIGN
+     --ckpt-dir $SCRATCH/ckpt_${SLURM_ARRAY_JOB_ID} \
+     --ckpt-every 9300                     # Young's number, not a vibe
+rsync results → project space              # scratch purges; papers don't forgive
+# the preflight (B1 P6 + B5 P6) runs INSIDE the job before the solver:
+# CFL audit, device-vs-host bandwidth pair, binding report — 90 seconds that
+# converts "the run failed at hour 3" into "the job refused to start, loudly."</code></pre>
+<p><strong>What to internalize:</strong> every line answers a specific disaster from this track — the guillotine (trap+signal), the purge (rsync), the staging trap (module choice, recorded), the estimation game (pilot×1.3), fault math (Young's 9300). A job script is not boilerplate; it's the operational half of the methods section, and reviewers of B10's report (and interviewers) read it exactly that way.</p>
+</div>
+
+<h2>Key points</h2>
+<ul class="keypoints">
+<li>Ask the scheduler precisely: backfill rewards modest, accurate requests (pilot → extrapolate → 1.3×) and punishes defensive overasking with days of queue time.</li>
+<li>Job arrays turn sweeps (seeds, scaling points, parameters) into one indexed script the scheduler can backfill — the default shape for B4/B10-style studies.</li>
+<li>Environments are recorded, not remembered: container hash + module list per job (the site's fabric-matched MPI stays a module; your dependency stack rides the .sif — B5's staging trap hides in generic containerized MPI).</li>
+<li>Filesystem tiers are etiquette AND performance: job I/O on scratch (purged — rsync out), checkpoints staged via node-local NVMe, $HOME and login nodes sacred.</li>
+<li>Checkpoint on Young's formula (√(2·t_write·MTBF)) with a SIGTERM trap — ~4% fault tax versus double-digit expected loss, and preemptible queues become discounted compute.</li>
+<li>The in-job preflight (CFL audit, bandwidth pair, binding report) converts hour-3 failures into second-30 refusals — B1/B5's rituals, wired into the script itself.</li>
+</ul>
+
+<h2>Quiz</h2>
+<div class="quiz">
+  <div class="q">1. Two users submit equivalent 16-GPU studies. User A: one job, --time=7-00:00:00 ("covers everything"), all 25 configurations sequentially inside. User B: a 25-element array, --time=03:30:00 each, from a pilot. A waits 6 days in queue and loses everything at a node failure on day 5; B finishes in 31 hours wall-clock including queue. Decompose B's advantage into the three scheduler/fault mechanisms at work.</div>
+  <button class="opt">B got lucky with queue timing</button>
+  <button class="opt" data-c="1">(1) Backfill geometry: 3.5 h × 16-GPU rectangles slot into the schedule's gaps around big reservations; a 7-DAY rectangle must wait for a contiguous week-long hole — the queue penalizes the SHAPE of the ask, not just its size. (2) Fault blast radius: A's monolith couples 25 configs to one node's MTBF — day-5 failure kills 100+ GPU-days; B's failure domain is ONE 3.5 h element, auto-requeued (--requeue or resubmit): the array is checkpointing at the JOB level. (3) Parallelism the monolith forfeited: B's elements run CONCURRENTLY as slots open (25 × 3.5 h of work in ~31 h wall) while A serialized by construction. Same science, same total GPU-hours asked — the difference is entirely in how schedulers price shape, couple failures, and exploit independence (B4's embarrassing parallelism, applied to the QUEUE itself)</button>
+  <button class="opt">A's job was deprioritized for being greedy — complain to admins</button>
+  <button class="opt">B used a premium partition</button>
+  <div class="expl">The three mechanisms are independent and compounding — and none is luck. "Structure work as small, restartable, independent units and the queue becomes your ally" is the entire operational philosophy of shared clusters; it's also, not coincidentally, the checkpoint philosophy (bounded loss units) and the B4 philosophy (independent samples) — the same design instinct at three scales. Option 3 anthropomorphizes a bin-packing algorithm; the algorithm just packs rectangles.</div>
+</div>
+<div class="quiz">
+  <div class="q">2. A postdoc's runs are mysteriously 3× slower than last month, only during business hours, and only for jobs that write per-step diagnostics. I/O shows each step appending 40 KB × 512 ranks to 512 separate files… on $HOME. Explain the full mechanism (why slow, why business hours, why it throttles OTHERS), and design the correct I/O architecture in three moves.</div>
+  <button class="opt">$HOME's disk is old — request an upgrade</button>
+  <button class="opt" data-c="1">Mechanism: $HOME is a small shared NFS-class server (metadata-weak, everyone's dotfiles and editors live there) — 512 ranks × per-step small appends = a metadata/IOPS storm (tolls, not bandwidth: 4.6's law on a filesystem), saturating the server. Business hours: contention with every logged-in human's interactive I/O — the postdoc's job and the site's PRODUCTIVITY throttle each other (this is how you get an email from admins, and why it's etiquette, not just performance). Architecture, three moves: (1) diagnostics to $SCRATCH (parallel FS built for exactly this) or better, node-local NVMe with end-of-job collation; (2) AGGREGATE: one file per node (or MPI-IO/HDF5 collective writes) instead of 512 file streams — the message-aggregation law (B5 P4) applied to storage tolls; (3) reduce frequency by design: per-step 40 KB diagnostics are usually a debugging habit — buffer in memory, flush every N steps (5.9's logging lesson, filesystem edition). Result: I/O time vanishes from the profile AND the admin email never arrives</button>
+  <button class="opt">The network is congested — run at night</button>
+  <button class="opt">512 files exceed a file-handle limit</button>
+  <div class="expl">Filesystem incidents are toll incidents: small-file metadata storms are 4.6's fixed-cost lesson wearing POSIX clothes, and the fixes are the same three levers as always — right tier, aggregation, frequency. The business-hours signature (contention with humans) is the tell that distinguishes shared-infrastructure problems from code problems; recognizing shared-fate signatures is the cluster-citizenship skill this lesson exists to install. Run-at-night (option 3) treats the symptom while remaining the problem.</div>
+</div>
+
+<h2>Exercises</h2>
+<details><summary>Exercise 1 — Write the full B10 job script (worked example as template) for an imagined-or-real site, then TEST it locally: bash-mock sbatch/srun (a 10-line shim that prints placements and runs mpirun -n), verify the SIGTERM trap actually checkpoints (kill -TERM the process group; assert the restart file exists and the rerun RESUMES — the idempotency test), and verify env recording lands per-job. The trap test is the deliverable: an untested trap is a wish.</summary><div class="body">
+<pre><code>expected: `kill -TERM` → "checkpoint_now" fires → ckpt file written → clean
+exit 0; rerun with --restart-if-exists → log shows "resuming from step N"
+and the B3 conservation ledger CONTINUES its trajectory (a restart that
+resets the ledger is a silent restart bug — the fixture catches it: total
+heat must be continuous across the restart boundary). Most checkpoint bugs
+live in restart, not save — test the round trip, always.</code></pre>
+</div></details>
+<details><summary>Exercise 2 — The Young's-formula workbook: for (a) B10's study (ckpt 90 s, MTBF-per-job 133 h), (b) a 2048-rank hero run (ckpt 12 min — big state, MTBF 18 h — big fleet), (c) a preemptible-queue job (ckpt 40 s, "MTBF" = median preemption 45 min): compute interval*, overhead %, expected-loss %, and the verdict sentence. Then invert (c): at what preemption rate does the discount queue stop being worth a 40% price cut?</summary><div class="body">
+<pre><code>(a) √(2·90·4.8e5) ≈ 2.6 h → tax ≈ 1% + 3% ≈ 4% ✓ (B5 P5's number)
+(b) √(2·720·64800) ≈ 2.7 h → overhead 720/9660 ≈ 7.5% + loss ≈ 7.5% ≈ 15%
+    tax — hero runs pay real fault rent: shrink t_write (NVMe staging,
+    async checkpoints) before shrinking ambition
+(c) √(2·40·2700) ≈ 465 s ≈ 7.8 min → overhead ~9% + loss ~9% ≈ 18% tax →
+    effective cost 1.18× compute for 0.6× price = 0.71× net: WORTH IT.
+    Inversion: tax must stay &lt; 40% → interval math → median preemption
+    &gt; ~8–10 min keeps the discount rational; a queue preempting every
+    2 min is a trap priced as a gift.</code></pre>
+<p>The workbook's habit: fault-tolerance parameters are OPTIMIZED, not vibed — and "is the cheap queue actually cheap" is a two-line calculation that procurement meetings routinely skip (4.6's economics, again, at the invoice layer).</p>
+</div></details>
+
+<hr>
+<h1>Go deeper — cluster craft</h1>
+
+<h2>1. Checkpoint engineering (beyond the formula)</h2>
+<pre><code>what to save: the MINIMAL restart state (fields + step counter + RNG counters
+  (B4's Philox integers — three numbers make stochastic runs resumable!) +
+  ledger accumulators) — NOT derived scratch (recompute is cheaper than I/O)
+async/staged checkpoints: write to node-local NVMe (seconds), drain to
+  scratch in the background (5.9's overlap, storage edition) — t_write in
+  Young's formula becomes the NVMe number: interval shrinks, tax shrinks
+restart correctness is a FIXTURE: the Ex.1 round-trip (ledger continuity,
+  bitwise-if-deterministic) runs in CI with a mid-run kill — because the
+  restart path is code that only executes during disasters, i.e., the
+  worst possible time to discover its bugs (5.4's watchdog philosophy).</code></pre>
+
+<h2>2. Login nodes, admins, and the social layer</h2>
+<pre><code>login nodes: editing, compiling (small), submitting — NEVER computing or
+  hammering I/O (the shared foyer, not your office)
+interactive debugging: salloc/srun --pty for a real allocation — the
+  legitimate way to get a shell on compute (B5's rituals run THERE)
+admins: read the site docs FIRST (each site's quirks are documented by
+  people tired of the same ticket), file tickets with job IDs + minimal
+  repros (the 5.4 bug-report discipline — admins triage like engineers),
+  and know your allocation's accounting (GPU-hours are grant money:
+  the B5 workbook is also your budget spreadsheet).</code></pre>
+
+<h2>3. Gotchas</h2>
+<div class="gotcha"><strong>Untested SIGTERM traps.</strong> Ex.1's law: a trap that never ran in anger is a wish. Kill your own job on purpose, in staging, quarterly.</div>
+<div class="gotcha"><strong>Scratch purge surprise.</strong> "The 60-day purge deleted my only copy" is a rite of passage that costs a paper. rsync-to-project-space is part of the JOB, not a human's memory (worked example's last line).</div>
+<div class="gotcha"><strong>Module drift between submission and execution.</strong> Default modules change under you (B6 P3's compiler weather) — load EXPLICIT versions and record `module list` per job; "it worked in March" needs March's environment file.</div>
+<div class="gotcha"><strong>Containerized MPI losing the fabric.</strong> A generic .sif OpenMPI stages through host memory (B5 quiz 2 inside a container) — bind the site's MPI/UCX in, or hybrid module+container; verify with the bandwidth pair INSIDE the container.</div>
+<div class="gotcha"><strong>Per-rank small files.</strong> Quiz 2's storm. One file per node minimum; collective I/O (HDF5/MPI-IO) for real codes — and diagnostics frequency is a design decision, not a printf habit.</div>
+<div class="gotcha"><strong>Zombie GPU memory across job steps.</strong> A crashed step's processes can linger holding GPU memory within your allocation — srun steps inherit the mess ("OOM at startup on an empty node"): nvidia-smi in the preflight, and srun --kill-on-bad-exit for step hygiene.</div>
+
+<h2>Scenario — the allocation that almost died of politeness</h2>
+<p>A new group wins 200k GPU-hours — their first big allocation — and nearly wastes it being timid. Month one: jobs submitted with 7-day walltimes "to be safe" (queue waits: days — quiz 1's rectangle problem), everything serialized in monoliths "to keep it simple" (one node failure eats a week), results accumulating on scratch "we'll move them later" (the 60-day purge is quietly approaching), and a graduate student running "quick tests" on the login node until the admin email arrives (the whole group's SSH slows; reputations are made of such emails). Month two, after a B-track-literate postdoc runs an internal workshop on exactly this lesson: pilots + 1.3× asks (queue waits drop to minutes), everything arrays (a node failure now costs one 3-hour element), Young's-formula checkpoints with TESTED traps (a preemptible-queue experiment cuts their effective GPU-hour price 30% — Ex.2c's arithmetic, banked), per-node aggregated I/O with end-of-job rsync (the purge takes nothing), and the in-job preflight (two config mistakes caught at second-30 instead of hour-3). The allocation report at year's end: 94% of GPU-hours converted to published science — the site liaison's comment: "most first allocations convert 60%." The delta was not talent or hardware; it was OPERATIONS — this lesson's checklist, applied for one month by one postdoc who then, in the tradition of such people, made it the group's onboarding doc. Clusters don't reward brilliance; they reward citizens with checklists.</p>
+
+<h2>Practice</h2>
+<details><summary>1. Decode and critique this ask: <code>#SBATCH --nodes=8 --ntasks=8 --gres=gpu:1 --time=48:00:00 --mem=0</code> for a job whose pilot showed 4 ranks/node × 4 GPUs/node saturating in 5 h. List every mismatch and its cost.</summary><div class="body">(1) --ntasks=8 across 8 nodes = 1 rank/node using 1 GPU while 3 idle per node (gotcha: paying for 32 GPUs, using 8 — 4× waste on the grant's meter); should be --ntasks-per-node=4 --gres=gpu:4. (2) 48 h ask for 5 h work: queue shape penalty (quiz 1) + some sites bill by ask. (3) --mem=0 (all node memory) forbids sharing on shareable partitions — another shape penalty. (4) 8 nodes for what pilots at 2 nodes × 4 GPUs: strong-scaling cliff unexamined (B5's workbook first!). Corrected ask: --nodes=2 --ntasks-per-node=4 --gres=gpu:4 --time=07:00:00 — queue in minutes, bill ÷4-plus, same science. Reading an #SBATCH block like a bill is a five-minute skill that pays for itself on the first job.</div></details>
+<details><summary>2. Design the checkpoint STATE for B4's Monte Carlo engine (quiz-1-of-B4's fleet) so a preempted job resumes with zero statistical damage: what's saved, what's recomputed, and the one field whose omission silently corrupts the error bars.</summary><div class="body">Save: per-worker Philox (seed, subsequence, offset) counters — three integers/worker make the stream resumable EXACTLY (B4's theorem doing fault-tolerance duty); the running (Σ, Σ², N) tallies in fp64; the config hash. Recompute: nothing — paths are stateless given the counters. The silently-corrupting omission: the OFFSET (consumed-count) — resuming a stream from offset 0 REPLAYS samples already tallied: duplicated draws that variance can't see → bars too tight (quiz-1-of-B4's fictional confidence, now caused by the CHECKPOINT). The fixture: kill-and-resume must produce bitwise-identical (Σ, Σ², N) to an unkilled run at equal total N — Ex.1's round-trip law, statistical edition. Checkpointing randomness = checkpointing counters; anything else is re-rolling dice you already counted.</div></details>
+<details><summary>3. Your job needs 40 min of GPU work but 25 min of pre/post CPU processing (mesh build, output collation). Three architectures: one 65-min GPU-partition job; two chained jobs (CPU partition → GPU partition, with a dependency); GPU job + login-node processing. Price each in GPU-hour billing, queue behavior, and etiquette — and name the SLURM feature the chained design uses.</summary><div class="body">Monolith: bills 65 min × N GPUs for 40 min of GPU use (38% waste on the meter); simple but expensive at scale. Chained: --dependency=afterok:JOBID — CPU stages run on cheap CPU partitions, GPU job asks exactly 45 min: minimal GPU bill, two short rectangles backfill better than one long one (quiz 1); cost: dependency plumbing + intermediate state on scratch. Login-node processing: FREE and FORBIDDEN for the 25-min collation (quiz 2's etiquette — small edits yes, mesh builds no). Verdict: chain for production sweeps, monolith for one-offs where human time outweighs 38% of a small bill — and the meta-lesson: heterogeneous pipelines get heterogeneous ALLOCATIONS, which is the scheduler's whole vocabulary (arrays, dependencies, partitions) used as intended.</div></details>
+<details><summary>4. The site offers: standard queue ($1/GPU-h equivalent, no preemption), preempt queue ($0.55, median TTP 90 min), and a 4-node "debug" queue (free, 30 min cap). Design the B10 campaign's queue strategy — which work goes where, with the Ex.2-style arithmetic for the preempt decision.</summary><div class="body">Debug queue: ALL preflights, trap tests (Ex.1's kill drill!), single-step correctness runs, -Minfo/binding audits — the entire fixture layer, free (30 min is a fortune for fixtures). Preempt queue: the scaling sweep's production elements — with ckpt 60 s and TTP 5400 s: interval* = √(2·60·5400) ≈ 13.4 min, tax ≈ 60/805 + 805/(2·5400) ≈ 7.5+7.5 ≈ 15% → effective $0.55×1.15 = $0.63 vs $1.00: 37% saved, banked (Ex.2's inversion says TTP down to ~15 min still breaks even). Standard queue: only the two hero-scale points whose restart state is huge (checkpoint cost inverts the math — run Ex.2b's numbers per point) and anything with external deadlines. The strategy in one line: fixtures free, bulk discounted, heroes insured — a portfolio, allocated by arithmetic.</div></details>
+<details><summary>5. Write the "environment forensics" procedure for reproducing a March result in July after the site upgraded modules (B6 P3's weather at site scale): the four artifacts March-you must have left, the reconstruction order, and the fallback when the old module truly no longer exists.</summary><div class="body">Artifacts (all auto-recorded by the worked example's script): env_JOBID.txt (module list, exact versions), the container hash (dependency stack frozen), the git commit + build flags (B8's numerics flags especially — the Kahan-deleting -ffast-math!), and the job script itself (resource shape affects results via rank counts → reduction orders, b8-repro). Reconstruction: container first (bytes don't drift), then request the archived module (sites keep old toolchains longer than defaults advertise — ticket with the env file), rebuild with recorded flags, re-run the FIXTURE suite before the science (fixtures green = environment equivalent, the b8-repro rung 3 test). Fallback when the module is gone: rebuild the toolchain inside a container from the recorded versions, accept rung-3 (statistical) rather than rung-1 (bitwise) reproduction, and DOCUMENT the substitution — which is exactly what the methods-section-as-contract anticipated (B8). Reproducibility is archaeology made boring by good record-keeping; the records cost one script line each.</div></details>
+<details><summary>6. Translate quiz 2's I/O storm into a design rule-set for B10's diagnostics: what gets written per step, per N steps, per job — at which tier, in what aggregation — such that I/O never appears in the profile. Include the ledger's special status.</summary><div class="body">Per step: NOTHING to disk — ledgers (conservation, residuals) accumulate in device/host memory (fp64 — B8): scalars are free in RAM and poison as 512-rank file appends (quiz 2). Per N=100 steps: ledgers + a few probe-point values appended to ONE per-JOB file on scratch (rank 0 gathers via MPI — B5's collectives doing bookkeeping duty; 40 KB × 512 becomes 200 B × 1). Per job/checkpoint interval: field snapshots via collective HDF5 (one file, parallel writes) staged through node NVMe. The ledger's special status: it's the CORRECTNESS instrument (B3's fixtures) — it must survive crashes, so it rides IN the checkpoint state (P2's lesson), not just the diagnostics stream. End state: the profiler shows compute and halo lanes only — I/O engineered to invisibility, which is the only acceptable place for it in a scaling study (any I/O in the timing window contaminates the B10 curves).</div></details>
+<details><summary>7. Interview closer: "You have 200k GPU-hours on a shared cluster for a scaling study — how do you run it?" — 90 seconds: the ask-precision loop, arrays as fault+backfill design, environment recording, filesystem/I/O architecture, Young's-formula checkpointing with tested traps, queue portfolio economics, and the citizenship line that makes admins allies.</summary><div class="body">Skeleton: "Pilot first: 1 node, 30 min, measured — every ask is that pilot × the B5 scaling model × 1.3, because the queue prices the SHAPE of requests: modest rectangles backfill in minutes, defensive week-long asks wait days [quiz 1]. All sweeps are job arrays — each element a 3-hour restartable unit, so a node failure costs one element, not a campaign, and the scheduler packs them into gaps [quiz 1's three mechanisms]. Every job records its environment — module list, container hash, flags — because March's result needs March's toolchain, and numerics flags are part of the physics [P5, B8]. I/O is architected, not habitual: ledgers in memory, aggregated per-job appends on scratch, collective HDF5 snapshots via node NVMe, rsync to project space in-job — small-file storms on shared filesystems are how you throttle a site and meet its admins [quiz 2]. Checkpoints run on Young's formula — interval = √(2·write·MTBF), a 4%-class tax versus double-digit expected losses — with SIGTERM traps that I test by killing my own jobs in staging, because restart code that's never run is a wish [Ex.1/2]. Queues are a portfolio: fixtures on the free debug queue, bulk on preempt at an arithmetic-verified discount, heroes insured on standard [P4]. And the citizenship layer: login nodes stay sacred, tickets carry job IDs and minimal repros — on shared machines, your reputation is infrastructure too [scenario]." That last sentence, in my experience of these rooms, is the one that gets remembered.</div></details>
+
+<div class="pager">
+  <a href="lesson-06.html">← OpenMP & OpenACC</a>
+  <a href="lesson-08.html">Next: Precision & reproducibility →</a>
+</div>
+<div class="footer">GPU Mastery · Track B · Lesson 7 — works offline · progress saved in your browser</div>
+</div>
+<script src="../assets/diagramsB.js"></script>
+<script src="../assets/app.js"></script>
+</body>
+</html>

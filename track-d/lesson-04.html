@@ -1,0 +1,179 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>D4 OpenCL Today — GPU Mastery</title>
+<link rel="stylesheet" href="../assets/style.css">
+</head>
+<body data-lesson="dl4">
+<nav><div class="inner">
+  <a class="logo" href="../index.html">GPU<span>Mastery</span></a>
+  <a class="item" href="../index.html">Home</a>
+  <a class="item on" href="../curriculum.html">Curriculum</a>
+  <a class="item" href="../labs.html">Labs</a>
+  <a class="item" href="../setup.html">Lab setup</a>
+  <a class="item" href="../prompt.html">Generator prompt</a>
+</div></nav>
+<div class="wrap">
+
+<div class="lesson-top">
+  <div><span class="badge">Track D · Lesson 4</span><span class="badge dim">≈ 2.5 h</span></div>
+  <button id="donebtn" class="donebtn">Mark lesson complete</button>
+</div>
+<h1>OpenCL Today — the standard that lost the war and won the long tail</h1>
+<p class="lead">OpenCL was the first serious "write once, run on any accelerator" standard — years before HIP, SYCL, or WebGPU. It lost the desktop and datacenter to CUDA anyway, and the reason is one of the most useful engineering-history lessons you'll get: the better ecosystem beats the better spec, every time. But "lost the war" isn't "died" — OpenCL runs the embedded and FPGA long tail, and via SPIR-V it quietly became the plumbing under SYCL. Today: the boilerplate you should see exactly once, why it lost, and where it's still the only answer.</p>
+
+<h2>Concept</h2>
+
+<h3>The boilerplate, once — and the kernel is a string</h3>
+<div class="diagram" data-diagram="d4-anatomy" data-caption="OpenCL's eight setup calls, culminating in clBuildProgram — which compiles the kernel from a STRING at runtime. Verbose, explicit, and portable to anything with a driver."></div>
+<p>Here is a complete OpenCL saxpy (via Python's pyopencl, so the ceremony is visible without C's extra noise). Read it for one feature above all: the kernel is a <em>string</em>, compiled while your program runs.</p>
+<pre><code>ctx = cl.create_some_context()          # picks a platform + device at RUNTIME
+q   = cl.CommandQueue(ctx)              # the work stream (5.9)
+dx  = cl.Buffer(ctx, READ_ONLY  | COPY_HOST_PTR, hostbuf=x)   # cl_mem — explicit
+dy  = cl.Buffer(ctx, READ_WRITE | COPY_HOST_PTR, hostbuf=y)
+src = """
+__kernel void saxpy(const int n, const float a,
+                    __global const float* x, __global float* y) {
+    int i = get_global_id(0);          // OpenCL's global thread index (5.2)
+    if (i &lt; n) y[i] = a*x[i] + y[i];   // the guard (5.2), same as everywhere
+}"""
+prg = cl.Program(ctx, src).build()     // ← clBuildProgram: COMPILES THE STRING NOW
+prg.saxpy(q, (n,), None, np.int32(n), np.float32(2.0), dx, dy)   // enqueue NDRange
+cl.enqueue_copy(q, out, dy); q.finish()   // D2H copy + sync</code></pre>
+<p>The kernel body is completely familiar — <code>get_global_id(0)</code> is the 5.2 identity, the <code>if (i &lt; n)</code> is the 5.2 guard, <code>__global</code> and <code>__kernel</code> are D1's translation-table renames. What's different is everything around it: you enumerate a platform, pick a device, make a context and a queue, allocate <code>cl_mem</code> buffers by hand, and — the signature move — hand the runtime your kernel as source text that <code>clBuildProgram</code> compiles on the spot. That's 3.1's compiler pipeline, live, inside your running program. It's verbose (eight-ish setup calls where CUDA had one launch), and that verbosity is the price of a specific superpower, unpacked in the worked example.</p>
+
+<h3>Why OpenCL lost: ecosystem, not ergonomics</h3>
+<div class="diagram" data-diagram="d4-history" data-caption="OpenCL lost the desktop/datacenter on ecosystem — no cuBLAS peer, no Nsight, late buggy vendor drivers — not because the programming model was worse. The moral outlives OpenCL."></div>
+<p>It's tempting to assume OpenCL lost because it was harder to use. That's mostly wrong, and getting it right is the point of the lesson. The programming model is roughly CUDA's in a trench coat — same grids, same local memory, same barriers. What CUDA had and OpenCL never assembled was the <em>ecosystem</em>: cuBLAS/cuDNN/cuFFT with no OpenCL peer of comparable quality (5.11's library-first doctrine had nothing to reach for); Nsight and <code>ncu</code> profilers with no equivalent (5.10's rituals had no tools); one vendor shipping a coherent, debugged, well-documented stack while OpenCL's implementations arrived late, buggy, and inconsistent across vendors. And the cruel twist: even when you wrote portable OpenCL, the <em>performance</em>-tuned version diverged per vendor anyway (the 90/10 tax, D1), so the portability promise was thinner than it looked. Developers went where the libraries, tools, and docs were. The moral generalizes far past GPUs: a standard is a spec, but a platform is a spec <em>plus</em> libraries plus tools plus docs plus reliability — and the platform wins.</p>
+
+<h3>Where it still wins, and SPIR-V's second life</h3>
+<p>OpenCL's retreat from the datacenter left it dominant exactly where CUDA can't go: the breadth of the device long tail. Mobile GPUs, DSPs, embedded SoCs, and FPGAs (Intel and AMD toolchains compile OpenCL to gates) overwhelmingly speak OpenCL, because it's the one open standard their vendors implement. If your target is a phone's GPU or an FPGA accelerator, OpenCL isn't a legacy choice — it's the choice.</p>
+<pre><code>OpenCL's living relevance in 2026:
+  · widest device reach of any GPU API — mobile, embedded, DSP, FPGA
+  · OpenCL 3.1 (IWOCL 2026) makes SPIR-V INGESTION MANDATORY in core
+  · SPIR-V is now the natural target for higher-level tools: SYCL (D3) and
+    chipStar compile TO OpenCL/SPIR-V — so OpenCL became infrastructure
+  · layered implementations run OpenCL OVER Vulkan or Direct3D 12
+  · (OpenCL 3.0 made 2.0 features like SVM OPTIONAL, to fit constrained devices)</code></pre>
+<p>The SPIR-V story is the quiet comeback. SPIR-V is a portable intermediate representation, and by making its ingestion mandatory, OpenCL 3.1 turned itself into a reliable <em>backend</em> for the higher rungs of D1's ladder — when you write SYCL (D3), there's a decent chance it's flowing through SPIR-V into an OpenCL runtime underneath. So the API most people call "the one that lost" is now load-bearing infrastructure for the ones that won. That's a more interesting fate than death.</p>
+
+<h2>Worked example</h2>
+<div class="card">
+<p><strong>Task:</strong> Justify OpenCL's boilerplate. The eight setup calls look like pure overhead next to CUDA's single launch — so what, exactly, do they buy? Prediction first: does the boilerplate grow with kernel complexity, and what capability does the runtime <code>clBuildProgram</code> step enable that CUDA's ahead-of-time compile does not?</p>
+<pre><code>Prediction: the boilerplate is FIXED cost (same 8 calls for a 5-line kernel or a
+  500-line one), and runtime compilation buys INSTALL-TIME device portability.
+Trace the payoff:
+  CUDA (5.1): nvcc compiles kernels AHEAD of time into a fatbinary for specific
+     archs (sm_75, sm_90...). New GPU not in the fatbin? JIT from PTX or rebuild.
+     Non-NVIDIA GPU? Impossible — the binary speaks only NVIDIA.
+  OpenCL: the kernel ships as SOURCE (or SPIR-V); clBuildProgram compiles it at
+     runtime for WHATEVER device is present — an NVIDIA GPU, an AMD GPU, an Intel
+     iGPU, a multicore CPU, an FPGA. ONE host binary, many device types, decided
+     at load time by what the machine actually has.
+Result: the 8 calls are a fixed tax that buys the widest install-time portability
+  of any GPU API. Verbosity is the premium on a "runs on hardware I've never seen" policy.</code></pre>
+<p><strong>What to internalize:</strong> OpenCL's verbosity is not incompetence — it's an explicit trade. CUDA hides the platform/device/context because it <em>is</em> the platform: one vendor, known ahead of time, compiled ahead of time. OpenCL can't assume any of that, so it makes you name each thing and defers kernel compilation to runtime, and in exchange the same shipped binary lights up whatever accelerator the end-user happens to have — including devices that didn't exist when you built it. For a datacenter you control, that flexibility is worthless and the boilerplate is pure cost (so CUDA wins). For a consumer app that must run on a random laptop's Intel iGPU, or an embedded product spanning three chip generations, that flexibility is the entire value (so OpenCL wins). The boilerplate is the shape of the problem OpenCL was built to solve — and a mismatch between that problem and yours is exactly when to pick a different rung of the ladder.</p>
+</div>
+
+<h2>Key points</h2>
+<ul class="keypoints">
+<li>OpenCL's kernel is a string compiled at runtime by clBuildProgram (3.1's compiler pipeline, live), which is what lets one host binary target any device present at load time — its defining superpower.</li>
+<li>The programming model is CUDA's ideas renamed (get_global_id = the 5.2 identity, __local = shared, barrier = __syncthreads) wrapped in an explicit platform/device/context/queue setup.</li>
+<li>OpenCL lost the desktop/datacenter to CUDA on ECOSYSTEM — no library peer to cuBLAS, no profiler peer to Nsight, late and buggy vendor drivers — not on programming-model ergonomics.</li>
+<li>The engineering-history moral generalizes: a platform is a spec plus libraries plus tools plus docs plus reliability, and the platform beats the better bare spec.</li>
+<li>OpenCL still wins the device long tail — mobile GPUs, DSPs, embedded SoCs, and FPGAs — where it's the one open standard vendors implement.</li>
+<li>OpenCL 3.1 makes SPIR-V ingestion mandatory, turning OpenCL into a backend for higher-level tools: SYCL and chipStar compile to SPIR-V/OpenCL, so it became infrastructure for the rungs above it.</li>
+</ul>
+
+<h2>Quiz</h2>
+<div class="quiz">
+  <div class="q">1. A junior engineer says "OpenCL is dead — it lost to CUDA, so there's no reason to ever learn or choose it in 2026." Where is this wrong, and what's the precise scope of OpenCL's continued relevance?</div>
+  <button class="opt">It's correct — CUDA won completely, OpenCL has zero remaining use cases</button>
+  <button class="opt" data-c="1">It conflates "lost the datacenter" with "dead." OpenCL still owns the device long tail — mobile GPUs, DSPs, embedded SoCs, and FPGAs, where it's often the only open standard the vendor ships — so if your target is a phone GPU or an FPGA, OpenCL is the choice, not a legacy one. And via mandatory SPIR-V ingestion (OpenCL 3.1) it became a backend under SYCL and chipStar, so it's load-bearing infrastructure even for people who never write it directly. Its scope narrowed to breadth and plumbing; it didn't vanish</button>
+  <button class="opt">It's wrong because OpenCL is actually faster than CUDA on NVIDIA GPUs</button>
+  <button class="opt">It's wrong because CUDA is being discontinued in favor of OpenCL</button>
+  <div class="expl">Options 3 and 4 are false claims (CUDA is thriving; OpenCL isn't faster on NVIDIA). The correct answer draws the real boundary: OpenCL lost the high-margin center (datacenter, desktop) but holds the breadth (embedded/FPGA) and gained a second life as SPIR-V infrastructure. "Dead" is a category error — the useful question is never "is X dead" but "where is X still the right tool," and for OpenCL the answer is specific: the widest hardware reach, plus the plumbing under SYCL.</div>
+</div>
+<div class="quiz">
+  <div class="q">2. OpenCL was an open, cross-vendor standard released before CUDA matured, yet CUDA won. A colleague concludes "open standards always lose to proprietary ones." What's the more accurate lesson?</div>
+  <button class="opt">Correct — proprietary always beats open in developer tools</button>
+  <button class="opt" data-c="1">The accurate lesson is narrower and more useful: the winner was the better PLATFORM, not the more proprietary one. CUDA won because it shipped libraries (cuBLAS/cuDNN), profilers (Nsight), and coherent docs while OpenCL had a spec but fragmented, late, buggy vendor implementations and no library ecosystem. Openness didn't doom OpenCL; the missing platform did. Plenty of open standards win (SPIR-V, Vulkan, the web) when they arrive with tooling and reliability — so the takeaway is 'invest in the ecosystem,' not 'proprietary wins'</button>
+  <button class="opt">Correct — open standards are technically inferior by nature</button>
+  <button class="opt">The lesson is that standards don't matter, only marketing does</button>
+  <div class="expl">Options 1 and 3 overgeneralize into a cynical and false rule (WebGPU, Vulkan, Linux, and SPIR-V are open winners). Option 4 is glib. The correct answer isolates the actual causal variable — ecosystem completeness — which is both more accurate and more actionable: it tells a team building any platform that the spec is the cheap part and the libraries/tools/docs/reliability are what determine adoption. This is 5.11's library-first doctrine viewed from the vendor's side: the libraries are why developers show up.</div>
+</div>
+
+<h2>Exercises</h2>
+<details><summary>Exercise 1 — Run real OpenCL on your CPU with PoCL (no GPU required). Install pocl (the Portable Computing Language, a CPU OpenCL implementation — <code>apt install pocl-opencl-icd</code> or via conda) plus pyopencl, and run the saxpy above. Confirm it selects a CPU device, compiles the kernel string at runtime, and matches <code>2*x+y</code> within an fp budget. (This course's sandbox lacks an OpenCL driver, so this targets your machine — pocl makes any CPU an OpenCL device.)</summary><div class="body">
+<p>Expected: <code>create_some_context()</code> selects the pocl CPU device; <code>Program(ctx, src).build()</code> compiles the kernel string when the line runs (put a print before and after to feel the runtime-compile latency — a cost CUDA pays at build time instead); the result matches <code>2*x+y</code> to ~1e-5 (fp32, not bitwise — M1 L8). The thing to notice: you just ran a GPU-shaped program with no GPU, because OpenCL's device abstraction includes the CPU — the same "portability includes the CPU backend" story as SYCL (D3), which is why both make good universal correctness gates. Deliverable: the device name pocl reported and the max error vs the NumPy reference.</p>
+</div></details>
+<details><summary>Exercise 2 — The boilerplate audit. Count the distinct host-side API stages in the OpenCL saxpy (platform → device → context → queue → buffers → program → build → kernel → enqueue) and compare to the CUDA equivalent (malloc, memcpy, launch, sync). Then answer: if you added a second kernel to the same program, how many of those stages repeat, and what does that tell you about where OpenCL's overhead is fixed vs per-kernel?</summary><div class="body">
+<p>OpenCL: ~8 setup stages before the first kernel runs; CUDA: ~4 (allocate, copy, launch, sync). Adding a second kernel to an OpenCL program reuses the platform/device/context/queue/program (all fixed, one-time) and adds only a <code>clCreateKernel</code> + arg-set + enqueue — so the heavy setup is amortized across all kernels, per-kernel cost is small. The lesson: OpenCL's verbosity is a fixed startup tax, not a per-kernel one, which reframes the "boilerplate" complaint — a program with 50 kernels pays the setup once. That's exactly why the worked example calls the boilerplate a fixed premium on install-time portability, not a per-launch cost. Deliverable: the two stage counts and a one-line statement of what's fixed vs per-kernel.</p>
+</div></details>
+
+<hr>
+<h1>Go deeper — the survivor's anatomy</h1>
+
+<h2>1. The setup ceremony, annotated</h2>
+<pre><code>stage                       CUDA equivalent            why OpenCL makes it explicit
+──────────────────────────  ─────────────────────────  ─────────────────────────────
+clGetPlatformIDs            (implicit — it's NVIDIA)   there may be many vendors present
+clGetDeviceIDs              cudaSetDevice              GPU? CPU? FPGA? you choose
+clCreateContext             (implicit)                 a scope for devices+memory
+clCreateCommandQueue        a stream (5.9)             where work is enqueued
+clCreateBuffer (cl_mem)     cudaMalloc                 explicit, typed memory objects
+clCreateProgramWithSource   —                          the kernel arrives as TEXT
+clBuildProgram              nvcc (but at BUILD time)   compile the kernel NOW, for this device
+clCreateKernel + SetArg     &lt;&lt;&lt;&gt;&gt;&gt; args              bind arguments by index
+clEnqueueNDRangeKernel      kernel&lt;&lt;&lt;g,b&gt;&gt;&gt;()          launch over an nd-range</code></pre>
+<p>Read the right column top to bottom and OpenCL's verbosity turns legible: every explicit call exists because OpenCL, unlike CUDA, cannot assume the vendor, the device type, or an ahead-of-time compile. The boilerplate is the honest cost of not being a single-vendor platform.</p>
+
+<h2>2. cl_mem vs SVM, and the shape of memory</h2>
+<pre><code>cl_mem (classic)   : explicit buffer objects; you enqueue reads/writes (like CUDA malloc/memcpy)
+SVM (shared virtual memory): pointers shared host↔device — the USM idea (D3), but OPTIONAL
+                     since OpenCL 3.0 (constrained devices may omit it)
+implication        : portable OpenCL code can't ASSUME SVM exists — you query for it.
+                     This "features are optional, query them" model is OpenCL 3.0's whole
+                     design (like WebGPU's baseline-plus-extensions, D5) — the price of
+                     spanning phones to FPGAs is that few features are guaranteed.</code></pre>
+
+<h2>3. Why the history lesson matters for your next platform bet</h2>
+<pre><code>OpenCL 2008: open standard, first mover, cross-vendor      → still lost
+CUDA:        libraries + profilers + docs + one clean stack → won
+the pattern (repeated since): TensorFlow vs PyTorch, many others —
+  developers adopt the ECOSYSTEM, and the ecosystem is libraries+tools+docs+reliability.
+so when YOU evaluate a portable-GPU strategy (this whole track), weigh the
+  ecosystem, not just the spec: HIP has ROCm's libraries; SYCL has oneAPI+AdaptiveCpp;
+  WebGPU has the browser; a bare spec with no libraries is OpenCL's cautionary tale.</code></pre>
+
+<h2>Gotchas</h2>
+<div class="gotcha"><strong>"OpenCL is dead."</strong> A category error — it lost the datacenter but owns embedded/FPGA and became SPIR-V plumbing under SYCL. The right question is "where is it still right," and that scope is specific (quiz 1).</div>
+<div class="gotcha"><strong>Assuming SVM is available.</strong> SVM (shared pointers) is optional since OpenCL 3.0, so portable code must query for it, not assume it. Code written against SVM won't run on a device that omitted it.</div>
+<div class="gotcha"><strong>Forgetting the runtime-compile latency.</strong> <code>clBuildProgram</code> compiles at first use, so the first launch pays a compile cost CUDA paid at build time. Cache the built program (or ship SPIR-V) or your app stutters on startup.</div>
+<div class="gotcha"><strong>Expecting portable OpenCL to be portable-FAST.</strong> The 90/10 tax (D1) hit OpenCL hard — a kernel tuned for one vendor's local-memory size or SIMD width underperforms elsewhere. Portable correctness, per-vendor tuning; same as everywhere.</div>
+<div class="gotcha"><strong>Choosing OpenCL for a single-vendor datacenter.</strong> If you control the hardware and it's all NVIDIA (or all AMD), OpenCL's runtime-portability buys you nothing and its boilerplate costs you — use CUDA/HIP. Match the tool to the problem's shape (worked example).</div>
+<div class="gotcha"><strong>Ignoring OpenCL when your target is embedded.</strong> The inverse mistake: dismissing OpenCL as legacy when shipping to a phone GPU or FPGA, where it's the only open option. "Modern" is relative to the target, not the trend.</div>
+
+<h2>Scenario — the two teams and the tool-shaped hole</h2>
+<p>Two teams, same quarter, opposite mistakes. Team A is building an internal training service on a homogeneous NVIDIA cluster they own, and a senior architect insists on OpenCL "for future portability." They spend weeks fighting boilerplate and the absence of a cuDNN-class library, hand-writing convolutions that cuDNN would have handed them (5.11), all to hedge a portability risk that doesn't exist — they control the hardware and it isn't changing. Team B is shipping a consumer photo app that must run GPU-accelerated filters on whatever laptop the customer owns — Intel iGPUs, older AMD parts, the occasional NVIDIA discrete card — and a developer dismisses OpenCL as "the dead one," reaching for CUDA, only to discover at beta that the app crashes on every non-NVIDIA machine, which is most of them. Both teams mismatched the tool to the problem's shape. Team A needed a single-vendor platform (CUDA/HIP) and picked the runtime-portable one, paying for flexibility they'd never use. Team B needed exactly the runtime device-selection OpenCL was built for — one binary, any GPU present — and rejected it on reputation. The moral is the worked example as a decision rule: OpenCL's verbose, runtime-compiled, query-everything design is the precise shape of "must run on hardware I don't control," and it's overhead-shaped waste for "hardware I do control." Neither "OpenCL is portable so use it" nor "OpenCL is dead so don't" is a decision — the decision is whether your deployment looks like the problem OpenCL solves. Team A should have used CUDA and a library; Team B should have shipped OpenCL (or WebGPU, D5) and slept fine.</p>
+
+<h2>Practice</h2>
+<details><summary>1. In the OpenCL saxpy, which line is the "kernel compiled at runtime" step, and what CUDA build-time step does it replace?</summary><div class="body"><code>cl.Program(ctx, src).build()</code> (i.e., <code>clBuildProgram</code>) is the runtime-compile step — it takes the kernel source string and compiles it for the selected device while the program runs. It replaces CUDA's <em>build-time</em> nvcc compilation into a fatbinary (5.1). The trade: CUDA pays the compile cost once at build for a fixed set of archs; OpenCL pays it at runtime for whatever device is actually present. That deferral is precisely what enables one binary to target device types unknown at build time.</div></details>
+<details><summary>2. List three device types an OpenCL program can target that a CUDA binary cannot, and the one reason CUDA can't.</summary><div class="body">AMD GPUs, Intel iGPUs, multicore CPUs, DSPs, and FPGAs — any of these (three or more) are OpenCL targets and not CUDA ones. The reason is singular: a CUDA binary contains NVIDIA-only device code (SASS/PTX for NVIDIA archs, 5.1), so it can physically only run on NVIDIA hardware. OpenCL ships the kernel as source/SPIR-V and compiles per-device at runtime, so the same program lights up whatever the machine has. It's the AOT-single-vendor vs runtime-any-vendor distinction from the worked example.</div></details>
+<details><summary>3. Explain, in ecosystem terms, why OpenCL lost despite being the open, first-mover, cross-vendor standard.</summary><div class="body">Because a spec isn't a platform. CUDA shipped the surrounding ecosystem OpenCL never assembled: high-quality libraries (cuBLAS/cuDNN/cuFFT) with no OpenCL peer, first-class profilers (Nsight/ncu), coherent documentation, and one vendor delivering a debugged, consistent stack — while OpenCL's implementations came late, buggy, and fragmented across vendors, with no library ecosystem to make the library-first doctrine (5.11) usable. Developers optimize for where they can get work done, and that was CUDA. Openness and first-mover status don't feed you libraries and tools; the ecosystem does.</div></details>
+<details><summary>4. What is SPIR-V, and how did it give OpenCL a "second life" as infrastructure?</summary><div class="body">SPIR-V is a portable intermediate representation — a compiled, vendor-neutral form that sits between a high-level language and a specific device's machine code. OpenCL 3.1 makes SPIR-V ingestion mandatory in core, so every conformant OpenCL runtime can accept SPIR-V. That turned OpenCL into a reliable <em>backend</em>: higher-level tools like SYCL (D3) and chipStar compile down to SPIR-V and hand it to an OpenCL runtime, so OpenCL runs underneath frameworks people think of as "not OpenCL." It stopped being only a language you write and became plumbing the ecosystem depends on — a more durable role than the front-end war it lost.</div></details>
+<details><summary>5. When is OpenCL's boilerplate a fixed cost you shouldn't complain about, and when is it genuine overhead?</summary><div class="body">It's an amortized fixed cost when your program runs many kernels or runs for a long time: the platform/device/context/queue/program setup happens once, and per-kernel cost is small, so a 50-kernel simulation pays the ceremony a single time (Exercise 2). It's genuine overhead when you're on a single-vendor datacenter you control (CUDA/HIP hides all of it and you'd never use the runtime device-selection) or for a trivial one-shot kernel where the setup dwarfs the work. The boilerplate buys install-time portability; if you don't need that portability, you're paying for nothing.</div></details>
+<details><summary>6. A phone-app team needs GPU compute across Android devices (mostly Adreno/Mali GPUs). CUDA is out. Compare OpenCL and WebGPU (D5) as options.</summary><div class="body">Both fit "run on GPUs I don't control." OpenCL is natively supported on most Android GPUs (Adreno, Mali) and gives lower-level control and access to device-specific features — good if the app is native and needs performance. WebGPU (D5) reaches the same devices <em>through the browser</em> (or via a native wgpu/Dawn library), with a cleaner, safer API and zero-install web deployment — good if the app is web-delivered or wants one codebase across web and native. The decision hinges on delivery: native performance-critical → OpenCL; web-delivered or cross-platform-with-browser → WebGPU. Both are the "portable API" rung of D1; they differ in reach and ergonomics, not in the fundamental trade.</div></details>
+<details><summary>7. The interview closer: "It's 2026 — when would you actually choose OpenCL for a new project?" Deliver the spoken skeleton.</summary><div class="body">"I'd choose OpenCL when my target is the device long tail that CUDA can't reach and where I need native, low-level control — specifically embedded systems, mobile GPUs, DSPs, or FPGAs, where OpenCL is often the only open standard the vendor ships. The defining feature I'm buying is runtime kernel compilation: the kernel travels as source or SPIR-V and <code>clBuildProgram</code> compiles it for whatever device is present at load time, so one binary lights up hardware I've never seen — which is exactly what a consumer app on random GPUs or a multi-generation embedded product needs. I would NOT choose it for a single-vendor datacenter I control, because there the runtime-portability buys nothing and I'd rather have CUDA or HIP with their libraries and profilers — OpenCL's weakness was always the ecosystem, not the model. And I'd remember that even when I don't write OpenCL directly, I might be using it: OpenCL 3.1 made SPIR-V ingestion mandatory, so SYCL and other tools compile down onto it. So my rule is: OpenCL for maximum hardware breadth and embedded/FPGA reach with native control; something higher up the ladder — HIP, SYCL, or WebGPU — when I have libraries, a browser, or a single vendor to lean on. The historical lesson I carry from it is that I evaluate any platform on its ecosystem, not just its spec, because that's the exact thing that decided this fight.' Naming that trade — breadth-and-control versus ecosystem — is the answer."</div></details>
+
+<div class="pager">
+  <a href="lesson-03.html">← SYCL &amp; oneAPI</a>
+  <a href="lesson-05.html">Next: WebGPU &amp; WGSL →</a>
+</div>
+<div class="footer">GPU Mastery · Track D · Lesson 4 — works offline · progress saved in your browser</div>
+</div>
+<script src="../assets/diagramsD.js"></script>
+<script src="../assets/app.js"></script>
+</body>
+</html>

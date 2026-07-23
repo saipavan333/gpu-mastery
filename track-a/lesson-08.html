@@ -1,0 +1,206 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>A8 Inference — Quantization, KV-Cache, Batching, vLLM — GPU Mastery</title>
+<link rel="stylesheet" href="../assets/style.css">
+</head>
+<body data-lesson="al8">
+<nav><div class="inner">
+  <a class="logo" href="../index.html">GPU<span>Mastery</span></a>
+  <a class="item" href="../index.html">Home</a>
+  <a class="item on" href="../curriculum.html">Curriculum</a>
+  <a class="item" href="../labs.html">Labs</a>
+  <a class="item" href="../setup.html">Lab setup</a>
+  <a class="item" href="../prompt.html">Generator prompt</a>
+</div></nav>
+<div class="wrap">
+
+<div class="lesson-top">
+  <div><span class="badge">Track A · Lesson 8</span><span class="badge dim">≈ 4 h</span></div>
+  <button id="donebtn" class="donebtn">Mark lesson complete</button>
+</div>
+<h1>Inference — serving is a memory-bandwidth business wearing an AI costume</h1>
+<p class="lead">Training amortizes; serving pays retail. Every generated token re-reads the entire model, every conversation drags a growing cache, and every idle microsecond is money. This lesson gives you the four load-bearing ideas — the KV ledger, paged memory, continuous batching, quantization — each with arithmetic you'll verify, ending in the serving-envelope calculation that IS the ML-infra interview.</p>
+
+<h2>Concept</h2>
+
+<h3>The decode loop's brutal economics</h3>
+<div class="diagram" data-diagram="a8-phases" data-caption="Prefill crunches the whole prompt in parallel — compute-bound, big matmuls. Decode emits ONE token per pass — matrix·vector, memory-bound: the same weights re-read per token."></div>
+<pre><code>PREFILL  (prompt): all L tokens at once → (L×d)·(d×d) matmuls → COMPUTE-bound
+  (4.7 verdict: TFLOPs and TC shapes matter — A6's world)
+DECODE   (generation): 1 token/step → (1×d)·(d×d) mat·VEC → every weight
+  byte read for ~2 FLOPs → AI ≈ 1 FLOP/B → MEMORY-bound, catastrophically
+single-stream ceiling = bandwidth ÷ bytes-per-token:
+  7B fp16 (14 GB) on H100 (3.35 TB/s): 3350/14 ≈ 239 tok/s — COMPUTED, and
+  no kernel wizardry beats it: it's 4.7's roofline with tokens as the unit.
+  (1.1B fp16 on Colab's T4: 220/2.2 ≈ 100 tok/s — Ex.2 measures this.)
+batching is the ONLY lever on the ceiling itself: B streams share one weight
+  read → tokens/s ≈ B × single-stream, until compute or memory says stop.</code></pre>
+
+<h3>The KV-cache: the tensor that decides your batch size</h3>
+<div class="diagram" data-diagram="a8-kv" data-caption="Every attention layer must remember K and V for every past token of every live request. The formula is five multiplications, and it routinely out-eats the weights."></div>
+<pre><code>KV bytes = 2 · layers · kv_heads · head_dim · seq_len · dtype · batch
+7B-class (32L, 8 kv-heads×128, fp16), seq 8192, batch 16:
+  2·32·8·128·8192·2·16 = 17.2 GB — MORE than the 14 GB of weights (computed).
+why it exists: attention reads ALL past K/V per new token (A5's flash reads
+  them tile-wise, but they must LIVE somewhere) — no cache means re-running
+  the whole prefill per token: O(L²) per token instead of O(L).
+the three relief valves, each a lesson-sized idea:
+  GQA (8 kv-heads for 32 q-heads — the config above ALREADY did this: ÷4)
+  quantized KV (fp8/int8 cache — §quant's math applied to the cache)
+  paging (waste elimination — next section, vLLM's founding trick)</code></pre>
+
+<h3>Paged KV + continuous batching: an OS course crashes the party</h3>
+<div class="diagram" data-diagram="a8-paged" data-caption="Contiguous per-request KV allocations waste 60–80% on reservations (3.5's fragmentation). Fixed-size blocks + a per-request block table = malloc grows up into a page table."></div>
+<div class="diagram" data-diagram="a8-batch" data-caption="Static batching idles slots while the longest request finishes. Continuous batching refills the batch EVERY step — the weight-read amortization never starves."></div>
+<pre><code>paged KV (vLLM's PagedAttention): blocks of ~16 tokens; request's cache =
+  scattered blocks + a block table; attention kernels index THROUGH the table
+  (5.7's gather, made systematic). Waste → &lt;10%; sharing = prefix reuse
+  (system prompts cached ONCE across requests — copy-on-write, the full OS
+  playbook). This is 3.5 §1's arena/fragmentation lesson getting a job at scale.
+continuous batching: requests join/leave the running batch PER STEP —
+  finished streams' slots refill immediately (a8-batch's timeline): the
+  batch stays fat, the ceiling stays amortized → 2–4× throughput over
+  static batching at the same p50 (verified-era vLLM numbers; regime-dependent).
+prefill/decode separation: long prefills stall decode steps in a shared
+  batch (head-of-line, 5.9's convoy) → chunked prefill or disaggregated
+  fleets (a8-phases' two regimes, physically separated in 2026 serving).</code></pre>
+
+<h3>Quantization: shrink bytes-per-token, pay in ulps</h3>
+<pre><code>int8 symmetric per-channel: q = round(w/s), s = max|w|/127
+  EXECUTED: RMS error = 5.39e-4 on σ=0.05 weights — matching theory s/√12
+  to 3 digits (uniform quantization noise is REAL math, not vibes), ≈1.1%
+  relative — typically negligible for weights (activations are harder:
+  outlier channels → per-channel/per-group scales, the entire int8 literature).
+int4/group-wise (AWQ/GPTQ-class): 3.5 GB for a 7B → ceiling 3350/3.5 ≈
+  957 tok/s single-stream — quantization is a THROUGHPUT feature via the
+  a8-phases roofline, not just a memory one. Quality: measured per task,
+  budgeted like every M1 L8 decision (perplexity deltas, task evals — never
+  "it looks fine").</code></pre>
+
+<h2>Worked example</h2>
+<div class="card">
+<p><strong>Task:</strong> The serving envelope for a 7B fp16 model on ONE H100-80GB (course-ledger numbers; every line is a formula you now own). This exact calculation, done aloud, is a standard ML-infra interview round.</p>
+<pre><code>memory budget:  80 GB − 14 (weights) − ~4 (activations/workspace/CUDA) ≈ 62 GB for KV
+max concurrent tokens: 62 GB ÷ KV-per-token (2·32·8·128·2 = 131 KB/token)
+  ≈ 473k tokens of live context — e.g. 236 requests at 2k avg, or 58 at 8k
+  (paged KV makes the 62 GB actually usable — a8-paged's &lt;10% waste)
+decode throughput: single-stream ceiling 239 tok/s (computed above);
+  batch B shares the weight read: ~B× until the KV reads dominate —
+  KV bytes/step at B=64 × 4k ctx: 64·4096·131 KB ≈ 34 GB → +10 ms/step:
+  the ceiling bends from weight-bound to KV-bound as context grows
+  (the roofline's denominator now has TWO terms: weights + B·ctx·KVtok)
+latency: prefill 2k prompt ≈ 2·7e9·2048 FLOP ≈ 29 TFLOP ÷ ~700 TF (fp16 TC,
+  realistic) ≈ 41 ms TTFT; decode ≈ 1000/(239·util) ms/token inter-token
+the envelope: {236 chat streams | ~40 ms TTFT | 15–25 tok/s/stream at B≈64}
+  — and every knob (quantize→×2 streams; GQA→already counted; longer ctx→
+  fewer streams, LINEARLY) moves ONE term of arithmetic you can defend.</code></pre>
+<p><strong>What to internalize:</strong> the envelope came from FOUR numbers (weights, bandwidth, KV-per-token, FLOPs) and no benchmarks — benchmarks then CONFIRM the envelope (M1 L7's predict-first, serving edition). Teams that can't do this table size fleets by trial-and-OOM; teams that can, size them on a whiteboard and use the benchmark budget for the 20% the table can't see (kernel efficiency, scheduler overhead). The KV-bound bend at large B×ctx is the detail that separates rehearsed answers from understood ones.</p>
+</div>
+
+<h2>Key points</h2>
+<ul class="keypoints">
+<li>Decode is memory-bound matrix·vector: tokens/s ceiling = bandwidth ÷ bytes-per-token (239 tok/s for 7B-fp16 on H100 — computed, unbeatable by kernels); batching is the only lever that amortizes the weight read.</li>
+<li>The KV cache (2·L·H·d·ctx·dtype·B) routinely out-eats the weights (17.2 GB vs 14 GB in the computed case) and DECIDES max batch — GQA, quantized cache, and paging are its three relief valves.</li>
+<li>Paged KV = 3.5's fragmentation lesson solved with an OS page table: fixed blocks + per-request tables + copy-on-write prefix sharing → waste from ~60–80% to &lt;10%, batch ×2–4.</li>
+<li>Continuous batching refills the batch every step (a8-batch): the amortization never starves; prefill/decode separation exists because the two phases live on opposite sides of the roofline (a8-phases).</li>
+<li>Quantization error is arithmetic, not folklore: int8 RMS = scale/√12 (measured to 3 digits) — and its throughput win comes through the roofline (fewer bytes/token), priced against task-eval budgets (M1 L8's ladder).</li>
+<li>The serving envelope (streams, TTFT, tok/s) derives from four numbers before any benchmark — predict first, then let measurements audit the 20% gap (M1 L7 forever).</li>
+</ul>
+
+<h2>Quiz</h2>
+<div class="quiz">
+  <div class="q">1. A dashboard shows your inference fleet's GPUs at 31% "SM efficiency" during pure-decode periods, and a cost-cutting initiative concludes "we can triple load before buying hardware." Using a8-phases and the decode roofline, explain why that 31% may already be FULL utilization, what number to check instead, and the one scenario where the initiative is actually right.</div>
+  <button class="opt">31% SM means 69% headroom — the initiative is right</button>
+  <button class="opt" data-c="1">Decode is memory-bound mat·vec: the SMs WAIT on weight/KV reads by physics (AI ≈ 1 FLOP/B vs a ~300 FLOP/B ridge — compute units are idle at FULL memory throughput). Check SOL-Memory / achieved bandwidth instead (a10-metrics' honest row): if HBM is at 80–90% of peak during decode, the GPU is done — tripling load buys queueing, not throughput. The initiative is right only if BATCH can still grow: headroom = KV memory left (the envelope's 62 GB ledger) AND the bandwidth denominator not yet KV-dominated — i.e., the fix is bigger B (more streams amortizing the same reads), which raises tokens/s WITHOUT raising SM% much. Same dashboards, opposite conclusions, depending on which ceiling you believe you're under (4.7's only question)</button>
+  <button class="opt">SM efficiency is meaningless; only tok/s matters</button>
+  <button class="opt">Decode should be compute-bound; 31% means a kernel bug</button>
+  <div class="expl">The fleet-scale version of 5.10 quiz 2's regime reading: LOW compute utilization is the EXPECTED signature of a memory-bound phase, not waste — and "efficiency" initiatives that read SM% without the roofline regularly size fleets wrong in both directions. The correct instrument stack: bandwidth SOL for "is the GPU done," KV-memory headroom for "can B grow," queue depth for "is load even arriving." Option 3 gestures at truth but forfeits the DIAGNOSTIC power — tok/s tells you what; the roofline tells you what to do.</div>
+</div>
+<div class="quiz">
+  <div class="q">2. Two configs of the same 7B on the same H100: (A) batch 8, avg context 32k; (B) batch 64, avg context 2k. Same total live tokens (256k), same KV memory. A capacity planner treats them as equivalent. Compute enough of each's step economics to show they are NOT — which serves more tokens/s, which has better per-stream latency, and what third factor (attention kernel cost) seals it?</div>
+  <button class="opt">Equivalent — same total tokens, same memory, same throughput</button>
+  <button class="opt" data-c="1">Per decode step both read 14 GB of weights + ~256k·131KB ≈ 34 GB of KV → similar step TIME (~14–15 ms at 3.35 TB/s) — but (B) emits 64 tokens/step vs (A)'s 8: ~8× the tokens/s from the SAME bytes (the weight+KV read amortizes over B, and only B). Per-stream latency: both ~1/step-time ≈ 65–70 tok/s… (A)'s streams each get one token per step too — per-stream speeds are comparable; (B) simply serves 8× more users. Sealing factor: attention FLOPs/step scale with B·ctx — equal here — but (A)'s 32k contexts stress flash-kernel long-seq efficiency and (B)'s 64-way batch gives attention better parallelism (more query rows per kernel — 5.2's saturation); plus (A) suffers 32k-prefill head-of-line convoys (a8-batch). Verdict: (B) dominates throughput at equal memory; long-context (A) is a PRODUCT choice you pay ~8× per token for — and pricing that honestly is the planner's actual job</button>
+  <button class="opt">(A) wins — fewer streams means less overhead</button>
+  <button class="opt">(B) wins only if contexts are padded equal</button>
+  <div class="expl">"Same memory ≠ same economics" is THE capacity-planning trap: memory is a capacity constraint, but throughput is a BANDWIDTH-AMORTIZATION function of B specifically. The tokens-per-byte-read framing (B tokens out per fixed read) collapses the whole analysis into one fraction — carry it into every pricing/SKU conversation. Padding (option 4) is irrelevant under paged KV + continuous batching — which is precisely what those two inventions were FOR.</div>
+</div>
+
+<h2>Exercises</h2>
+<details><summary>Exercise 1 — Build the envelope calculator (pure Python, runs anywhere — the sandbox verified its core lines): inputs {params, layers, kv_heads, head_dim, dtype, GPU mem, bandwidth, TC TFLOPs}; outputs the full worked-example table (KV/token, max live tokens, decode ceilings vs B with the KV-bound bend, TTFT vs prompt length). Run it for: 7B/H100, 7B-int4/H100, 70B/8×H100 (naive: ÷8 weights per GPU via TP), and your Colab T4 with a 1.1B model. Sanity-check that last one against Ex.2's measurement.</summary><div class="body">
+<pre><code>expected outputs worth staring at: int4 7B → ceiling ~957 tok/s single-stream
+(4× fp16 — quantization AS throughput); 70B/8×H100 TP → per-GPU weight read
+140/8 = 17.5 GB → ~191 tok/s ceiling BUT minus TP's per-layer allreduce tax
+(A7 P3: TP communicates every layer — model it as an added ms/step term and
+watch the ceiling sag toward ~150); T4/1.1B → ~100 tok/s ceiling (the number Ex.2
+will hunt). The calculator's real product is the BEND CHART: tokens/s vs B
+for ctx ∈ {2k, 8k, 32k} — the visual of quiz 2's economics.</code></pre>
+<p>Keep this script in your repo forever; you will paste variants of it into design docs for years. It is also, run aloud, a complete answer to the interview's capacity round — which is why building it beats reading it.</p>
+</div></details>
+<details><summary>Exercise 2 — Colab (T4): load a ~1B fp16 model (HF transformers), measure prefill tok/s (long prompt, batch 1) and decode tok/s (generate 200 tokens), with proper timing (A2 quiz 1's protocol: sync, warmup, medians). Compare decode against YOUR calculator's ceiling; attribute the gap (expect 50–75% of ceiling: kernel efficiency, sampling overhead, Python loop). Then batch 8 decode: verify tokens/s scales ~B while per-stream stays ~flat — quiz 2's law, measured by you.</summary><div class="body">
+<pre><code>representative T4 shape (yours will vary — that's the point):
+prefill (1k prompt): 900–2000 tok/s (compute-bound-ish; T4's fp16 TCs at work)
+decode batch 1: ~55–75 tok/s vs ~100 ceiling → 55–75% — attribution: HF's
+Python sampling loop (a9's territory: per-token kernel confetti!), attention
+kernel efficiency at seq growth, cache mgmt overhead
+decode batch 8: ~6–7× total tokens/s, per-stream ≈ batch-1's — the
+amortization law observed on free hardware.</code></pre>
+<p>Write the three-line gap attribution in your notes with instruments cited (profiler trace for the confetti, ceiling formula for the bound). "Measured 62% of a ceiling I computed first, and I know where the 38% lives" is a sentence that ends interview rounds early — in your favor.</p>
+</div></details>
+
+<hr>
+<h1>Go deeper — the serving craft sheet</h1>
+
+<h2>1. Speculative decoding (beating the mat·vec tax with a draft)</h2>
+<pre><code>decode's tragedy: one token per full-model read. Speculation: a tiny DRAFT
+model proposes k tokens (k cheap reads); the big model VERIFIES all k in ONE
+pass (a k-token "prefill" — compute-bound, nearly free vs k decode steps);
+accept the longest correct prefix (provably distribution-preserving with the
+right accept/reject rule). Accept rate ~60–80% on natural text → 2–3×
+effective tok/s from the SAME hardware. It's a8-phases arbitrage: convert
+memory-bound decode steps into one compute-bound verify step — the roofline's
+two regimes traded against each other. (EAGLE/Medusa-class variants draft
+from the model's own hidden states — same arbitrage, cheaper drafts.)</code></pre>
+
+<h2>2. The latency SLO zoo (what "fast" means is a product decision)</h2>
+<pre><code>TTFT (time to first token) = queue + prefill: prompt-length- and
+  batching-policy-dominated (chunked prefill exists for TTFT fairness)
+ITL / inter-token latency = decode step time: B and ctx set it (quiz 2)
+throughput (tok/s/GPU) = the fleet's revenue metric — rises with B while
+  ITL degrades: the FUNDAMENTAL serving trade is B's position on that curve
+p99 stories: one 128k-prompt convoying a shared batch (a8-batch), paging
+  pressure evictions, speculative-decode acceptance collapse on code/JSON…
+every SLO breach decomposes into THIS lesson's nouns — that's the point of
+having the nouns.</code></pre>
+
+<h2>3. Gotchas</h2>
+<div class="gotcha"><strong>Benchmarking batch-1 decode and extrapolating.</strong> Batch-1 measures the weight-read tax at its worst; production runs B=32–256. The B-curve (Ex.1's bend chart) is the truth; single-stream numbers are marketing — in both directions.</div>
+<div class="gotcha"><strong>Sizing KV for max_len instead of paging.</strong> Contiguous reservation at max_len is the 60–80% waste vLLM was built to kill (a8-paged); if your stack predates paging, your "OOM at batch 12" is a memory-management artifact, not a hardware limit.</div>
+<div class="gotcha"><strong>Ignoring the KV term in long-context pricing.</strong> At 32k+ contexts the per-step KV read rivals the weight read (quiz 2's 34 GB) — long-context tokens cost multiples of short-context tokens in BOTH memory and bandwidth; price them so, or the SKU loses money precisely on power users.</div>
+<div class="gotcha"><strong>Quantizing weights, forgetting activations/KV.</strong> int4 weights with fp16 KV leaves the cache as the binding term at scale (the envelope's 62 GB math flips); modern stacks quantize the CACHE (fp8 KV) — redo the envelope per config, don't pattern-match.</div>
+<div class="gotcha"><strong>Quality-checking quantization by eyeball.</strong> "Outputs look fine" is not a budget (M1 L8): perplexity deltas + task-suite evals + a canary set of KNOWN-hard prompts, gated in CI like any fixture (M2 L6 — the model is now the kernel under test).</div>
+<div class="gotcha"><strong>Convoying prefills.</strong> One 100k-token prompt in a shared continuous batch stalls every stream's ITL for seconds (the 5.9 convoy in its most user-visible form) — chunked prefill or a prefill lane; your p99 dashboards will find this for you the hard way otherwise.</div>
+
+<h2>Scenario — the SKU that lost money on its best customers</h2>
+<p>A startup ships an API: flat price per million tokens, any context length up to 128k ("simplicity wins"). Growth is great; margins collapse in month two. The finance postmortem finds the villain in this lesson's arithmetic, unread: their pricing modeled cost-per-token from BATCH-64, 2k-context benchmarks (~the envelope's happy corner), but the customers who loved the product most ran 60–120k-context retrieval workloads — where (quiz 2's economics) each decode step drags a 30+ GB KV read shared among the FEW streams that fit (long contexts evict batch capacity: the envelope's 473k-token pool serves only ~4–7 such streams), so cost-per-token ran ~9× the modeled figure. Worse, those whales' prefills convoyed everyone else's ITL (gotcha 6), inflating churn among the cheap-to-serve majority. The fixes were all nouns from this lesson, applied in a week: context-tiered pricing (the KV term finally on the invoice), chunked prefill + a long-context lane (convoys contained), fp8 KV cache (pool ×2), and a per-request cost estimator that is literally Ex.1's calculator wired to billing. The moral belongs in every infra engineer's holster: <em>serving economics are computable to first order from four numbers — and a pricing page written without the envelope table is a subsidy program for whoever reads rooflines better than you.</em></p>
+
+<h2>Practice</h2>
+<details><summary>1. Compute KV-per-token for: (a) the lesson's 7B (32L·8kv·128·fp16); (b) same with MHA (32 kv-heads — no GQA); (c) same with fp8 cache; (d) a 70B (80L·8kv·128·fp16). Then: which single architecture choice did the most for serving, and when was it made?</summary><div class="body">(a) 2·32·8·128·2 = 131 KB/token. (b) ×4 = 524 KB (32 kv-heads) — batch capacity ÷4! (c) 65.5 KB — pool ×2. (d) 2·80·8·128·2 = 328 KB. The winner: GQA — a TRAINING-time architecture decision (grouping queries over shared KV heads) that quartered serving's binding resource before any systems work began; it was adopted broadly (Llama-2-70B onward, ~2023) precisely for this arithmetic. The lesson inside: A5 P4 said hyperparameters are kernel economics; this drill says they're FLEET economics — model architects who can't run this table ship models that cost 4× to serve, and did.</div></details>
+<details><summary>2. Derive when speculative decoding pays: draft cost c·(full read), acceptance rate a, draft length k. Write effective tok/s vs plain decode, plug {c=0.1, a=0.7, k=4}, and name two workload properties that silently crater a.</summary><div class="body">Per round: k drafts (k·c reads) + 1 verify (~1 read, emits accepted+1 tokens). Expected tokens/round with per-token accept a: E ≈ (1−a^{k+1})/(1−a) (geometric prefix). Cost ≈ k·c + 1 reads. Speedup = E/(k·c+1). Plug: E=(1−0.7⁵)/0.3 ≈ 2.77; cost = 1.4 → 1.98× ≈ 2×. Crater a: (1) distribution shift from the draft's training (code, JSON, non-English, heavy sampling temperature — draft guesses diverge); (2) SHORT predictable-token runs already exhausted (post-quantization greedy text is high-a; creative high-temperature sampling is low-a). Production stacks measure a per-workload and DISABLE speculation below the breakeven a* (solve 2.77-style E = cost for your c, k) — a rare feature that must justify itself per-request-class, with your formula as the judge.</div></details>
+<details><summary>3. Your paged-KV pool shows 12% of blocks as "copy-on-write shared" and support tickets complain about sudden latency spikes when users edit long system prompts. Connect the two observations mechanically, and propose the two mitigations (one caching-policy, one product-shape).</summary><div class="body">Shared blocks = common prefixes (system prompts) cached once (a8-paged's CoW). An EDIT to a shared prefix breaks sharing at the divergence point: the request needs private copies of subsequent blocks — a burst of block allocation + RE-PREFILL from the edit point (the cached KV downstream of the change is invalid: attention state depends on all prior tokens). Long prompt + early edit = near-full re-prefill = the latency spike, plus pool pressure from de-duplication (evictions cascade — 3.5's fragmentation ghosts). Mitigations: caching-policy — prefix-cache with edit-distance-aware retention (keep the old prefix's blocks warm for A/B-editing sessions; evict LRU by shared-degree); product-shape — structure prompts so volatile content sits AFTER stable content (system prompt immutable, user-editable region last): the cache-friendly prompt layout is M2 L7's access-pattern-driven layout, for tokens. Teams that tell their prompt-engineering guild about THIS mechanism get both.</div></details>
+<details><summary>4. A load test shows tokens/s scaling linearly to B=48 then flattening hard, while KV memory is only 60% used and SOL-memory reads 91%. Name the regime transition, verify it with the quiz-2 arithmetic shape, and give the two levers that move THIS wall (not the memory one).</summary><div class="body">The bend from weight-bound to bandwidth-SATURATED: below B=48, each added stream amortizes the fixed 14 GB weight read (linear wins); at the flat, total bytes/step (weights + B·ctx·KVtok) saturates the 3.35 TB/s pipe — SOL 91% is the confession (quiz 1's honest instrument). Memory headroom (60%) is irrelevant: CAPACITY isn't the binding ceiling, BANDWIDTH is (quiz 2's two-column lesson: the planner's columns strike again). Levers on a bandwidth wall: shrink bytes — fp8/int4 weights AND fp8 KV (both terms of the denominator, gotcha 4) — or add bandwidth: TP across a second GPU (halve per-GPU bytes/step at A7's allreduce tax — run the two-lane check). More memory, more streams, more scheduler tuning: all inert against this particular wall. Naming the binding ceiling before pulling levers — the course's oldest reflex, at its highest-dollar venue.</div></details>
+<details><summary>5. Design the inference CI (the A3/A6 CI's third sibling): per-commit, per-model-onboarding, and continuous-in-prod tiers — six checks total that would have pre-empted this lesson's scenario, gotcha 5's quality drift, and A5's scenario (the GQA fusion bug), each with its instrument.</summary><div class="body">Per-commit: (1) envelope regression — Ex.1's calculator vs measured smoke benchmark within 20% (catches kernel/scheduler regressions as ARITHMETIC violations); (2) golden-output suite per architecture variant at fixed seeds (A5's scenario killer — eager-twin diff, M2 L6). Per-onboarding: (3) quantization eval gate — perplexity delta + task canaries vs fp16 reference, budgeted (gotcha 5); (4) long-context probe set — correctness AND per-token cost at {8k, 32k, 128k} logged to the pricing model (the scenario's missing table, automated). In-prod continuous: (5) per-request cost estimator (calculator wired to telemetry) with margin alerts by customer segment (the scenario's actual fix); (6) speculation acceptance-rate monitor with auto-disable below a* (P2's breakeven, enforced). Six checks, three incidents pre-empted, every instrument already built in this track — CI is where lessons go to become infrastructure.</div></details>
+<details><summary>6. The disaggregation debate: your fleet can run (a) unified nodes doing prefill+decode with chunked prefill, or (b) separate prefill and decode pools with KV shipped between them. Argue both sides with this lesson's nouns, name the interconnect number that decides, and the workload shape that flips the answer.</summary><div class="body">For (a): no KV transfer (the cache stays where it's born), simpler ops, chunked prefill already caps convoying (gotcha 6) — at moderate prompt/generate ratios the phases timeshare fine. For (b): each pool runs its OWN roofline regime cleanly (a8-phases) — prefill nodes at TC saturation, decode nodes tuned for bandwidth/batch; no ITL contamination ever; independent scaling of the two capacities (prompt-heavy vs chat-heavy days). The decider: KV shipping cost = ctx·131 KB/token — a 8k-context handoff is ~1 GB per request: over NVLink/IB-class fabric (100+ GB/s) that's ~10 ms — fine; over commodity network it eats the TTFT budget → (a). Flip workload: extreme prompt:generate ratios — RAG-style 30k-read/200-write loves (b) (prefill pool does 99% of work at compute-bound efficiency); balanced chat at short contexts loves (a). The answer is a division (KV bytes ÷ fabric speed) plus a workload histogram — every architecture debate in this track ends at a division, which is the track's actual teaching.</div></details>
+<details><summary>7. Interview closer: "Walk me through serving a 7B model on one H100 — capacity, throughput, latency, and what you'd do when demand doubles." 90 seconds, hitting: the envelope's four numbers, decode's roofline with the computed ceiling, KV/batch arithmetic with GQA noted, paging + continuous batching as the two founding tricks, the B-vs-ITL trade, and the demand-doubling ladder (quantize → batch curve → speculate → second GPU with its OWN arithmetic).</summary><div class="body">Skeleton: "Four numbers: 14 GB weights, 3.35 TB/s, 131 KB KV per token (GQA already ÷4'd that — architecture did serving a favor), ~700 usable TC TFLOPs. Decode is memory-bound matrix-vector — ceiling = 3350/14 ≈ 239 tok/s single-stream, computed not benchmarked [worked ex]; batching is the only ceiling-mover: B streams share the read until KV traffic bends the curve at big B·ctx [quiz 2]. Capacity: 80 − 14 − 4 ≈ 62 GB of KV pool ≈ 470k live tokens — 230 chat streams at 2k, paged so waste stays under 10% and prefixes dedupe [a8-paged]; continuous batching keeps the batch fat every step [a8-batch]. Latency: TTFT ≈ prefill (2k prompt ≈ 40 ms, compute-bound) + queue; ITL = step time — I pick B on the throughput-vs-ITL curve to the SLO, not to a vibe [§2]. Demand doubles: first int4/fp8 — bytes-per-token halves, ceiling AND pool both win [§quant, measured error math]; then re-derive the B-curve; then speculation if the workload's acceptance rate clears breakeven [P2's formula]; a second GPU only after — with TP's allreduce priced by A7's two-lane table, not assumed. Every knob I named is one term in an equation I can write on this whiteboard — want me to?" (They will. That's the plan.)</div></details>
+
+<div class="pager">
+  <a href="lesson-07.html">← Multi-GPU</a>
+  <a href="lesson-09.html">Next: torch.compile & TorchInductor →</a>
+</div>
+<div class="footer">GPU Mastery · Track A · Lesson 8 — works offline · progress saved in your browser</div>
+</div>
+<script src="../assets/diagramsA.js"></script>
+<script src="../assets/app.js"></script>
+</body>
+</html>

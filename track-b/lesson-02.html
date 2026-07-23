@@ -1,0 +1,205 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>B2 cuBLAS, cuSPARSE & cuSOLVER — GPU Mastery</title>
+<link rel="stylesheet" href="../assets/style.css">
+</head>
+<body data-lesson="bl2">
+<nav><div class="inner">
+  <a class="logo" href="../index.html">GPU<span>Mastery</span></a>
+  <a class="item" href="../index.html">Home</a>
+  <a class="item on" href="../curriculum.html">Curriculum</a>
+  <a class="item" href="../labs.html">Labs</a>
+  <a class="item" href="../setup.html">Lab setup</a>
+  <a class="item" href="../prompt.html">Generator prompt</a>
+</div></nav>
+<div class="wrap">
+
+<div class="lesson-top">
+  <div><span class="badge">Track B · Lesson 2</span><span class="badge dim">≈ 3 h</span></div>
+  <button id="donebtn" class="donebtn">Mark lesson complete</button>
+</div>
+<h1>cuBLAS, cuSPARSE, cuSOLVER — buy the linear algebra, own the decisions</h1>
+<p class="lead">Science codes live for decades; hand kernels rot in years (A3's scenario). So Track B's law is library-first — but the LIBRARY doesn't choose your storage format, your solver family, or your layout convention, and those decisions dominate performance by 10–100×. This lesson is about the decisions: dense vs sparse (measured crossover included), direct vs iterative, and the column-major identity that saves you from the classic first-week disaster.</p>
+
+<h2>Concept</h2>
+
+<h3>The ladder, and where your roofline literacy plugs in</h3>
+<div class="diagram" data-diagram="b2-libs" data-caption="cuBLAS/cuSOLVER/cuFFT first, cuSPARSE with format judgment, Thrust/CUB for building blocks, hand kernels last — 5.11's law as a track constitution."></div>
+<pre><code>read every library call through 4.7's lens BEFORE calling it:
+  GEMM (matmul):        AI grows with N → COMPUTE-bound → TFLOPs matter,
+                        TC shapes matter (A6) — the one call that scales
+  GEMV (mat·vec):       2 FLOP per 4 B read → AI 0.5 → BANDWIDTH-bound —
+                        no library tuning changes that ceiling (A8's decode!)
+  SpMV (sparse mat·vec): ~2 FLOP per ~10 B (value+index+x-gather) →
+                        bandwidth-bound WITH 5.7's gather tax on top
+  triangular solve:     sequential dependencies → latency-shaped, parallelism
+                        limited — the call people are SHOCKED is slow
+# "the GPU is slow at my linear algebra" usually parses to "my workload is
+# GEMV/SpMV-shaped and I budgeted for GEMM's ceiling" — regime literacy first.</code></pre>
+
+<h3>Column-major: the identity, not the copy</h3>
+<div class="diagram" data-diagram="b2-colmajor" data-caption="cuBLAS inherited Fortran's column-major view. Your row-major C(m,n) IS a column-major Cᵀ(n,m) on the same bytes — so compute Cᵀ = BᵀAᵀ by swapping operand order. Zero copies."></div>
+<pre><code>row-major you: C = A·B          cuBLAS sees your buffers as: Aᵀ, Bᵀ (free!)
+call:  gemm(handle, N, N, n, m, k, &alpha;, B, ldb=n, A, lda=k, &beta;, C, ldc=n)
+       — operands SWAPPED, no transpose flags, no copies:
+       cuBLAS computes (Bᵀ·Aᵀ) column-major = (A·B)ᵀᵀ = your C, row-major ✓
+# the lda/ldb/ldc leading dimensions are M2 L5's strides wearing Fortran
+# clothes (4.2 P3's LDA — third appearance). FIXTURE: one 3×2·2×4 product
+# checked against a hand computation before ANY real work — layout bugs are
+# shape-legal and silent (5.11's gotcha; the fixture costs 5 minutes, the
+# bug costs a week of "my solver converges to the wrong answer").</code></pre>
+
+<h3>Sparse: a format decision wearing a math costume</h3>
+<div class="diagram" data-diagram="b2-sparse" data-caption="CSR = values + column indices + row pointers (M2 L7's layout thinking). The overhead means sparsity must EARN its keep — and the crossover is measurable."></div>
+<pre><code>MEASURED (CPU, N=4000 GEMV vs CSR SpMV — shape transfers to GPU, crossover
+shifts LOWER there because gathers pay 5.7's sector tax):
+  density  1%:  sparse 30.5× FASTER    (PDE-matrix territory: ~5 nnz/row)
+  density 10%:  sparse 2.8× faster     (borderline — measure YOUR matrix)
+  density 50%:  sparse 0.7× — LOSES    (indices+gathers cost more than zeros)
+formats, chosen by ACCESS PATTERN (M2 L7's law, verbatim):
+  CSR: rowwise SpMV workhorse · COO: easy construction/assembly →convert
+  ELL/blocked: uniform rows (structured grids) — vectorizes like dense
+  the modern API (cuSPARSE generic): describe matrix+format, ask for SpMV/
+  SpMM, provide workspace — the library picks kernels per format+arch.</code></pre>
+
+<h3>cuSOLVER: factor once, solve many — and know your family</h3>
+<pre><code>direct (LU/Cholesky/QR):  O(N³) factor, O(N²) per solve after —
+  amortization law: same A, many b's → factor ONCE (B1 P4's implicit
+  stepping: 5.3's alloc-once as numerics). Cholesky for SPD (half the cost,
+  and SPD is what diffusion/covariance give you — know your matrix's virtue).
+iterative (CG & friends — via SpMV loops you now understand):
+  O(nnz) per iteration × iterations(condition number) — wins for HUGE sparse
+  systems where factors don't fit (3D PDEs: fill-in EXPLODES the memory);
+  needs preconditioning to converge in civilized iteration counts (the
+  entire field's dark art; B10 stays explicit partly to dodge it honestly)
+crossover rule-of-thumb: small/dense/many-solves → direct;
+  huge/sparse/one-solve-per-step → iterative + preconditioner.</code></pre>
+
+<h2>Worked example</h2>
+<div class="card">
+<p><strong>Task:</strong> Implicit heat step (B1 P4's matrix: I − hαD₂, tridiagonal, SPD) solved three ways for N = 1M unknowns, 10,000 timesteps — priced BEFORE any code, the B-track way. (Representative GPU numbers from the course ledger; the DECISION structure is the deliverable.)</p>
+<pre><code>option A — dense Cholesky (cuSOLVER potrf):
+  storage N² = 4 TB fp32 … DEAD at the storage line. (Writing the line that
+  kills an option is not wasted work — it's the audit trail.)
+option B — tridiagonal direct (cuSPARSE gtsv-class):
+  O(N) storage, O(N) solve ≈ a few bandwidth passes over 3 diagonals
+  ≈ 5 × 12 MB / 220 GB/s ≈ 0.3 ms/step → 10k steps ≈ 3 s   ← the winner:
+  the matrix's STRUCTURE (tridiagonal) was worth 12 orders of magnitude
+  over option A — structure recognition IS the optimization
+option C — CG iterative with Jacobi preconditioner:
+  ~O(√κ) iters × SpMV(0.1 ms) ≈ 30 iters × 0.1 ≈ 3 ms/step → 30 s: 10×
+  worse HERE, but the ONLY option when 2D/3D fill-in kills direct methods —
+  and its cost formula (iters(κ) × SpMV) is one you can now price on sight
+sanity fixture before trusting any of them: manufacture a solution (pick
+u*, compute b = A·u*, solve, compare — M2 L6's oracle, self-supplied), plus
+symmetry + conservation from B1 P6's preflight.</code></pre>
+<p><strong>What to internalize:</strong> the three-option memo took arithmetic, not benchmarks — storage lines, bandwidth passes, iteration-count formulas. The library will execute whichever you pick at vendor speed; it will NOT tell you that your matrix was tridiagonal, SPD, or better served by iteration. That judgment — matrix structure → method family → cost formula — is what "knows numerical linear algebra" means in an HPC interview, and it fits on an index card.</p>
+</div>
+
+<h2>Key points</h2>
+<ul class="keypoints">
+<li>Read every library call through the roofline first: GEMM is compute-bound and scales, GEMV/SpMV are bandwidth-bound with hard ceilings, triangular solves are latency-shaped — budget accordingly or be "shocked" on schedule.</li>
+<li>Column-major is handled by the identity, never a copy: swap operand order so cuBLAS's Cᵀ = BᵀAᵀ lands your row-major C; lda/ldb/ldc are M2 L5's strides; one hand-checked 3×2·2×4 fixture guards it all.</li>
+<li>Sparsity must earn its overhead — measured: 30× at 1% density, 2.8× at 10%, LOSES at 50% (and GPU gather taxes shift the crossover lower); format follows access pattern (CSR workhorse, COO assembly, ELL structured).</li>
+<li>Direct solvers amortize (factor once, solve many — Cholesky when SPD halves the bill); iterative solvers cost iters(κ) × SpMV and win when fill-in kills factors — the crossover is priceable in advance.</li>
+<li>Matrix STRUCTURE recognition (tridiagonal, banded, SPD, block) is worth orders of magnitude before any tuning — the worked example's option A→B was 12 of them.</li>
+<li>Fixture every library integration: manufactured solutions (b = A·u*), the layout hand-check, Parseval-style identities — you're not testing NVIDIA's code, you're testing YOUR conventions around it (M2 L6).</li>
+</ul>
+
+<h2>Quiz</h2>
+<div class="quiz">
+  <div class="q">1. A group ports their solver and reports: "cuBLAS is broken — our GEMM-based routine returns transposed garbage, so we added explicit transpose kernels before and after every call; now it's correct but 40% slower than expected, and memory usage spiked." Write the code review that fixes correctness, speed, and memory in one change, and name the fixture that would have prevented the whole arc.</div>
+  <button class="opt">cuBLAS row-major mode flag fixes it — enable it</button>
+  <button class="opt" data-c="1">The transposed "garbage" was the column-major view (b2-colmajor): their row-major buffers were REINTERPRETED, not corrupted. The fix deletes all transpose kernels and swaps operand order per call — gemm(B, A) yields (A·B) in row-major bytes via Cᵀ=BᵀAᵀ: zero copies, zero extra memory, full library speed. Their patch was correct-by-brute-force: two O(N²) transpose passes per GEMM (the 40% at their sizes — 5.7's transpose cost, self-inflicted twice) plus transpose buffers (the memory spike). The fixture: the 3×2·2×4 hand-checked product on day one — non-square ON PURPOSE, because square test matrices make transposition bugs shape-legal and often value-plausible (5.11's gotcha; A1 P6's square-matrix trap, third sighting)</button>
+  <button class="opt">Their GPU lacks tensor cores for transposed layouts</button>
+  <button class="opt">Keep the transposes but fuse them into the GEMM</button>
+  <div class="expl">The identity-vs-copy distinction is THE cuBLAS onboarding moment, and teams re-discover it expensively every year (option 4 re-invents what the identity gets free; a "row-major flag" (option 1) exists in some wrappers precisely by applying this identity underneath — knowing the mechanism means you're never hostage to a wrapper). Review-comment form matters too: fix + mechanism + the missing fixture, three sentences (A5 P5's format — teach, don't gatekeep).</div>
+</div>
+<div class="quiz">
+  <div class="q">2. Two matrices, both N=100k, both from real problems: (a) a 3D Poisson operator, ~7 nnz/row; (b) a covariance matrix from finance, dense but "we could threshold small entries to 30% density and use cuSPARSE — sparse is faster, right?" For each: the storage and SpMV/GEMV cost arithmetic, the verdict, and — for (b) — the numerics objection that outranks the performance one.</div>
+  <button class="opt">Sparse both — fewer numbers is always faster</button>
+  <button class="opt" data-c="1">(a) 7 nnz/row = 0.007% density: CSR ≈ 100k×7×8 B ≈ 5.6 MB vs dense 40 GB — sparse by four orders in storage, and SpMV ≈ bandwidth over 5.6 MB: the only sane option (this is the b2-sparse sweet spot: PDE matrices). (b) 30% density: the measured crossover says sparse LOSES at 50% and barely wins at 10% on CPU — at 30% on GPU (gather tax) expect ≈ parity-to-loss, while CSR storage (30%×(4+4)B vs dense 4B) is only 40% smaller: performance verdict — keep it dense, use GEMV/GEMM at full library speed. The outranking objection: THRESHOLDING CHANGED THE MATRIX — a covariance matrix's small entries carry correlation structure; zeroing them can break positive-definiteness (Cholesky fails or, worse, "succeeds" on a matrix that no longer models the portfolio — silently wrong risk numbers, M1 L8's budget question asked about the MODEL, not the floats). Approximation decisions belong to the science, not the storage layer</button>
+  <button class="opt">Dense both — GPUs hate indirection</button>
+  <button class="opt">(a) sparse, (b) sparse but with ELL format</button>
+  <div class="expl">Two matrices, opposite verdicts, one method: density arithmetic + crossover data + a numerics veto. The (b) trap is endemic — "sparsify for speed" pitched as a free lunch when it's (i) usually not faster above ~10–20% and (ii) never free mathematically: any thresholding is a MODEL change requiring domain sign-off (the B-track's version of A8's quantization-needs-evals doctrine). Format choice (option 4) is a second-order question that only opens AFTER density says sparse at all.</div>
+</div>
+
+<h2>Exercises</h2>
+<details><summary>Exercise 1 — The layout fixture + the identity, on Colab (torch exposes cuBLAS): build the 3×2·2×4 hand-check; verify torch's matmul agrees; then call the raw column-major path (torch.as_strided or cupy's cublas via cupy.matmul on 'F'-ordered arrays) both WITH the swap identity and WITHOUT (reproducing quiz 1's "garbage") — document the exact wrong-output pattern so you recognize it forever. Bonus: time GEMM vs GEMV at N=4096 and compute each's achieved fraction of its OWN roofline ceiling (TFLOPs vs GB/s — two different denominators!).</summary><div class="body">
+<pre><code>expected: the "garbage" is exactly Bᵀ·Aᵀ read row-major — i.e., your C
+TRANSPOSED (for non-square: wrong SHAPE, the loud gift; for square: right
+shape, transposed values — the silent trap). GEMV lands ~80–90% of the
+BANDWIDTH ceiling (N²·4B/time vs 220 GB/s on T4); GEMM lands vs the TC
+ceiling — two calls, two ceilings, and writing both denominators without
+prompting is the regime literacy this track certifies.</code></pre>
+<p>Keep the wrong-output screenshot in your notes: pattern recognition ("that's a layout transpose, not corruption") converts a week-class bug into a 30-second diagnosis — quiz 1's whole arc, pre-lived.</p>
+</div></details>
+<details><summary>Exercise 2 — The crossover, YOUR machine(s): reproduce the density sweep (1%, 5%, 10%, 20%, 50%) with scipy CSR vs dense on CPU, then on Colab with cupy (cusparse SpMV vs cublas GEMV) if available. Plot speedup vs density on log-x; mark each machine's crossover; explain the GPU-vs-CPU crossover SHIFT with one 5.7 citation. Then the judgment drill: for your (or an imagined) domain's three most common matrices, place them on the plot and write one-line verdicts.</summary><div class="body">
+<pre><code>expected shape: CPU crossover ~25–40% (measured here: 2.8× at 10%, 0.7× at
+50%); GPU crossover LOWER (~10–20%): CSR's x-gather pays sector taxes
+(5.7's scatter floor) that CPU caches partially forgive — same model,
+different constants, and BOTH machines agree at the extremes (1%: sparse
+by miles; 50%: dense, always).</code></pre>
+<p>The judgment drill is the real exercise: "FEM stiffness matrix, 9 nnz/row → sparse, CSR, no debate. Graph Laplacian of a social network, power-law rows → sparse but ELL dies (row-length variance — format follows pattern). Dense covariance thresholded to 30% → keep dense, and escalate the thresholding question to the quants (quiz 2b)." Three verdicts, each citing a mechanism — that's the lesson, operationalized.</p>
+</div></details>
+
+<hr>
+<h1>Go deeper — the practitioner's fine print</h1>
+
+<h2>1. Handles, streams, workspaces (the library citizenship rules)</h2>
+<pre><code>cublasCreate(&handle)      ONCE per thread/context — not per call (5.3's
+                           alloc-once; handle creation is milliseconds)
+cublasSetStream(handle, s) EVERY library call rides YOUR stream (5.9's law —
+                           A3 quiz 1's bug bites library users identically)
+workspace APIs             cuSOLVER/cuSPARSE ask you to provide scratch:
+                           query size → allocate ONCE → reuse (the pattern
+                           exists so THEY don't malloc per call — 5.3 again)
+pointer modes              alpha/beta on host vs device — mismatch = the
+                           classic "beta ignored" head-scratcher; set it
+                           explicitly, test it in the layout fixture
+batched variants           gemmBatched/getrfBatched: 10k tiny problems =
+                           ONE call (5.2's launch floor, library edition —
+                           tiny-matrix workloads live or die on this)</code></pre>
+
+<h2>2. Condition number: the health metric the library won't check</h2>
+<pre><code>κ(A) = how much A amplifies relative error: solution error ≈ κ · input error
+  κ ~ 1e3: lose 3 digits — fp64 shrugs, fp32 sweats
+  κ ~ 1e8: fp32 solutions are NOISE (7 digits in, 8 lost) — fp64 mandatory
+  κ ~ 1e16: your problem is ill-POSED — no precision saves the formulation
+iterative methods: iterations ~ O(√κ) for CG — κ is also a TIME cost, which
+is what preconditioners attack (they solve an easier nearby system to shrink
+effective κ). The habit: estimate κ (norm ratios, or cusolver's estimators)
+BEFORE trusting any solve — B8 builds the full error-budget pipeline on it.</code></pre>
+
+<h2>3. Gotchas</h2>
+<div class="gotcha"><strong>Square test matrices.</strong> They make transpose bugs invisible (quiz 1). The layout fixture is non-square BY LAW, forever.</div>
+<div class="gotcha"><strong>Handle-per-call.</strong> cublasCreate in a loop adds milliseconds per call and fragments memory — profile shows mystery gaps between GEMMs (5.10's timeline finds it; §1's rule prevents it).</div>
+<div class="gotcha"><strong>Ignoring the info return.</strong> cuSOLVER's devInfo says WHICH pivot/leading-minor failed (singular matrix, non-SPD for Cholesky) — codes that don't check it ship garbage factors downstream (5.4's error discipline: the library TOLD you).</div>
+<div class="gotcha"><strong>Thresholding as a performance decision.</strong> Quiz 2b: changing nnz changes the MATHEMATICS. Sparsification is a modeling choice needing domain sign-off + spectrum checks, not a storage optimization.</div>
+<div class="gotcha"><strong>Triangular-solve surprise.</strong> trsv/trsm parallelize poorly by nature (sequential dependency chain) — a Cholesky pipeline that's 95% fast factor + 5% "slow" solve is WORKING AS PHYSICS; batch solves or restructure, don't file bugs.</div>
+<div class="gotcha"><strong>fp32 solves on κ>1e6 systems.</strong> The answer returns quickly and wrongly (§2's table). Mixed-precision refinement (fp32 factor + fp64 residual correction — cuSOLVER offers it) is the professional middle path; B8 formalizes the budget.</div>
+
+<h2>Scenario — the week the "wrong physics" was a leading dimension</h2>
+<p>A materials-simulation postdoc integrates cuBLAS into an inherited Fortran-adjacent C code. Small tests pass (square matrices — of course). Production runs: the simulated crystal slowly shears sideways over thousands of steps — "spurious anisotropy," and two weeks go to physics theories: boundary conditions, potential parameters, even a literature dive into whether the material HAS such a phase. A visiting engineer — Module-2-literate — asks to see the stiffness assembly: the GEMM computing block interactions passes lda = the ROW count of a non-square block where the (column-major) library wanted the leading dimension of its actual layout; every off-diagonal block lands transposed. On SQUARE blocks (the tests) it was invisible; on the production code's 3×6 coupling blocks it transposed force components — a small, systematic, direction-biased error: literally a sideways push every step. The fix: two lda arguments and the non-square layout fixture added to CI (quiz 1's law). The two morals get taped to the wall: <em>layout bugs masquerade as PHYSICS — subtle, plausible, directional — which is why they eat weeks</em>; and <em>every library integration gets a hand-checkable non-square fixture BEFORE first science</em> — five minutes of M2 L6 against two weeks of phantom materials science. (The postdoc's revenge: they now open every code review with "show me your layout fixture," and are right to.)</p>
+
+<h2>Practice</h2>
+<details><summary>1. Regime-classify and ceiling-price each call on a T4 (220 GB/s, 8.1 TF fp32 / 65 TF fp16-TC): (a) sgemm N=8192; (b) sgemv N=8192; (c) SpMV 1M×1M, 5 nnz/row; (d) 50k Cholesky solves on 64×64 SPD matrices; (e) strsm on one 8192 triangular system.</summary><div class="body">(a) 2·8192³=1.1 TFLOP, compute-bound: ~135 ms at realistic fp32 (~55% of 8.1 TF) — the scaling citizen. (b) 8192²·4B=268 MB read, bandwidth: ≈1.2 ms at 220 GB/s; FLOPs irrelevant (AI 0.5). (c) 5M nnz × ~10 B ≈ 50 MB+x-gather: ~0.3–0.5 ms bandwidth-with-gather-tax. (d) tiny problems → the BATCHED call (potrfBatched): 50k × O(64³/6) ≈ 2.2 GFLOP total — launch-floor territory without batching (5.2), trivial with it: ~ms. (e) triangular solve, one big chain: latency-shaped, poor parallelism — tens of ms and NOT a bug (gotcha 5). Five calls, four different ceilings, zero benchmarks needed to be within 2× — the pricing reflex is the deliverable.</div></details>
+<details><summary>2. Derive the SpMV byte count per row for CSR (fp64 values, int32 indices) and show where the x-GATHER's cost hides in your formula; then explain why ELL beats CSR on a structured 7-point stencil matrix but catastrophically loses on a power-law graph.</summary><div class="body">Per row (k nnz): k×8 (values) + k×4 (col indices) + 8 (row_ptr amortized) + k×8 (x gathers!) + 8 (y write) ≈ 20k+16 bytes — the x-gather is HALF the value traffic and it's the SCATTERED half (5.7's tax lives there; cache hit rate on x decides real speed — structured matrices reuse x beautifully, random graphs don't). ELL: pad all rows to k_max, column-major storage → uniform, coalesced, no row_ptr — perfect when k_max≈k_avg (stencil: every row exactly 7). Power-law graph: k_max in the millions, k_avg ~10 → padding ratio 1e5: storage and traffic explode — format follows ROW-LENGTH DISTRIBUTION, which is M2 L7's access-pattern law with a histogram attached (hybrid ELL+COO formats exist precisely for heavy-tailed rows).</div></details>
+<details><summary>3. Your CG solver stalls at 40k iterations on a κ≈1e8 system (fp64). A teammate proposes "switch to fp32 — twice the bandwidth, SpMV is bandwidth-bound, we'll finish in half the time." Destroy and rebuild the proposal correctly (two mechanisms + the standard middle path).</summary><div class="body">Destroy: (1) iteration COUNT scales with √κ and with rounding noise in the residual — fp32's eps 1e-7 against κ=1e8 means computed residuals are ~pure noise near convergence: CG stops converging at ~1e0 relative error or stagnates/diverges — half the time per iteration × infinitely more iterations is a bad product; (2) even pre-stagnation, fp32 orthogonality loss degrades CG's Krylov machinery faster (the method's math ASSUMES exact arithmetic; κ amplifies every violation — §2's table). Rebuild: mixed precision the RIGHT way — fp32 (or fp16!) for the SpMV/preconditioner heavy lifting inside fp64 outer iterations (iterative refinement / flexible-CG patterns; cuSOLVER's IR does this for direct solves): bandwidth savings where they're safe, fp64 residuals where correctness lives — A6's "speed in the narrow bytes, correctness in the wide spine," and the REAL fix for 40k iterations is a preconditioner (κ_eff ↓ → iterations collapse), which outranks all precision games (P2's ordering: attack κ first).</div></details>
+<details><summary>4. Write the six-line "library integration preflight" (B1 P6's sibling) that every cuBLAS/cuSPARSE/cuSOLVER adoption must pass in CI, each line citing its gotcha/quiz.</summary><div class="body">(1) Non-square layout fixture: 3×2·2×4 hand-checked product (quiz 1, scenario). (2) Pointer-mode probe: beta=2 test confirming host/device scalar mode (§1's head-scratcher). (3) devInfo assertion wrapper: every cuSOLVER call's info checked, named error on failure (gotcha 3). (4) Manufactured-solution solve: b=A·u*, assert relative error vs κ-derived budget (§2 + M2 L6). (5) Stream citizenship test: library call between two events on a NON-default stream, assert it ran there (A3 quiz 1's bug, library edition). (6) Workspace reuse audit: allocation count over 100 calls == setup-only (5.3's hot-loop law, §1). Six lines, six week-class incidents pre-empted — the B-track's testing constitution growing its library chapter.</div></details>
+<details><summary>5. The implicit-step matrix from B1 (I − hαD₂) is tridiagonal AND SPD AND constant across steps. List every structural fact a naive "call getrf (general LU)" solution wastes, with the cost of each waste — then the optimal pipeline.</summary><div class="body">Wasted: (1) tridiagonality — general LU is O(N³)/dense storage vs O(N) banded: the 12-orders line from the worked example; (2) SPD — even banded, Cholesky-class halves work and guarantees stability WITHOUT pivoting (pivoting is the sequential pain of LU — structure buys parallelism too); (3) constancy — refactoring per step wastes factor cost × 10k steps: factor once (or for gtsv-class, precompute once), solve per step (5.3's law); (4) fp64-ness of a beautifully-conditioned operator (κ modest for diffusion) — mixed-precision refinement could even apply, though at 0.3 ms/step nobody needs it (4.7's stopping rule: KNOW you're leaving nothing that matters). Optimal: cusparse tridiagonal solve with precomputed structure, stream-resident, 0.3 ms — every structural fact converted to either an order of magnitude or a deleted risk. "What does your matrix KNOW that your solver ignores" is the whole art.</div></details>
+<details><summary>6. Batched linear algebra: your workload is 100k independent 32×32 solves per timestep (chemistry per grid cell — quiz 1 of B1's implicit fix, industrialized). Price naive loop vs batched vs "restructure as one block-diagonal system," and name the Module-5 concept each option's cost is made of.</summary><div class="body">Naive loop: 100k × (launch floor ~5 µs + tiny kernel) ≈ 0.5 s+ of pure 5.2 overhead — the kernel confetti anti-pattern. Batched (getrfBatched/getrsBatched): ONE launch, library-tiled: total work 100k × O(32³) ≈ 3.3 GFLOP + 100k×4 KB traffic ≈ 400 MB → ~2–4 ms bandwidth-ish — a ~200× win made ENTIRELY of deleted launch overhead + batching's coalescing (5.2 + 5.7). Block-diagonal mega-system: mathematically identical, but general sparse machinery pays index overhead for structure the batched API expresses directly — usually loses to purpose-built batching (structure recognition again, P5's moral). The interview kicker: "and at 32×32, tensor cores? — matrices this small underuse TC tiles (a6-tc's shape law); batched fp64 on regular pipes is often optimal: know when the fancy unit DOESN'T apply."</div></details>
+<details><summary>7. Interview closer: "How do you approach linear algebra on GPUs?" — 90 seconds: the library-first law with its maintenance argument, the regime table (GEMM/GEMV/SpMV/trsv), the two decision axes (dense-vs-sparse with your measured crossover; direct-vs-iterative with the κ formula), structure recognition's orders-of-magnitude, and the fixture discipline that guards it all.</summary><div class="body">Skeleton: "Library-first, always — vendor teams re-tune per architecture forever and my hand kernel rots (science code outlives GPUs by decades). My job is the decisions the library can't make. First, regime-read every call: GEMM is compute-bound and scales; GEMV and SpMV are bandwidth-bound — I price them as bytes over 220 GB/s, not FLOPs; triangular solves are latency-chains and 'slow' by physics [§1]. Second, dense vs sparse is measured, not ideological: my crossover data says 30× at 1% density, parity near 10–20% on GPUs, sparse LOSES at 50% — and thresholding a dense matrix to 'make it sparse' is a MODEL change requiring domain sign-off, not a storage trick [quiz 2]. Third, direct vs iterative: factor-once-solve-many when it fits (Cholesky when SPD — structure is worth orders of magnitude: my tridiagonal-vs-dense memo spans twelve of them), iterative at iters(√κ)×SpMV when fill-in kills factors — and κ gets estimated before anything is trusted [§2, worked ex]. All of it behind fixtures: a non-square layout hand-check — column-major bugs masquerade as physics [scenario] — manufactured solutions, devInfo asserts, stream citizenship [P4]. The one-liner: the library supplies the speed; I supply the regime, the structure, and the proof." Delivered with the crossover numbers, this is a hire.</div></details>
+
+<div class="pager">
+  <a href="lesson-01.html">← Numerical calculus</a>
+  <a href="lesson-03.html">Next: Stencils & grid codes →</a>
+</div>
+<div class="footer">GPU Mastery · Track B · Lesson 2 — works offline · progress saved in your browser</div>
+</div>
+<script src="../assets/diagramsB.js"></script>
+<script src="../assets/app.js"></script>
+</body>
+</html>

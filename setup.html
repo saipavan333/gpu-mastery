@@ -1,0 +1,70 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Lab Setup — GPU Mastery</title>
+<link rel="stylesheet" href="assets/style.css">
+</head>
+<body>
+<nav><div class="inner">
+  <a class="logo" href="index.html">GPU<span>Mastery</span></a>
+  <a class="item" href="index.html">Home</a>
+  <a class="item" href="curriculum.html">Curriculum</a>
+  <a class="item" href="labs.html">Labs</a>
+  <a class="item on" href="setup.html">Lab setup</a>
+  <a class="item" href="prompt.html">Generator prompt</a>
+</div></nav>
+<div class="wrap">
+
+<h1>Lab Setup — your practice environment</h1>
+<p class="lead">Straight talk: no app can bundle a GPU. Real CUDA practice needs either NVIDIA hardware you own or a free cloud GPU. Both paths below are zero-cost to start; pick one now, add the other later. Module 1 needs no setup at all — start learning today, set this up before Module 2.</p>
+
+<h2>Path 1 — Google Colab (recommended start: free, zero install)</h2>
+<p>Colab gives you a real NVIDIA GPU (typically a T4) in the browser, free tier included. It runs Python, and — the part most beginners don't know — it compiles CUDA C++ too:</p>
+<pre><code>1. colab.research.google.com → New notebook
+2. Runtime → Change runtime type → Hardware accelerator: GPU → Save
+3. Verify the GPU:            !nvidia-smi
+4. Python/PyTorch work now.   For CUDA C++ (Module 5 onward):
+
+%%writefile hello.cu
+#include &lt;stdio.h&gt;
+__global__ void hello() { printf("Hello from GPU thread %d\n", threadIdx.x); }
+int main() { hello&lt;&lt;&lt;1, 8&gt;&gt;&gt;(); cudaDeviceSynchronize(); return 0; }
+
+!nvcc -arch=sm_75 hello.cu -o hello && ./hello</code></pre>
+<div class="note">Free-tier realities: sessions time out (save work to Drive/GitHub), GPUs vary, and heavy use gets throttled. For this curriculum's exercises it's entirely sufficient through Module 5. Kaggle Notebooks are the backup free tier (30 h/week GPU quota, requires phone verification).</div>
+
+<h2>Path 2 — your own NVIDIA GPU (any GTX 10-series or newer works)</h2>
+<h3>Windows: use WSL2 (the professional setup)</h3>
+<pre><code>1. Install/update the NVIDIA *Windows* driver (that's the only driver you need)
+2. PowerShell (admin):  wsl --install          # installs Ubuntu
+3. Inside Ubuntu, install the CUDA TOOLKIT (13.x) — toolkit ≠ driver:
+   follow developer.nvidia.com/cuda-downloads → Linux → x86_64 → WSL-Ubuntu
+4. Verify:  nvidia-smi        (talks to the Windows driver)
+            nvcc --version    (the compiler, from the toolkit)</code></pre>
+<h3>Linux: native</h3>
+<pre><code>Driver from your distro (ubuntu-drivers autoinstall) or NVIDIA's runfile,
+toolkit from developer.nvidia.com/cuda-downloads. Keep driver ≥ toolkit's minimum.
+Check both: nvidia-smi (driver + max CUDA it supports) vs nvcc --version (toolkit).</code></pre>
+<div class="warnbox"><strong>The #1 beginner confusion:</strong> <code>nvidia-smi</code>'s "CUDA Version" is the max your <em>driver</em> supports; <code>nvcc --version</code> is what your <em>toolkit</em> compiles. They can differ. Kernels need toolkit ≤ driver's max. Second confusion: macOS has no CUDA at all (Apple GPUs speak Metal) — Mac owners use Colab for CUDA, and get a bonus: WebGPU work (Track D) runs natively in Safari 26+.</div>
+
+<h2>Path 3 — no NVIDIA GPU, other hardware</h2>
+<table>
+<tr><th>You have</th><th>You can still…</th></tr>
+<tr><td>AMD Radeon (RX 6000/7000/9000)</td><td>Run ROCm 7.x + HIP on Linux — Track D's D2 becomes your native path; CUDA lessons port almost 1:1 via hipify.</td></tr>
+<tr><td>Apple Silicon Mac</td><td>PyTorch via MPS backend for Modules 2 & Track A concepts; WebGPU natively; CUDA via Colab.</td></tr>
+<tr><td>Any modern browser</td><td>WebGPU compute shaders (Track D5) — real GPU parallelism, zero install, works today in Chrome/Edge/Firefox/Safari.</td></tr>
+<tr><td>Nothing but a phone</td><td>Colab in the mobile browser genuinely works for reading + running. Not comfortable, but real.</td></tr>
+</table>
+
+<h2>Editor & tools (all free)</h2>
+<p><strong>VS Code</strong> with extensions: Python, C/C++, and (later) Nsight Visual Studio Code Edition for CUDA debugging. <strong>Git</strong> from day one — Module 2.7 teaches the workflow; every capstone lives in a repo (that repo becomes your portfolio, which is the actual "readily deployable" artifact employers check). Module 5.10 adds <strong>Nsight Systems & Nsight Compute</strong> (free downloads) — the profilers this curriculum treats as truth-tellers.</p>
+
+<h2>Using this site as your desktop app</h2>
+<p>This whole course is dependency-free static files: it works fully offline. Options, simplest first: <strong>(a)</strong> keep the folder anywhere and open <code>index.html</code> — everything works, progress saves in your browser. <strong>(b)</strong> Chrome/Edge: with the site open → menu → Cast/Save → "Install page as app" (or Save shortcut → open in window) — gives it its own window and icon. <strong>(c)</strong> host it free to reach it from any device — see the README in this folder for the 2-minute GitHub Pages / Netlify Drop instructions. Progress is stored per-browser (localStorage), so phone and laptop track separately.</p>
+
+<div class="footer">GPU Mastery · Lab setup — verified against CUDA 13.3 / ROCm 7.2 / July 2026 reality</div>
+</div>
+<script src="assets/app.js"></script>
+</body>
+</html>

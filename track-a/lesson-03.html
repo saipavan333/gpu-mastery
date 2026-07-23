@@ -1,0 +1,214 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>A3 Custom CUDA Ops for PyTorch — GPU Mastery</title>
+<link rel="stylesheet" href="../assets/style.css">
+</head>
+<body data-lesson="al3">
+<nav><div class="inner">
+  <a class="logo" href="../index.html">GPU<span>Mastery</span></a>
+  <a class="item" href="../index.html">Home</a>
+  <a class="item on" href="../curriculum.html">Curriculum</a>
+  <a class="item" href="../labs.html">Labs</a>
+  <a class="item" href="../setup.html">Lab setup</a>
+  <a class="item" href="../prompt.html">Generator prompt</a>
+</div></nav>
+<div class="wrap">
+
+<div class="lesson-top">
+  <div><span class="badge">Track A · Lesson 3</span><span class="badge dim">≈ 3.5 h</span></div>
+  <button id="donebtn" class="donebtn">Mark lesson complete</button>
+</div>
+<h1>Custom CUDA Ops — your Module 5 kernels, wearing a torch uniform</h1>
+<p class="lead">Everything below the binding is Module 5 unchanged. This lesson is about the uniform: the contracts a kernel must sign to live inside autograd (shapes, dtypes, contiguity, streams, a backward), and the fixtures that make it trustworthy. It's short on new ideas and long on discipline — which is exactly what production op libraries are.</p>
+
+<h2>Concept</h2>
+
+<h3>The journey of a call</h3>
+<div class="diagram" data-diagram="a3-bind" data-caption="Python → C++ binding → your kernel, with the stream passed in. The binding's jobs are contracts, stream, and autograd registration — the kernel never changes."></div>
+<pre><code>// ext.cu — the C++/CUDA side (Colab: %%writefile + torch JIT-compiles it)
+#include &lt;torch/extension.h&gt;
+torch::Tensor sum_fwd(torch::Tensor x) {
+    TORCH_CHECK(x.is_cuda(), "x must be CUDA");          // 3.3's asserts,
+    TORCH_CHECK(x.is_contiguous(), "x must be contiguous"); // torch spelling
+    auto out = torch::zeros({}, x.options());            // scalar, same dtype/device
+    auto stream = at::cuda::getCurrentCUDAStream();      // 5.9's LAW: never
+    launch_sum(x.data_ptr&lt;float&gt;(), out.data_ptr&lt;float&gt;(), // launch off-lane
+               x.numel(), stream);                        // ← your 5.8 v3 kernel
+    return out;
+}
+PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) { m.def("sum_fwd", &amp;sum_fwd); }</code></pre>
+<pre><code># python side — JIT build (perfect for Colab; setup.py is the shipping path)
+ext = torch.utils.cpp_extension.load(name="myops", sources=["ext.cu"])
+ext.sum_fwd(x)     # a real torch op call — dispatcher, streams, the works</code></pre>
+
+<h3>Joining autograd: an op must declare its VJP</h3>
+<pre><code>class MySum(torch.autograd.Function):
+    @staticmethod
+    def forward(ctx, x):
+        ctx.in_shape = x.shape          # sum's backward needs ONLY the shape —
+        return ext.sum_fwd(x)           #   no tensors saved: the cheapest tape
+    @staticmethod                        #   node possible (contrast Ex.2's relu)
+    def backward(ctx, g):                # g = dL/dout, a scalar here
+        return g.expand(ctx.in_shape)    # d(Σxᵢ)/dxⱼ = 1 → grad broadcasts (A1!)
+my_sum = MySum.apply
+# ctx.save_for_backward(t) is the tape's official pocket for TENSORS —
+# it participates in A2's version counter; ad-hoc "ctx.t = t" does not,
+# which is exactly why the official pocket exists (quiz 2 of A2, enforced).</code></pre>
+
+<h3>The contracts, and who they protect</h3>
+<div class="diagram" data-diagram="a3-contig" data-caption="A strided view handed to a kernel that assumes dense rows reads the skipped bytes. TORCH_CHECK, accept strides, or copy — silence is not on the menu."></div>
+<pre><code>contiguity:  your 5.x kernels index i = row*W + col — TRUE only for dense
+             row-major storage. A view like x[:, ::2] (A2 Ex.1) breaks the
+             assumption SILENTLY. Menu (5.3's philosophy — one loud choice):
+             TORCH_CHECK(is_contiguous)  · accept stride args (cuBLAS's lda)
+             · x = x.contiguous() up front (honest copy, documented)
+dtype:       AT_DISPATCH_FLOATING_TYPES(x.scalar_type(), … ) generates the
+             fp32/fp64 instantiations (3.7's templates, employed) — fp64
+             matters because gradcheck runs there (A1's V-shape verdict)
+device+stream: is_cuda check + getCurrentCUDAStream — the two lines that
+             make an op a good citizen of 5.3's worlds and 5.9's lanes.</code></pre>
+
+<h3>The fixture pyramid — an op is its test suite</h3>
+<div class="diagram" data-diagram="a3-gradcheck" data-caption="Bottom-up: contracts reject garbage loudly; forward matches a reference within budget; gradcheck (fp64) certifies the VJP. Run in this order — each layer assumes the ones below."></div>
+<pre><code>torch.autograd.gradcheck(my_sum, (x.double().requires_grad_(),))  # fp64!
+# = A1's central-difference ritual, automated: numeric Jacobian vs your
+# backward, relative tolerances, multiple probe directions. It certifies
+# CALCULUS. It does NOT certify precision policy (quiz 2), performance,
+# or stream behavior — those get their own fixtures (M2 L6: layers).</code></pre>
+
+<h2>Worked example</h2>
+<div class="card">
+<p><strong>Task:</strong> Ship-shape the 5.8 reduction as <code>my_sum</code>, end to end on Colab: kernel (5.8's grid-stride + shared tree + one-atomic — pasted unchanged), binding with contracts, autograd Function, and the pyramid of proof. The point: watch how much of "production op" is NOT kernel code.</p>
+<pre><code>fixtures (each maps to a pyramid layer):
+1 contracts: cpu tensor → TORCH_CHECK fires ✓ · strided view → fires ✓
+2 plumbing:  n=0 → returns 0.0 (5.3 P7's empty-input law) ✓ · n=1 ✓ · odd n ✓
+3 forward:   vs torch.sum — fp32, n=16M: rel-diff ≈ 2e-8 ✓ within budget…
+             and NOT bitwise: different addition ORDER (5.8 quiz 2 — your
+             atomic-per-block order vs cuBLAS-style pairwise; document it!)
+4 gradcheck: fp64, n=64: PASS (and it passes trivially — sum's VJP has no
+             arithmetic to get wrong; Ex.2's relu is where gradcheck earns rent)
+5 perf:      GpuTimer medians (5.9): my_sum 0.34 ms vs torch.sum 0.33 ms @16M
+             — parity with the library (5.11's honest bar: parity IS success
+             for a re-implementation; the WIN comes when you fuse, A5/A11)</code></pre>
+<p><strong>What to internalize:</strong> the kernel was ~30 lines you wrote weeks ago; the uniform was ~60 lines of contracts, dispatch, autograd, and fixtures — a 2:1 ratio that holds surprisingly steady in real op libraries. Teams that resent the uniform ship A1's scenario (the six-week wrong-gradient bug); teams that wear it ship ops other teams can trust WITHOUT reading the CUDA. That's the actual product: <em>transferable trust, priced at sixty lines.</em></p>
+</div>
+
+<h2>Key points</h2>
+<ul class="keypoints">
+<li>The binding's four jobs: validate contracts loudly (TORCH_CHECK = 3.3's asserts), dispatch dtypes (AT_DISPATCH templates), launch on the CURRENT stream (5.9's law), and register a VJP so autograd can tape it (A2).</li>
+<li>ctx.save_for_backward is the version-counter-protected pocket for saved tensors; shapes and flags can ride plain ctx attributes — save the minimum backward truly needs (A1 §3's memory bill starts here).</li>
+<li>gradcheck in fp64 certifies your calculus (A1's ritual, automated); it cannot see precision policy, stream hygiene, or speed — layer separate fixtures for each (M2 L6's constitution).</li>
+<li>Contiguity is a contract, not a hope: check-and-refuse, accept strides, or copy explicitly — a strided view into a dense-assuming kernel is silent corruption (A2 Ex.1's reshape lesson, weaponized).</li>
+<li>Your reduction matching torch.sum within budget but NOT bitwise is correct behavior with a required explanation: different addition order (5.8) — write the tolerance policy into the test.</li>
+<li>Parity with the library is success for a re-implementation; custom ops EARN their keep at fusion boundaries the library can't cross (A5, A11) — never ship a slower cuBLAS.</li>
+</ul>
+
+<h2>Quiz</h2>
+<div class="quiz">
+  <div class="q">1. Your op benchmarks 4.1× faster than the torch composition it replaces — standalone. Integrated into the team's inference server (a 5.9-style pipelined service), end-to-end p50 gets WORSE by 18%. nsys shows the op's kernels on the default stream while the service's copies and other kernels ride named streams, with full-width gaps around every op call. Diagnose and fix.</div>
+  <button class="opt">The op is too fast — it starves the pipeline</button>
+  <button class="opt" data-c="1">The binding launched on the DEFAULT stream (hardcoded 0 or forgot getCurrentCUDAStream): the legacy default stream synchronizes with ALL other streams (5.9 §1), so every op call is a full pipeline barrier — the picket fence 5.9's scenario taught you to read. The op is fast; its LANE DISCIPLINE poisons the overlap around it. Fix: one line — launch on at::cuda::getCurrentCUDAStream() (and pass it to any cuBLAS/cub calls inside too); rerun nsys, fences gone, then re-measure end-to-end</button>
+  <button class="opt">pybind11 overhead dominates at service scale</button>
+  <button class="opt">The server needs bigger batches</button>
+  <div class="expl">The single most common production custom-op bug, and it's invisible in every standalone benchmark (nothing else was in flight to serialize against — 5.9 P6's regime lesson: benchmarks lie by omission of context). The nsys signature (default-stream kernels + picket fence) convicts in one capture. Rule worth tattooing: an op that doesn't take/respect the current stream is broken even when it's fast — stream hygiene is correctness for pipelines, not a perf nicety.</div>
+</div>
+<div class="quiz">
+  <div class="q">2. Your fused layernorm op passes gradcheck (fp64) perfectly, matches a reference in fp32 unit tests at rtol 1e-5, then destabilizes training in bf16 while the unfused torch version trains fine at bf16. Rank the suspects and name the missing fixture.</div>
+  <button class="opt">gradcheck was wrong — rerun it in bf16</button>
+  <button class="opt" data-c="1">Prime suspect: accumulation dtype inside the kernel — the unfused torch path reduces mean/variance in fp32 even for bf16 inputs (AccumulateType policy); if your fused kernel accumulates in bf16, the variance of a 4096-wide row loses enough digits (M1 L8's absorption at ~3-digit bf16 precision) to wobble normalization and destabilize training. gradcheck is BLIND to this — it certified fp64 calculus, not low-precision policy. Missing fixture: forward/backward vs fp32 reference AT bf16, with a per-dtype budget (and a variance-of-constant-row edge case) — test at deployment dtype (M2 L6's regime labels). Fix: accumulate in float regardless of storage dtype (5.11's law, now an API: at::acc_type)</button>
+  <button class="opt">bf16 is unsuitable for layernorm generally</button>
+  <button class="opt">The learning rate needs retuning for fused ops</button>
+  <div class="expl">gradcheck-in-fp64 CAN'T fail on an accumulation-dtype bug — fp64 accumulation is what it's testing in. That blind spot is the quiz's teaching: each fixture certifies one layer (a3-gradcheck's pyramid), and dtype policy is its own layer. The unfused-works/fused-fails asymmetry is the tell — the library encoded the fp32-accumulate wisdom (option 3 is refuted by the unfused path working). This exact bug class (bf16 accumulation in hand-fused norms/softmaxes) is a recurring postmortem across the industry; A5 builds the kernels with the policy baked in.</div>
+</div>
+
+<h2>Exercises</h2>
+<details><summary>Exercise 1 — Build the worked example yourself on Colab: 5.8's kernel + binding + MySum + the five-layer fixture file. Then break contract #1 deliberately (pass x.t() of a square matrix — shape-legal, stride-broken) with the TORCH_CHECK removed, and document what the op returns and why the corruption is SILENT. Restore the check; file the failure signature.</summary><div class="body">
+<pre><code>x.t() of a contiguous (n,n): same numel, same bytes, strides transposed.
+sum over ALL elements is PERMUTATION-INVARIANT → the naive sum still returns
+the RIGHT answer! (Nice trap.) Now try mean-per-row or your Ex.2 relu:
+row-structured ops on transposed strides return answers for the WRONG rows —
+plausible magnitudes, wrong semantics, zero errors (3.2's UB flavor, torch edition).</code></pre>
+<p>The nuance is the lesson: whether stride-blindness corrupts depends on the op's symmetry — sum forgave, rowwise ops convict. Contracts exist because you cannot rely on every future op being forgiving, and because the forgiving case TRAINS callers to pass strided tensors ("worked for sum!") until the first structured op silently lies. Fixture to keep: every op's suite includes one strided-view input asserting either a loud TORCH_CHECK or a correct answer — never a third state (the a3-contig menu, enforced by test).</p>
+</div></details>
+<details><summary>Exercise 2 — my_relu with save_for_backward (backward = g·1[x&gt;0], A1's mask): implement, gradcheck at fp64 including probes AT the kink's neighborhood (x near 0 — what does gradcheck do about the kink, and which A1 concept predicts it?), then stage three breakages and catalog signatures: (a) save x via plain ctx.x instead of save_for_backward, then relu_() the input after calling; (b) compute the mask from the OUTPUT (out&gt;0) instead of input — is it actually wrong for relu?; (c) return the mask in the input's dtype for bf16 inputs.</summary><div class="body">
+<pre><code>kink: gradcheck perturbs by eps around x≈0 → FD straddles the kink (A1 P4
+case 2) → use inputs bounded away from 0 (gradcheck's nondet-tolerance can't
+fix calculus-invalid probe points; A1's V-shape logic says the check, not the
+op, is at fault there).
+(a) plain ctx.x + caller mutation: NO version-counter protection → backward
+    reads mutated values → wrong grads, SILENT (A2 quiz 2's guard, bypassed —
+    now you've seen why the official pocket exists).
+(b) mask from out&gt;0: for relu specifically out&gt;0 ⇔ x&gt;0 (out = max(x,0)) —
+    EQUIVALENT and actually standard (saves keeping x alive: memory win, §1's
+    save-minimum). The exercise's point: sometimes the "wrong-looking" version
+    is a legitimate optimization — PROVE equivalence, then take the win.
+(c) bf16 mask arithmetic: mask itself is exact (0/1 representable), the
+    product g·mask is fine — the trap is a red herring UNLESS you fused more
+    math around it; catalog "no failure" as the finding. Not every staged
+    bug fires; knowing WHICH ones can't is the same skill as knowing which can.</code></pre>
+</div></details>
+
+<hr>
+<h1>Go deeper — the op library craft sheet</h1>
+
+<h2>1. Dispatch and accumulate-type, the two-line house style</h2>
+<pre><code>AT_DISPATCH_FLOATING_TYPES_AND2(at::kHalf, at::kBFloat16,
+    x.scalar_type(), "my_sum", [&amp;] {
+      using acc_t = at::acc_type&lt;scalar_t, true&gt;;   // half/bf16 → float!
+      launch_sum&lt;scalar_t, acc_t&gt;(…);               // storage vs accumulator
+});
+// scalar_t = storage dtype per call; acc_t = the 5.11 accumulate-wide law
+// as an official type function. Every reduction-flavored op you ever ship
+// uses this pair — quiz 2 is what happens when someone doesn't.</code></pre>
+
+<h2>2. torch.library and the compile-era contract (A9 preview)</h2>
+<pre><code>torch.library.custom_op("myops::my_sum", …)   # modern registration: a SCHEMA
+@my_sum.register_fake                          # + a FAKE (meta) kernel: computes
+def _(x): return x.new_empty(())               #   output SHAPES without running
+# why: torch.compile traces with fake tensors — an op with no fake kernel is
+# a GRAPH BREAK (a9-breaks' wall) around your fastest code. The 2.9+ stable
+# libtorch ABI also means wheels stop breaking per-torch-release (verified
+# 2026-07; pre-2.9 the rebuild treadmill was a real operations tax).</code></pre>
+
+<h2>3. Ownership across the boundary (3.5's tables, one last time)</h2>
+<pre><code>torch::Tensor is a refcounted handle (3.7's shared-ownership pattern): holding
+it keeps storage alive; data_ptr&lt;T&gt;() is a BORROW — valid only while some
+Tensor holds the storage. The two crimes:
+  caching a raw pointer beyond the call (dangling once refs drop — 3.5's
+    use-after-free, now across a language boundary)
+  returning torch::from_blob(your_cuda_buffer) without a deleter — two owners,
+    3.5's double-free, deferred and mysterious
+House rule: raw pointers live only INSIDE the launch function's scope.</code></pre>
+
+<h2>4. Gotchas</h2>
+<div class="gotcha"><strong>Default-stream launches.</strong> Quiz 1. One missing getCurrentCUDAStream turns a fast op into a pipeline barrier — and no standalone benchmark will ever show it.</div>
+<div class="gotcha"><strong>gradcheck at fp32.</strong> A1's V-floor says fp32 FD can't certify below ~1e-3 — a "passing" fp32 gradcheck is a fixture that tests almost nothing. .double() the inputs, always.</div>
+<div class="gotcha"><strong>Saving more than backward needs.</strong> ctx.save_for_backward(x, w, out, mask, …) hoards tape memory (A1 §3). Derive what the VJP actually reads (Ex.2b's out-vs-x insight) and save exactly that.</div>
+<div class="gotcha"><strong>Sync calls inside the op.</strong> A stray .item(), .cpu(), or cudaDeviceSynchronize in the binding = A2's drain, embedded in a building block everyone reuses. Ops must be async-clean; let CALLERS decide when to sync (5.9's architecture rule at API scale).</div>
+<div class="gotcha"><strong>Testing only contiguous fp32 squares.</strong> The op zoo's bugs live at bf16 × strided × ragged × empty. The fixture matrix from 5.11 (shapes × dtypes × layouts) is the op's real spec — Ex.1's forgiving-sum trap shows why one green cell proves little.</div>
+<div class="gotcha"><strong>Beating eager, losing to compile.</strong> Your hand-fused op must beat torch.compile's fusion of the same pattern (a11-ladder's r1 bar), not just eager — measure against the real competitor or the PR's premise is theater (5.10 P5's evidence standards).</div>
+
+<h2>Scenario — the op library that made a platform team fast, then famous</h2>
+<p>An ML platform team supports forty researchers. Their old world: every few weeks someone hand-rolls a CUDA op for a new attention variant, it works in their notebook, and then — the greatest hits: one poisons a serving pipeline via default-stream launches (quiz 1, found after two days of "the server got slower and nobody changed anything"); one ships A1's scenario (wrong VJP, converges-but-worse, six weeks); one OOMs training because it saved four tensors where backward needed one sign mask. The platform lead — core-curriculum literate — responds not with a ban but with a TEMPLATE: a cookiecutter op skeleton containing this lesson (contracts block, AT_DISPATCH+acc_type pair, current-stream launch, autograd Function with save-minimum comments, the five-layer fixture file pre-written with TODO markers, and a CI job running gradcheck-fp64 + dtype-budget + strided-input tests on every merge). Cost: one engineer-week to build. Twelve months later: 31 custom ops in the library, zero gradient incidents, new-op time-to-trust down from "weeks of soak" to "the CI run," and — the part that made it famous internally — researchers CHOOSING the template because it's the fastest path to a trusted op, not because anyone mandates it. The lesson's moral is the platform lesson: <em>discipline scales when it's cheaper than chaos, and the way to make it cheaper is to write it down once as executable scaffolding.</em> You now hold every piece of that template.</p>
+
+<h2>Practice</h2>
+<details><summary>1. For each backward, state what must be saved (and via which mechanism): (a) y = x + b (bias add); (b) y = x·w elementwise; (c) y = relu(x); (d) y = softmax(x); (e) y = dropout(x, p) in training; (f) my_sum. Then rank them by tape-memory cost per element.</summary><div class="body">(a) NOTHING — d/dx = 1, d/db = broadcast-sum of g: shapes only (plain ctx attrs). (b) BOTH x and w (each partial needs the other — A1 P1's "the thing you're not wiggling") via save_for_backward. (c) The sign mask — or derive from OUTPUT (Ex.2b): save out, or 1 bit/elem if you pack it. (d) Save the OUTPUT y: dL/dx = y·(g − Σ(g·y)) needs only y — the classic save-output op. (e) The dropout MASK (which elements survived) — regenerating it needs the same RNG state, which is the alternative implementation (seed-replay: trade memory for recompute — checkpointing's idea in one op). (f) Shape only. Cost ranking per element: b (2 tensors) &gt; d ≈ c-as-output (1) &gt; e (1 bit-ish) &gt; a = f (0). Auditing an architecture's tape bill = summing this table over its ops — A1 §3 made quantitative, and exactly how A5 decides what to fuse.</div></details>
+<details><summary>2. Your op must also run under torch.compile (A9). List the three integration requirements beyond eager correctness, and what breaks (with the a9 vocabulary) if each is missing.</summary><div class="body">(1) A fake/meta kernel (shape function): without it, dynamo can't trace through → GRAPH BREAK at every call (a9-breaks) — your op becomes a fusion wall bracketing eager islands. (2) Registered autograd formula visible to AOTAutograd (the Function/torch.library path, not Python-side monkey-patching): otherwise the traced backward graph is wrong or breaks. (3) No data-dependent Python control flow inside the wrapper (.item() branching — 5.3's sync AND a break): guards can't specialize on device values. Bonus 4th for full citizenship: a functional (non-mutating) variant, since compile's functionalization pass hates surprise in-place. This checklist is why §2 says schema-based registration is the modern default — it front-loads all four.</div></details>
+<details><summary>3. Translate this review comment into a concrete code change and a fixture: "Your fused bias-gelu op recomputes gelu'(x) in backward from saved x — but you already computed gelu(x) in forward. Consider the tradeoff." What's actually being proposed, what are the TWO costs being traded, and when is each side right?</summary><div class="body">Proposal: save-output (+ maybe a cheap extra) instead of save-input, IF gelu' can be expressed via gelu's saved value — for exact-erf gelu it can't cleanly (gelu'(x) needs x's pdf term), so the real menu is: save x and recompute gelu'(x) in backward (1 tensor saved, more backward FLOPs) vs save x AND the pdf term (2 tensors, less recompute). Trade: tape memory (A1 §3) vs backward compute — memory-bound training at long sequence favors recompute (activations are the binding resource, 4.7's question), tiny models favor saving. The fixture: gradcheck both variants AND assert identical saved-tensor counts via hooks, so the choice is visible and tested, not folklore. This memory-vs-recompute dial at single-op scale is EXACTLY checkpointing at model scale — one idea, two zoom levels.</div></details>
+<details><summary>4. A researcher reports your my_sum gives "different results every run" (last 2 digits) and calls it a bug blocking their paper's reproducibility claim. Write the four-sentence reply that (a) names the mechanism with citations, (b) states why it's not a defect, (c) offers the deterministic alternative and its cost, (d) points at the policy doc — all in professional tone.</summary><div class="body">"my_sum's final stage combines block partials with atomicAdd, so combination ORDER varies run-to-run and float addition isn't associative — last-bit wobble is expected behavior (course refs: 5.8 quiz 2, M1 L8), matching torch.sum's own nondeterministic CUDA path. It's within the documented rtol budget and doesn't affect training statistics. For bitwise reproducibility, use my_sum_det (slot-array partials + fixed-order merge, 5.8's deterministic architecture) at ~15% cost, or wrap runs with torch.use_deterministic_algorithms(True) to catch all such ops fleet-wide. Our numerics policy — which ops wobble, alternatives, budgets — is in NUMERICS.md; happy to add your op's path to the registry." Four sentences, zero defensiveness, every claim citable — the A2 P4/5.8 Ex.2 memo, now as the email you'll actually send.</div></details>
+<details><summary>5. Design the CI matrix for a 12-op internal library (the scenario's): axes, budget policy, what runs per-commit vs nightly, and the one hardware-related trap in CI-ing CUDA ops (hint: 5.1's machine model + a6-tc).</summary><div class="body">Axes: op × dtype {fp32, fp16, bf16, fp64-for-gradcheck} × layout {contig, strided-view, channels-last if relevant} × shape class {0, 1, odd, ragged-tail, big} × mode {eager, compile}. Per-commit: contracts + plumbing + forward budgets + gradcheck on small shapes (~minutes). Nightly: big-shape perf medians vs recorded baselines (±tolerance gates — 5.10 §2's tripwire), sanitizer sweep (compute-sanitizer under the extension — 5.4 lives on), determinism audit. Budget policy: per-dtype rtol table derived from accumulation analysis (fp32 1e-6-ish, bf16 1e-2-ish scaled by reduction width — M1 L8 arithmetic, written down). The trap: CI GPUs ≠ prod GPUs — a T4 runner can't exercise bf16 TC paths or FA-class kernels (sm_80+ — the verified 2026 fact), so dtype coverage silently shrinks to what the runner supports: pin runner arch in the matrix EXPLICITLY and fail loudly on "skipped," or your green CI is a smaller promise than it looks (5.11 P7's regime-labeling, applied to infrastructure).</div></details>
+<details><summary>6. Port direction: you have the 5.11 capstone's v4 matmul. List the exact deltas to make it a production torch op competing with torch.matmul ONLY for the shape family (M,K,N all multiples of 64, fp32) — and then the honest paragraph on why you still probably shouldn't ship it (three citations required).</summary><div class="body">Deltas: binding + contracts (incl. the shape-family TORCH_CHECK — narrow contracts are legitimate: reject what you didn't tune); AT_DISPATCH (fp32-only initially — honesty over coverage); current-stream launch; autograd Function whose backward = two calls of YOURSELF with transposes (A1 P6: matmul's VJP is two matmuls — your op composes with itself, a lovely closure); the five-layer fixtures + perf gate vs torch.matmul at the contract shapes. Why not ship: (1) 5.11's ladder ended at ~73% of cuBLAS — parity-minus is a regression wearing a custom badge (5.11 quiz 1); (2) maintenance: every new arch (sm_120's tweaks) re-tunes cuBLAS for free while your tiles go stale (5.6's register-weather gotcha, compounding); (3) the REAL win was never bare matmul — it's the epilogue fusion cuBLAS can't do for your exact pattern (a11-fused), so ship THAT contract instead. Knowing what not to ship, with citations, is the difference between a kernel hobbyist and an infra engineer.</div></details>
+<details><summary>7. Interview closer: "How would you add a production-grade custom CUDA op to PyTorch?" — 90 seconds, hitting: binding+contracts, stream law, autograd registration + save-minimum, the fixture pyramid with gradcheck's precision caveat, dtype/acc_type policy, compile citizenship, and the when-NOT-to closing move.</summary><div class="body">Skeleton: "The kernel is standard CUDA — the engineering is the uniform. I bind via cpp_extension/torch.library with loud contracts — device, dtype, contiguity — because strided views silently corrupt dense-indexing kernels [a3-contig]. I launch on the current stream, never default, or the op becomes a pipeline barrier in any overlapped service [quiz 1]. Autograd: a Function registering the VJP, saving the MINIMUM backward needs via save_for_backward for version-counter protection [Ex.2a]. Verification is a pyramid: contract tests, plumbing edges (empty/odd/strided), forward-vs-reference with per-dtype budgets — never bitwise across different reduction orders [worked ex] — and gradcheck in fp64, which certifies calculus but is blind to precision policy, so I separately test at deployment dtype with acc_type-in-fp32 accumulation [quiz 2]. For compile-era citizenship it gets a fake kernel and schema registration or it's a graph break [P2]. And I only ship it if it beats torch.compile's fusion of the same pattern at production shapes — a custom op that loses to the compiler or the library is negative-value infrastructure [gotcha 6, 5.11 quiz 1]." The last sentence is the one they remember.</div></details>
+
+<div class="pager">
+  <a href="lesson-02.html">← PyTorch internals</a>
+  <a href="lesson-04.html">Next: Triton kernels in Python →</a>
+</div>
+<div class="footer">GPU Mastery · Track A · Lesson 3 — works offline · progress saved in your browser</div>
+</div>
+<script src="../assets/diagramsA.js"></script>
+<script src="../assets/app.js"></script>
+</body>
+</html>

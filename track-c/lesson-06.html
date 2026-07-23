@@ -1,0 +1,171 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>C6 Lighting: Phong to PBR — GPU Mastery</title>
+<link rel="stylesheet" href="../assets/style.css">
+</head>
+<body data-lesson="cl6">
+<nav><div class="inner">
+  <a class="logo" href="../index.html">GPU<span>Mastery</span></a>
+  <a class="item" href="../index.html">Home</a>
+  <a class="item on" href="../curriculum.html">Curriculum</a>
+  <a class="item" href="../labs.html">Labs</a>
+  <a class="item" href="../setup.html">Lab setup</a>
+  <a class="item" href="../prompt.html">Generator prompt</a>
+</div></nav>
+<div class="wrap">
+
+<div class="lesson-top">
+  <div><span class="badge">Track C · Lesson 6</span><span class="badge dim">≈ 4 h</span></div>
+  <button id="donebtn" class="donebtn">Mark lesson complete</button>
+</div>
+<h1>Lighting — from Phong's fake highlight to physically based rendering</h1>
+<p class="lead">Lighting is where a scene becomes believable, and it has a real history: Phong's cheap, plausible highlight gave way to physically based rendering (PBR), which models light as bouncing off microscopic mirrors and — crucially — conserves energy, so materials look right under any lighting. Every term here is a real formula you'll evaluate in NumPy, and the whole thing only works in the linear space C5 fought for.</p>
+
+<p class="small dim">Lab note: all the lighting math is NumPy-executable (evaluated below), and energy conservation is checked with a Monte-Carlo integral (B4's method). No GPU needed to understand why PBR looks right and Phong doesn't. Assumes you're computing in LINEAR light (C5) — lighting on sRGB values is wrong before you start.</p>
+
+<h2>Concept</h2>
+
+<h3>Phong: a plausible fake, computed by hand</h3>
+<div class="diagram" data-diagram="c6-phong" data-caption="Phong lighting: diffuse follows N·L (surface facing the light), specular follows (N·H) raised to a shininess power (the highlight). Cheap, plausible, but not energy-conserving."></div>
+<p>The classic model splits light into diffuse (matte) and specular (shiny) using dot products of unit vectors — M1's dot product finally earning its keep. <strong>Diffuse</strong> = <code>albedo · max(N·L, 0)</code>: a surface facing the light (N·L near 1) is bright; edge-on (N·L near 0) is dark; facing away (negative, clamped to 0) is unlit. <strong>Specular</strong> (Blinn-Phong) = <code>ks · max(N·H, 0)^shininess</code>, where <code>H = normalize(L + V)</code> is the half-vector between light and view: the highlight is brightest where the surface normal aligns with H, and the shininess exponent controls how tight it is. It's computed per-pixel from the interpolated normal (C1/C2), and it looks fine. But it's a fake: the terms are chosen to <em>look</em> plausible, not to obey physics, so a Phong material that looks right in one lighting setup looks wrong in another (too bright here, too dim there), and artists must hand-tune it per scene. That fragility is what PBR fixes.</p>
+
+<h3>PBR: light bouncing off a field of microscopic mirrors</h3>
+<div class="diagram" data-diagram="c6-microfacet" data-caption="A rough surface is modeled as countless tiny mirrors (microfacets); only those whose normal equals the half-vector H reflect light from L to V. The Cook-Torrance BRDF = D·G·F over a normalization."></div>
+<p>Physically based rendering models a surface as a statistical field of microscopic mirrors (microfacets). Only the facets whose normal happens to equal the half-vector <code>H</code> reflect light from the source direction <code>L</code> into the view direction <code>V</code>. The <strong>Cook-Torrance BRDF</strong> assembles three physically-motivated terms:</p>
+<pre><code>f = (D · G · F) / (4 · (N·L) · (N·V))
+  D (Normal Distribution): what FRACTION of microfacets are oriented toward H
+      (roughness controls the spread — smooth = tight, rough = broad)
+  G (Geometry): shadowing/masking — facets block each other at grazing angles
+  F (Fresnel): reflectivity RISES toward grazing angles (everything is mirror-like edge-on)</code></pre>
+<p>Each term is a real, evaluable formula (next), and together they conserve energy — the surface never reflects more light than it receives — which is why a PBR material looks correct under studio lighting, sunset, or a dark room without re-tuning. That single property, energy conservation, is the whole reason the industry switched: it turns "tweak the material until it looks right in this scene" into "author the material once, physically, and trust it everywhere."</p>
+
+<h3>The GGX/Smith/Schlick terms, evaluated</h3>
+<div class="diagram" data-diagram="c6-ggx" data-caption="The three PBR terms with their real formulas and executed values for a stated geometry at roughness 0.3: D≈3.94, G≈0.99, F≈0.04, rising to 1.0 at grazing angles."></div>
+<p>The standard choices — GGX for D, Smith for G, Schlick for F — are what nearly every engine ships. Evaluated for a concrete geometry (view and light near the normal, roughness 0.3, executed):</p>
+<pre><code>geometry: N·H=0.991, N·L=0.894, N·V=0.981, V·H=0.946, roughness r=0.3 (α=r²=0.09)
+  D (GGX)     = α² / (π·((N·H)²(α²−1)+1)²)          = 3.94   (peaked toward H)
+  G (Smith)   = ∏ (N·X)/((N·X)(1−k)+k),  k=α/2       = 0.99   (little masking, near-normal)
+  F (Schlick) = F0 + (1−F0)(1−V·H)⁵,  F0=0.04        = 0.04   (→ 1.0 at grazing)
+  specular BRDF term = D·G·F / (4·N·L·N·V)          = 0.045</code></pre>
+<p>The <strong>metalness workflow</strong> (from glTF) hides in F0: dielectrics (non-metals) reflect ~4% at normal incidence (F0 = 0.04), while metals reflect their <em>albedo</em> color (F0 = the base color, and they have no diffuse). So a single "metallic" parameter switches F0 between 0.04 and the albedo — that one switch is the entire metal-vs-nonmetal distinction, which is why glTF's metallic-roughness material is just base color + metallic + roughness. And energy conservation is checkable: Monte-Carlo integrating the diffuse BRDF over the hemisphere (B4's method) returns exactly the albedo (≤ 1) — the surface reflects no more than it receives.</p>
+
+<h2>Worked example</h2>
+<div class="card">
+<p><strong>Task:</strong> Show why PBR's energy conservation matters by contrasting it with Phong, and verify conservation numerically. Prediction first: if you light a Phong material and a PBR material identically, then double the light's intensity, will both stay physically sensible?</p>
+<pre><code>Phong: diffuse + specular are independent ad-hoc terms with a hand-tuned ks.
+  nothing bounds (diffuse + specular) ≤ incoming light. Crank ks or stack lights
+  and the surface can reflect MORE than it receives → blown-out, glowing wrong.
+  a Phong material tuned for one light looks wrong under another (re-tune per scene).
+PBR: the BRDF is normalized (the /4·N·L·N·V and the D normalization) so total
+  reflected ≤ incoming. Executed check: Monte-Carlo integrate the Lambert diffuse
+  BRDF·cosθ over the hemisphere → returns the albedo exactly (1.0 for albedo=1),
+  i.e. a white surface reflects 100% of incoming light and never more. Conserves.
+Prediction: doubling light keeps PBR physical (linear, bounded); Phong may blow out
+  or reveal its per-scene tuning as wrong. Result: confirmed — PBR is scene-invariant.</code></pre>
+<p><strong>What to internalize:</strong> the difference between Phong and PBR is not "more terms" — it's that PBR's terms are <em>constrained by physics</em>, and the binding constraint is energy conservation: a surface cannot reflect more light than hits it. Phong has no such bound, so its parameters are free knobs that must be re-tuned whenever the lighting changes, which is exactly why pre-PBR games had materials that looked great in the demo lighting and wrong everywhere else. PBR's normalization (the <code>4·N·L·N·V</code> denominator and the normalized distribution) enforces the bound, so a material authored once — base color, metallic, roughness — looks correct under any lighting, from a sunny exterior to a candlelit room. That scene-invariance is the entire industry motivation, and you can prove the conservation with a Monte-Carlo integral (B4), which returns the albedo and never exceeds 1. It's the same rigor as the rest of the course: don't trust that a lighting model is "physical" — integrate it and check that it conserves energy. A model that returns more than it receives is a glowing bug waiting for a bright scene.</p>
+</div>
+
+<h2>Key points</h2>
+<ul class="keypoints">
+<li>Phong splits light into diffuse (albedo·max(N·L,0)) and specular (ks·max(N·H,0)^shininess, H the half-vector) — cheap, plausible dot-product math (M1), but not energy-conserving, so it re-tunes per scene.</li>
+<li>PBR models a surface as microfacets; only facets with normal = H reflect L→V, assembled by the Cook-Torrance BRDF f = D·G·F / (4·N·L·N·V).</li>
+<li>D (GGX) is the fraction of facets facing H (roughness-controlled), G (Smith) is shadowing/masking, F (Schlick) is Fresnel reflectivity rising to 1.0 at grazing — executed: D≈3.94, G≈0.99, F≈0.04 at roughness 0.3.</li>
+<li>The metalness workflow lives in F0: dielectrics reflect ~4% (F0=0.04), metals reflect their albedo (F0=base color, no diffuse) — one "metallic" switch, which is why glTF is base color + metallic + roughness.</li>
+<li>PBR conserves energy (executed: MC-integrating the diffuse BRDF over the hemisphere returns the albedo, ≤1) — a surface never reflects more than it receives, so materials look right under any lighting.</li>
+<li>All of this only works in linear light (C5); lighting on sRGB values is wrong before any BRDF runs, and energy conservation is the property to verify by integration (B4), not assume.</li>
+</ul>
+
+<h2>Quiz</h2>
+<div class="quiz">
+  <div class="q">1. A team's older Phong-based game had materials that "looked amazing in the showcase level but wrong everywhere else," requiring per-level material tweaks. They switch to PBR and the re-tuning stops. What property of PBR made the difference?</div>
+  <button class="opt">PBR uses higher-resolution textures, so it looks better everywhere</button>
+  <button class="opt" data-c="1">Energy conservation. Phong's diffuse and specular are ad-hoc terms with no physical bound, so a material tuned to look right under one lighting setup reflects the wrong amount under another — hence per-level tweaking. PBR's BRDF is normalized so total reflected light never exceeds incoming, which makes a material authored once (base color, metallic, roughness) look correct under any lighting — sunlight, interior, dusk — with no re-tuning. The scene-invariance comes directly from the physical constraint, not from more terms or bigger textures</button>
+  <button class="opt">PBR disables specular, which was the thing that looked wrong</button>
+  <button class="opt">Nothing physical — PBR just has better default parameters</button>
+  <div class="expl">Option 1 confuses lighting model with texture resolution (unrelated). Option 3 is false — PBR has a sophisticated specular (the microfacet BRDF), not none. Option 4 misses the mechanism. The correct answer identifies energy conservation as the property: Phong's unbounded ad-hoc terms must be re-tuned per lighting, while PBR's normalized, energy-conserving BRDF is scene-invariant by construction. This is the entire industry reason for the switch — author physically once, trust everywhere — and it's why the worked example verifies conservation by integration rather than taking "physically based" on faith.</div>
+</div>
+<div class="quiz">
+  <div class="q">2. In a glTF PBR material, changing the single "metallic" parameter from 0 to 1 dramatically changes appearance — the surface loses its diffuse color and its reflections take on the base color. What's happening physically, and why is it one parameter?</div>
+  <button class="opt">Metallic just makes the surface shinier by increasing the specular exponent</button>
+  <button class="opt" data-c="1">Metallic switches F0 (reflectivity at normal incidence) and the diffuse contribution. Dielectrics (metallic=0) reflect ~4% (F0=0.04) and have a diffuse albedo color; metals (metallic=1) have NO diffuse and reflect their base color as the specular tint (F0 = albedo). So flipping metallic swaps F0 from 0.04 to the base color and removes diffuse — that one physical distinction (metals conduct, so they absorb transmitted light and only reflect, tinting the reflection) is captured by a single parameter, which is exactly why glTF's model is just base color + metallic + roughness</button>
+  <button class="opt">Metallic increases the texture's saturation</button>
+  <button class="opt">It's a rendering artifact; metallic shouldn't change diffuse</button>
+  <div class="expl">Option 1 confuses metalness with roughness (roughness controls highlight tightness; metalness controls the diffuse/F0 physics). Option 4 misunderstands the model — metallic SHOULD remove diffuse, that's the physics. The correct answer explains the real mechanism: metals have no diffuse (they absorb transmitted light) and reflect their albedo as tinted specular (F0=albedo), while dielectrics reflect a flat ~4% and keep a diffuse color. Compressing that entire distinction into one metallic parameter is the elegance of the metalness workflow and why glTF materials are so compact — one switch between two physical regimes.</div>
+</div>
+
+<h2>Exercises</h2>
+<details><summary>Exercise 1 — In NumPy, implement Blinn-Phong and the Cook-Torrance GGX/Smith/Schlick BRDF. Evaluate both for a fixed geometry (pick N, L, V), and vary roughness from 0.05 to 0.9. Observe how the GGX highlight broadens with roughness while Phong's shininess is an unrelated hand-tuned knob. Confirm the executed values (D≈3.94, G≈0.99, F≈0.04 at r=0.3).</summary><div class="body">
+<p>Expected: GGX's D term peaks sharply at low roughness (a tight highlight) and broadens smoothly as roughness rises — a single physical parameter controlling highlight size. Blinn-Phong needs a separate shininess exponent with no physical meaning, tuned by feel. At the stated geometry and roughness 0.3 you'll reproduce D≈3.94, G≈0.99, F≈0.04 (executed). Deliverable: a table of D, G, F, and the full specular term across roughness values, plus a note on how GGX ties highlight size to roughness while Phong doesn't. This makes "PBR is parameterized by physical quantities" concrete — roughness IS the highlight, not a proxy you tune.</p>
+</div></details>
+<details><summary>Exercise 2 — Verify energy conservation by Monte-Carlo (B4's method): integrate a diffuse (Lambert) BRDF times cosθ over the hemisphere and confirm it returns the albedo (≤ 1). Then attempt the same for a specular lobe and confirm it doesn't exceed 1. Contrast with a naive un-normalized Phong specular that CAN exceed 1.</summary><div class="body">
+<p>Expected: cosine-weighted Monte-Carlo integration of the Lambert BRDF over the hemisphere returns the albedo exactly (1.0 for albedo=1) — the surface reflects 100% and never more (executed). A properly normalized microfacet specular also integrates to ≤ 1. A naive Phong specular with a large ks and no normalization integrates to MORE than 1 for some parameters — meaning it reflects more energy than it receives, which is the "glowing/blown-out under bright light" bug. Deliverable: the integrated values for Lambert, normalized specular, and un-normalized Phong, showing which conserve energy. This is the worked example made rigorous: energy conservation isn't a slogan, it's an integral you can check, and B4's Monte-Carlo is exactly the tool.</p>
+</div></details>
+
+<hr>
+<h1>Go deeper — the physics of a lit pixel</h1>
+
+<h2>1. The three PBR terms, and what each roughness/angle does</h2>
+<pre><code>term  formula (standard choice)                controlled by     effect
+────  ───────────────────────────────────────  ───────────────   ──────────────────
+D     GGX: α²/(π((N·H)²(α²−1)+1)²)              roughness         highlight tightness
+G     Smith: ∏ (N·X)/((N·X)(1−k)+k), k≈α/2      roughness+angle   dims grazing angles
+F     Schlick: F0+(1−F0)(1−V·H)⁵                F0 (metalness)    edge reflectivity → 1
+executed at r=0.3, near-normal: D=3.94 (peaked), G=0.99 (little masking), F=0.04.
+at GRAZING angles: F → 1.0 (everything mirrors edge-on — the Fresnel rim you see on
+water, roads, any surface at a shallow angle). G drops (facets shadow each other).
+roughness is the master dial: it broadens D and increases masking in G simultaneously.</code></pre>
+
+<h2>2. The metalness workflow (why glTF is 3 parameters)</h2>
+<pre><code>dielectric (metallic=0):  F0 = 0.04 (flat ~4% reflectance), HAS diffuse = albedo
+metal      (metallic=1):  F0 = albedo (tinted reflection), NO diffuse (metals absorb
+                          transmitted light — they only reflect)
+so one "metallic" scalar picks the regime; roughness sets highlight size; base color
+is diffuse-albedo for dielectrics OR reflection-tint for metals.
+that's the ENTIRE glTF metallic-roughness material: baseColor + metallic + roughness
+(+ normal, AO, emissive maps). Physically grounded, compact, and portable — which is
+why it's the industry-standard asset format (Track C's capstone loads it).
+gotcha (C5!): baseColor is sRGB (color); metallic/roughness are LINEAR (data).</code></pre>
+
+<h2>3. Why energy conservation is the whole game</h2>
+<pre><code>the constraint: integral over the hemisphere of BRDF·cosθ dω ≤ 1 (a surface can't
+  reflect more than it receives). Verify by Monte-Carlo (B4), don't assume.
+consequences of getting it right:
+  · materials look correct under ANY lighting → author once, no per-scene tuning (quiz 1)
+  · image-based lighting, global illumination, and path tracing (C9) all rely on it —
+    energy that isn't conserved compounds into glowing garbage over many bounces
+  · it's the difference between "looks plausible in the demo" (Phong) and "looks right
+    everywhere" (PBR). The rigor — integrate and check — is the same as the rest of
+    the course: a model you didn't verify is a bug you haven't found (M1 L7).</code></pre>
+
+<h2>Gotchas</h2>
+<div class="gotcha"><strong>Lighting on sRGB values (C5).</strong> Every BRDF assumes linear light; run it on gamma-encoded values and the result is wrong before any term evaluates. Decode textures to linear first — the #1 lighting bug, upstream of the lighting model.</div>
+<div class="gotcha"><strong>Treating roughness and metallic maps as sRGB.</strong> They're DATA, not color (C5) — an sRGB decode corrupts them, so your PBR reads wrong roughness/metalness. Base color is sRGB; roughness/metallic/normal are linear.</div>
+<div class="gotcha"><strong>Un-normalized specular.</strong> A specular lobe (Phong or a botched microfacet) that integrates to more than 1 reflects more energy than it receives → blown-out, glowing surfaces under bright light. Normalize and verify by integration (B4).</div>
+<div class="gotcha"><strong>Giving metals a diffuse color.</strong> Metals have no diffuse (they absorb transmitted light); their base color tints the reflection (F0=albedo). A metal with diffuse looks like painted plastic. Let the metallic parameter drive it.</div>
+<div class="gotcha"><strong>Forgetting the Fresnel rim.</strong> F → 1.0 at grazing angles for everything — omit it and surfaces look flat and matte at edges, missing the rim reflection that reads as "physically there." Schlick's term is cheap; include it.</div>
+<div class="gotcha"><strong>Not normalizing interpolated normals (C1).</strong> The rasterizer interpolates vertex normals, which denormalizes them; feed a non-unit normal into N·L / N·H and the lighting is subtly wrong. Normalize in the fragment shader before the BRDF.</div>
+
+<h2>Scenario — the material library that finally traveled</h2>
+<p>A studio's pre-PBR game has a beautiful showcase level and a painful production reality: every material — the leather, the metal, the painted wood — was hand-tuned by artists to look right under the showcase's specific lighting, and when those same materials appear in a night level or a sunlit exterior, they look wrong: the metal goes flat, the leather glows, the painted wood looks like plastic. The art team's workflow is per-level material duplication and re-tuning, which multiplies asset counts and means a lighting change in one level silently breaks materials shared with another. A technical artist who understands the physics diagnoses it exactly as this lesson does: the Phong-derived shading has no energy-conservation bound, so the materials' parameters are free knobs calibrated to one lighting environment, and there is no reason they'd be correct in a different one. The studio moves to a PBR metalness-roughness workflow (glTF-style: base color, metallic, roughness), and the technical artist proves out the key property before committing — Monte-Carlo integrating the BRDF (B4) to confirm it conserves energy, so a material can never reflect more than it receives. The result is the industry's well-known payoff: materials authored once, physically, look correct under every lighting environment, and the per-level re-tuning workflow disappears. The metal reads as metal in sunlight and candlelight because its Fresnel and roughness are physical, not tuned; the leather stops glowing because its energy is bounded. They also catch the C5 prerequisite along the way — the whole thing only works in linear light, and their roughness/metallic maps had been mistakenly marked sRGB, corrupting the very parameters PBR depends on. The morals close Track C's shading arc. First, the reason to prefer a physically based model is not that it has more terms but that it obeys a constraint — energy conservation — which makes materials scene-invariant, and that constraint is verifiable by integration, not a marketing claim. Second, the course's discipline holds in graphics: don't trust "physically based," integrate the BRDF and confirm it conserves; a model that returns more than it receives is a glowing bug that a bright scene will eventually expose. Authoring once and trusting everywhere is only earned by the physics being real.</p>
+
+<h2>Practice</h2>
+<details><summary>1. Write the Blinn-Phong diffuse and specular terms, define the half-vector, and state why Phong needs per-scene tuning.</summary><div class="body">Diffuse = albedo · max(N·L, 0), where N is the surface normal and L the direction to the light — brightest when the surface faces the light. Specular (Blinn-Phong) = ks · max(N·H, 0)^shininess, where H = normalize(L + V) is the half-vector between the light and view directions, and shininess controls highlight tightness. Phong needs per-scene tuning because these terms are ad-hoc and unbounded — nothing constrains diffuse + specular ≤ incoming light — so the parameters (ks, shininess) are free knobs calibrated to a particular lighting setup, and a material tuned for one looks wrong (too bright/dim) under another. PBR fixes this by making the terms physical and energy-conserving.</div></details>
+<details><summary>2. Name the three Cook-Torrance terms, what each represents, and which is controlled by roughness vs metalness.</summary><div class="body">D (Normal Distribution Function, e.g. GGX): the fraction of microfacets whose normal faces the half-vector H — it produces the highlight, and its width is controlled by ROUGHNESS (smooth = tight, rough = broad). G (Geometry/masking-shadowing, e.g. Smith): how much facets shadow and mask each other, dimming grazing angles — controlled by roughness and angle. F (Fresnel, e.g. Schlick): reflectivity as a function of view angle, rising to 1.0 at grazing — its base value F0 is controlled by METALNESS (0.04 for dielectrics, albedo for metals). So roughness drives D and G (highlight size and masking), metalness drives F0 (and the presence of diffuse). The BRDF is f = D·G·F / (4·N·L·N·V).</div></details>
+<details><summary>3. Explain the metalness workflow: what changes physically between metallic=0 and metallic=1?</summary><div class="body">metallic=0 (dielectric, e.g. plastic, wood, skin): the surface reflects a flat ~4% at normal incidence (F0=0.04) and HAS a diffuse albedo — light penetrates slightly, scatters, and re-emerges as diffuse color. metallic=1 (metal): the surface has NO diffuse (metals are conductors; transmitted light is absorbed, not scattered back), and it reflects its base color as a tinted specular (F0 = albedo). So the metallic parameter switches F0 between 0.04 and the base color AND toggles diffuse off. That single physical distinction — metals only reflect (tinted), dielectrics reflect ~4% flat and diffuse — is why glTF's material is just base color + metallic + roughness: one scalar picks the regime, roughness sizes the highlight, base color serves as diffuse or reflection-tint accordingly.</div></details>
+<details><summary>4. How do you verify a BRDF conserves energy, and why does it matter for multi-bounce rendering (C9)?</summary><div class="body">Verify by integrating the BRDF times cosθ over the hemisphere of outgoing directions and confirming the result is ≤ 1 (the surface reflects no more than the incoming light) — done numerically with Monte-Carlo sampling (B4's method): the Lambert diffuse BRDF integrates to exactly the albedo (executed: 1.0 for albedo=1), and a normalized specular lobe integrates to ≤ 1. It matters enormously for multi-bounce rendering (ray tracing, global illumination, C9) because energy errors COMPOUND: if each bounce reflects 105% of incoming light, after many bounces the image glows brighter and brighter into garbage; if it conserves, the image stays physical. So energy conservation isn't just about single-surface correctness — it's the stability condition for any renderer that follows light across multiple bounces, which is why it's non-negotiable in PBR.</div></details>
+<details><summary>5. Why must all of this lighting math happen in linear space, and what breaks if roughness maps are marked sRGB?</summary><div class="body">Every BRDF term operates on radiometric quantities — actual light energy — which add and scale linearly. sRGB is a perceptual encoding where a value of 0.5 is ~0.22 units of light (C5), so evaluating N·L, the microfacet terms, or any blend on sRGB values computes on the wrong quantity, producing too-dark, wrong-energy results before the lighting model even gets a chance (the muddy-image bug). So textures must be decoded to linear (color textures via sRGB format), lit in linear, and encoded back to sRGB on output. If a ROUGHNESS map is mistakenly marked sRGB, the hardware applies the sRGB→linear decode to it — but roughness is DATA, not color, so the decode non-linearly distorts every roughness value, and the D and G terms (which depend on roughness) read wrong. The result is subtly wrong highlights and masking on every surface — a materials bug rooted in a color-space mistake (C5's data-vs-color distinction).</div></details>
+<details><summary>6. Contrast Phong and PBR not by "which looks better" but by the property that makes PBR scene-invariant.</summary><div class="body">The distinguishing property is energy conservation. Phong's diffuse and specular are ad-hoc, unbounded terms: nothing guarantees the total reflected light ≤ incoming, so its parameters (ks, shininess) are free knobs that must be calibrated to a specific lighting environment, and the material looks wrong under a different one — it is scene-DEPENDENT. PBR's microfacet BRDF is normalized so that it provably reflects ≤ the incoming light (verifiable by hemisphere integration, B4), which means a material authored with physical parameters (base color, metallic, roughness) reflects the correct amount under any lighting — sun, interior, dusk — with no re-tuning; it is scene-INVARIANT. So the comparison isn't aesthetic: PBR looks right everywhere because it's constrained by physics, and that constraint (energy conservation) is exactly what Phong lacks. "Looks better" is a consequence; scene-invariance from the physical bound is the cause.</div></details>
+<details><summary>7. The interview closer: "Why did the industry move from Phong-style lighting to physically based rendering?" Deliver the spoken skeleton.</summary><div class="body">"The core reason is energy conservation, which makes materials scene-invariant. Phong-style lighting splits light into diffuse and specular terms that are chosen to look plausible but aren't bound by physics — nothing guarantees a surface reflects no more light than it receives — so the parameters are free knobs that have to be re-tuned for each lighting environment. That's why pre-PBR games had materials that looked great in the showcase lighting and wrong everywhere else, and artists had to hand-tune per scene. PBR models the surface as microfacets and uses the Cook-Torrance BRDF — a normal distribution term like GGX controlled by roughness, a geometry/masking term like Smith, and a Fresnel term like Schlick whose F0 encodes metalness — and it's normalized so the total reflected light never exceeds the incoming light. I can verify that by Monte-Carlo integrating the BRDF over the hemisphere and confirming it's at most one. Because it conserves energy, a material authored once with physical parameters — base color, metallic, roughness — looks correct under any lighting, which is why the workflow is compact and portable, and it's exactly the glTF material model. Two things I'd add: it only works in linear light, so getting the color space right is a prerequisite, not a detail; and metalness is elegant because one parameter switches between two physical regimes — dielectrics reflect about 4% and have diffuse, metals reflect their albedo and have none. So the move wasn't about more terms or better textures; it was about obeying a physical constraint that makes materials travel across lighting, and that constraint is something I'd verify by integration, not take on faith.' Framing it as energy conservation and offering to prove it by integration is the answer that shows real understanding, not buzzwords."</div></details>
+
+<div class="pager">
+  <a href="lesson-05.html">← Textures, Sampling, Mipmaps</a>
+  <a href="lesson-07.html">Next: Compute Shaders →</a>
+</div>
+<div class="footer">GPU Mastery · Track C · Lesson 6 — works offline · progress saved in your browser</div>
+</div>
+<script src="../assets/diagramsC.js"></script>
+<script src="../assets/app.js"></script>
+</body>
+</html>

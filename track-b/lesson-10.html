@@ -1,0 +1,162 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>B10 Capstone — The Scaling Study — GPU Mastery</title>
+<link rel="stylesheet" href="../assets/style.css">
+</head>
+<body data-lesson="bl10">
+<nav><div class="inner">
+  <a class="logo" href="../index.html">GPU<span>Mastery</span></a>
+  <a class="item" href="../index.html">Home</a>
+  <a class="item on" href="../curriculum.html">Curriculum</a>
+  <a class="item" href="../labs.html">Labs</a>
+  <a class="item" href="../setup.html">Lab setup</a>
+  <a class="item" href="../prompt.html">Generator prompt</a>
+</div></nav>
+<div class="wrap">
+
+<div class="lesson-top">
+  <div><span class="badge">Track B · Capstone</span><span class="badge dim">≈ 3–4 days</span></div>
+  <button id="donebtn" class="donebtn">Mark lesson complete</button>
+</div>
+<h1>Capstone — one simulation, from serial oracle to a defensible scaling study</h1>
+<p class="lead">The B-track's thesis, executed end to end: a 2D heat solver taken from NumPy oracle to multi-node MPI+GPU, wrapped in physics fixtures, checkpointed on a formula, environment-recorded, and reported with labeled curves, an overlaid cost model, and a numerics contract. The deliverable is not speed — it's a REPORT a hostile reviewer can verify. That artifact is the HPC hiring bar, and you're about to own one.</p>
+
+<h2>The spec</h2>
+<pre><code>DELIVERABLE  public repo: 2D heat equation (extendable to wave), five rungs,
+             the full fixture suite, job scripts (B7's, tested traps), the
+             scaling REPORT (b10-report's anatomy), numerics contract (B8's
+             paragraph), environment records per run
+THE BAR      every curve carries its model overlay (predicted vs measured);
+             every efficiency loss is ATTRIBUTED with an instrument; the
+             report survives the stranger test on someone else's cluster
+RULE         predictions before runs, committed; fixtures before physics
+             before performance (the order is the method — M2 L6 → B1 P6)</code></pre>
+
+<h2>The problem and its free oracles</h2>
+<div class="diagram" data-diagram="b10-heat" data-caption="The heat equation: rich enough to exercise every systems lesson, kind enough to hand you analytic solutions, conservation ledgers, symmetry, and a razor-sharp CFL wall as fixtures."></div>
+<pre><code>u_t = α∇²u on a rectangle — B3's stencil iterated under B1's stability law
+the fixture suite (all executed in B1–B3, now packaged):
+  CFL audit at startup (dt vs h²/4α; refuses to run over the wall)
+  conservation ledger (insulated: drift ≤ 1e-15-class/step, fp64 pairwise —
+    and it rides IN the checkpoint: B7 P2)
+  Gaussian spread law σ²(t) = σ₀² + 2αt (measured to 4 digits — the
+    analytic oracle at every scale)
+  symmetry preservation (the seam-and-corner detector — B3 quiz 2)
+  split-domain bitwise oracle (B3 Ex.2 → B5's ladder currency)</code></pre>
+
+<h2>The ladder</h2>
+<div class="diagram" data-diagram="b10-ladder" data-caption="r0 serial oracle → r1 single-GPU tiled → r2 overlapped halos → r3 multi-node study → r4 the report. Every rung inherits the fixtures; every rung commits its prediction first."></div>
+<pre><code>r0  NumPy/C serial: the oracle. Slow is FINE — it exists to be right
+    (and to price r1's win honestly: no strawman baselines — A11's law)
+r1  single GPU (5.5-tiled stencil or B6 directives — YOUR call, justified):
+    predict from the bytes model (B3's worked example: ~1.4 ms/step at
+    4096² fp64 on the T4 ledger) → measure → attribute the gap
+r2  overlap: split-domain in one GPU first (bitwise rung!), then async
+    halo exchange under interior compute (B5's idiom) — bitwise vs r1
+    at sync mode, budgeted at async (B8's rungs applied)
+r3  multi-node: the B5 ladder to N ranks; weak AND strong studies from
+    the Ex.2-of-B5 workbook's predictions; B7's job scripts with tested
+    traps, arrays for the sweep, Young's-formula checkpoints
+r4  the report (below) — where the four days become an artifact</code></pre>
+
+<h2>The report — the actual deliverable</h2>
+<div class="diagram" data-diagram="b10-report" data-caption="Environment spec, correctness evidence, labeled curves with model overlays, attributed losses, numerics contract. One page of this outranks a folder of unexplained speedups."></div>
+<pre><code>§1 environment: container hash + module list + flags per run (B7 P5) —
+   the flags line includes the fast-math AUDIT (B8's executed deletion)
+§2 correctness: fixture table PER SCALE (conservation drift, spread-law
+   digits, symmetry, twin-run divergence vs derived budget — B8 Ex.2)
+§3 the curves: weak scaling (4096²/rank) and strong scaling (4096² total),
+   BOTH labeled (b5-scaling's law), each with the two-lane model overlaid —
+   representative outcome on an IB cluster: weak 97% at 64 ranks (model
+   said 99: gap attributed to Waitall tails via the timeline — 5.10's
+   instrument); strong 51% at 64 (model said 50: the cliff, ARRIVING ON
+   SCHEDULE is a success of prediction, not a failure of code)
+§4 losses attributed: every % between model and measurement gets a named
+   mechanism + instrument screenshot (nsys lane, binding report, ledger)
+§5 numerics contract: B8's paragraph verbatim, with THIS study's numbers
+§6 cost appendix: GPU-hours consumed vs allocated, checkpoint tax measured
+   vs Young's prediction (B7 Ex.2), queue-shape notes — operations as
+   science (because on clusters, they are)</code></pre>
+
+<h2>Key points</h2>
+<ul class="keypoints">
+<li>The capstone's order IS the method: oracle → fixtures → single-GPU (predicted, measured, attributed) → bitwise-laddered parallelism → labeled studies → contract-bearing report.</li>
+<li>Physics oracles ride every rung: CFL refusal at startup, conservation-in-the-checkpoint, spread-law digits per scale, symmetry as the seam detector — correctness evidence is a TABLE, not a sentence.</li>
+<li>Both scaling curves, both labels, model overlays mandatory: a strong-scaling cliff arriving where the two-lane arithmetic predicted is a PREDICTION SUCCESS — report it as one.</li>
+<li>Every efficiency point between model and measurement gets a mechanism and an instrument (timeline, binding report, ledger) — "94%, losses: 4% Waitall tails, 2% imbalance" is one sentence and five lessons.</li>
+<li>Operations are part of the science: tested SIGTERM traps, Young's-interval checkpoints, environment records, and the queue-shape economics belong IN the report's appendix.</li>
+<li>The stranger test is the bar: another cluster, your repo, every number reproduced within the contract's budgets from committed scripts — that property, not the speedup, is what the B-track certifies.</li>
+</ul>
+
+<h2>Defense quiz — the two you WILL be asked</h2>
+<div class="quiz">
+  <div class="q">1. A reviewer (or interviewer): "Your strong-scaling efficiency collapses to 51% at 64 ranks — why should we accept a method that scales this poorly?" Deliver the answer that turns the "weakness" into the report's strongest section.</div>
+  <button class="opt">Apologize and promise better overlap in future work</button>
+  <button class="opt" data-c="1">The 51% was PREDICTED at 50% before any run: strong scaling divides a fixed 4096² grid until each rank holds 512² — where the halo's surface/volume ratio and per-message latency make comm ≈ compute (the two-lane arithmetic in §3, committed to the repo before the study — the git log shows it). This isn't the method scaling poorly; it's the PROBLEM SIZE exhausting its parallelism, on schedule — the same physics that gives 97% WEAK scaling at identical rank counts (the curve directly above it, same hardware, same code). The report's guidance follows: for THIS grid, 16 ranks is the efficiency knee (arithmetic provided); for more ranks, grow the problem — and the model that called the cliff within one point is now a validated capacity-planning tool, which is worth more than the missing 49%. Accepting arithmetic's verdict and PREDICTING it is the difference between a scaling study and a scaling advertisement</button>
+  <button class="opt">Blame the cluster's interconnect</button>
+  <button class="opt">Remove the strong-scaling curve from the paper</button>
+  <div class="expl">Option 4 is the field's quiet scandal (unlabeled or omitted strong-scaling curves) and reviewers increasingly hunt for it; option 1 concedes a defect that doesn't exist. The winning move — prediction committed first, cliff arriving on schedule, knee arithmetic offered as guidance — converts Amdahl's law from embarrassment into demonstrated mastery. This exact exchange decides HPC interviews: the candidate who NEEDS 90% everywhere doesn't understand scaling; the one who predicts the 50% does.</div>
+</div>
+<div class="quiz">
+  <div class="q">2. "Your conservation ledger drifts 2e-16 per step. Over my planned 10⁹-step production run, that's potentially 2e-7 — real drift. Is your solver fit for my purpose?" — the questioner runs century-scale climate integrations. Answer with the ladder, the mechanism, and the honest escalation path.</div>
+  <button class="opt">2e-16 is machine epsilon — the question is confused</button>
+  <button class="opt" data-c="1">The question is exactly right to ask, and the answer has three parts. Mechanism: the 2e-16/step is fp64 pairwise-summation wobble (B8's measured rung), and its ACCUMULATION law matters — random-sign rounding walks as ~√N·eps ≈ 3e-11 over 10⁹ steps, not linearly to 2e-7… but only if the ledger's errors stay unbiased: systematic flux-bookkeeping bias accumulates LINEARLY, which is why the fixture distinguishes them (twin runs + sign statistics on the drift — B8 Ex.2's machinery). Fitness: for 10⁹ steps I'd escalate the ledger to compensated (Kahan) accumulation — measured O(eps) flat, deleting the growth question entirely for 4 flops/element on ONE reduction (B8's ladder: the escalation is a config line, and -ffast-math is already banned by the contract so it SURVIVES compilation). And the honest boundary: at your horizon, the ledger's arithmetic stops being the story — timestep truncation bias (B1's O(h) vs O(h⁴) per-step error, systematically signed!) dominates any summation wobble by orders: the fitness conversation belongs at the INTEGRATOR's order and the energy-drift character (B1's worked example), which my report's §5 prices but your production spec must choose. Fit for purpose = matched error BUDGETS at your horizon — here's the arithmetic; you own the horizon</button>
+  <button class="opt">Yes — fp64 is always sufficient for climate</button>
+  <button class="opt">No solver can promise anything at 10⁹ steps</button>
+  <div class="expl">The three-part shape — mechanism with the √N-vs-linear distinction, the cheap escalation (Kahan) already de-risked by the flag contract, and the honest redirect to the DOMINANT error term at that horizon — is what numerics maturity sounds like. Options 1 and 3 both dodge the budget arithmetic in opposite directions. Note the trap defused: the questioner's linear extrapolation (2e-7) was the WRONG model for unbiased rounding but the RIGHT paranoia for biased bookkeeping — honoring both halves is the credibility move.</div>
+</div>
+
+<h2>The build — acceptance criteria</h2>
+<details><summary>Days 1–2 (r0–r2): oracle + fixtures + single-GPU + overlap. ACCEPT when: the fixture suite is a FILE (runs on every rung, every scale — CFL refusal tested by config, not comment); r1's bytes-model prediction is committed BEFORE its first timing, and the gap is attributed (achieved-vs-modeled BW, one sentence); the split-domain oracle is bitwise green; r2's sync-mode is bitwise vs r1 and async-mode is budget-green with the B8 twin machinery; the checkpoint round-trip (B7 Ex.1's kill drill) passes with LEDGER CONTINUITY asserted across the restart.</summary><div class="body">
+<p>Guidance: build the fixture file FIRST and watch it fail on an empty solver — M2 L6's constitution, felt. The r1 choice (hand CUDA vs B6 directives) is yours but the justification paragraph is mandatory (regime arithmetic: bandwidth-bound → either hits the ceiling; pick for the repo's audience and say so — B6 quiz 2's calculus in miniature). Most common day-2 failure: the restart resets the ledger accumulator (B7 Ex.1's warning) — the continuity assert exists because this bug ships in real codes annually.</p>
+</div></details>
+<details><summary>Days 3–4 (r3–r4): the study + the report. ACCEPT when: weak AND strong sweeps run as job arrays with tested traps (B7's script, adapted); every curve carries its committed prediction overlay; losses are attributed with instruments (at least one nsys lane screenshot or equivalent); the numerics contract carries THIS study's twin-run numbers; §6's cost appendix reconciles GPU-hours and checkpoint tax vs Young's prediction; and the README passes the stranger test — someone with a different cluster reproduces the CURVES' SHAPES and the fixtures' greens from committed scripts (absolute numbers may differ; the model overlays explain why — 4.7's bounds-travel law, stated).</summary><div class="body">
+<p>No cluster? The capstone degrades gracefully and honestly: r3 runs as multi-process MPI on one machine (mpi4py — the LADDER and fixtures are identical; the curves get labeled "single-node, shared-bandwidth regime" per 5.9 P6's law) plus the FULL predicted study for a hypothetical cluster from B5 Ex.2's workbook — predictions being the artifact that transfers. Several strong HPC hires have been made on exactly this "predicted study + single-node validation" package; the report's HONESTY about its regime is itself the demonstrated skill. When cluster access arrives (B7's allocation world), the sweep scripts are ready and the predictions are waiting to be graded.</p>
+</div></details>
+
+<hr>
+<h1>Beyond — where this artifact points</h1>
+
+<h2>1. Extensions that upgrade the repo (each a weekend)</h2>
+<pre><code>wave equation module: two fields, energy ledger, dt~h CFL — B3 §2's variant
+  (tests how cleanly your abstractions separated physics from plumbing)
+implicit diffusion: the B1 P4 → B2 tridiagonal path per dimension (ADI) —
+  retires the CFL wall, introduces the solve-per-step economics LIVE
+temporal blocking rung: B3 P2's bandwidth-for-compute trade, measured
+GPUDirect halo path: B5's device-pointer exchange when the fabric allows —
+  the bandwidth-pair ritual graduating to production
+the B9 fused ledger: P4's composed kernel replacing the separate reduction —
+  one more 4.6 round-trip deleted, occupancy table updated in the README</code></pre>
+
+<h2>2. Gotchas (capstone-specific, pre-bled)</h2>
+<div class="gotcha"><strong>Fixtures only at small scale.</strong> The seam bugs (B3's scenario) surface at production resolution — the suite runs at EVERY scale in the sweep, and §2's table proves it did.</div>
+<div class="gotcha"><strong>Predictions written after measurements.</strong> The git log is part of the deliverable (5.11's rule) — retro-fitted "predictions" are visible in the history and fatal to the artifact's whole point.</div>
+<div class="gotcha"><strong>Timing windows containing I/O.</strong> Diagnostics flushes inside the stepped region contaminate the curves (B7 P6's design) — the profiler screenshot in §4 must show clean lanes or the curve is fiction.</div>
+<div class="gotcha"><strong>Unlabeled curve axes.</strong> Efficiency vs ranks without "weak/strong, grid size, per-rank size" is 5.9 P6's unlabeled sin — reviewers now reject on sight, correctly.</div>
+<div class="gotcha"><strong>The heroic single number.</strong> "412× speedup!" against an unoptimized serial baseline (r0 is an ORACLE, not a strawman) — report r1-vs-optimized-CPU honestly or report nothing (A11's r1-bar ethics).</div>
+<div class="gotcha"><strong>Contract-less precision claims.</strong> Any ± or drift figure in the report without its B8 derivation attached converts a defense (quiz 2) into an ambush — the contract paragraph is load-bearing, not decorative.</div>
+
+<h2>3. Scenario — the defense, forty minutes, an allocation won</h2>
+<p>The setting is real and recurring: an allocation committee (or a hiring panel — the script is identical) reviewing a request backed by this capstone. The applicant opens with §3's two curves. <em>"Why does strong scaling die at 64?"</em> — quiz 1's answer, with the committed prediction shown in the git history; a committee member who came to attack Amdahl-innumeracy visibly re-sorts the application into a different pile. <em>"How do we know the parallel version computes the same physics?"</em> — the fixture table per scale, the split-domain bitwise oracle, the twin-run budget with its κ-derivation (B8): correctness as EVIDENCE, not assertion. <em>"What happens when nodes fail at your requested scale?"</em> — Young's-interval checkpoints with the tested-trap kill drill cited, the fault tax pre-computed at the requested MTBF (B7 Ex.2's workbook, rerun for THEIR machine). <em>"Your requested hours?"</em> — derived from the weak-scaling model plus the checkpoint tax plus a 1.3× pilot-calibrated margin, per line (B7's ask-precision loop, exhibited). The committee's report later praises "unusual operational maturity" — which, decoded, means: <em>every number had a mechanism, every mechanism had an instrument, every instrument had already been run.</em> The allocation funds. The same repo, three months later, anchors the applicant's interview at a national lab, where the panel asks quiz 2 nearly verbatim and receives the three-part answer. The B-track's closing claim, now demonstrated twice: in scientific computing, the career-compounding artifact is not the fast code — it's the DEFENSIBLE study, and its price was the habits, not the hours.</p>
+
+<h2>Defense bank — answer all seven in writing before any interview or committee</h2>
+<details><summary>1. Walk the ladder r0→r4 in 60 seconds, naming each rung's fixture currency (bitwise vs budgeted) and the lesson that supplied it.</summary><div class="body">r0: the oracle — correctness by construction, priced honestly (no strawman). r1: bytes-model prediction committed, measured, attributed (B3's worked example); fixtures: physics suite at fp64 budgets. r2: sync-mode BITWISE vs r1 (same order — B5's ladder currency), async budget-green (B8 rungs distinguished). r3: per-scale fixture table + twin-run budgets (rung 3, derived); job-array operations with tested traps (B7). r4: the report — curves labeled, models overlaid, losses attributed, contract attached. The rehearsal bar: rung → currency → citation without notes; it's the study compressed to an elevator.</div></details>
+<details><summary>2. Derive your weak-scaling model's 99% prediction from first numbers (halo bytes, fabric, latency, compute lane) and then explain the measured 97% — where did 2% go, and which instrument convicted it?</summary><div class="body">Model: 4·4096·8 B = 131 KB halo → 5.2 µs wire + ~10 µs latency ≈ 15 µs vs 1.4 ms interior → 1.1% exposed → 98.9% (B5's worked example). Measured 97.2%: the extra ~1.7% = Waitall tail jitter (ranks finish interiors at slightly different times — OS noise, clock variance: the timeline shows staggered Waitall entries, nsys's lane view being the convicting instrument — 5.10's WHERE) plus a minor ledger-reduction serialization every 100 steps (visible as periodic spikes; moved off the critical path via B9 P4's fused ledger in the extension). The answer's shape — model, gap, mechanism, instrument, remedy-if-wanted — is §4's row format, spoken.</div></details>
+<details><summary>3. Why does your report show BOTH weak and strong curves when the weak one "looks better"? Cite the distinct question each answers and the dishonesty class omitting either commits.</summary><div class="body">Weak answers: "can this METHOD+machine grow to bigger science?" (surface/volume's promise — capability). Strong answers: "can it turn MORE hardware into LESS wall-clock for a FIXED problem?" (the practitioner's actual daily question — capacity). Omitting strong: hides the Amdahl knee your users will hit (the field's classic advertisement sin — gotcha 4/5's cousin); omitting weak: hides capability for growth. Both, labeled, with the knee ARITHMETIC (quiz 1's 16-rank guidance) = the reader can plan; either alone = the reader inherits your marketing. b5-scaling's law, stated as ethics: a scaling claim without its label is a number wearing a costume.</div></details>
+<details><summary>4. Your checkpoint system: what's in the state, why does the ledger ride inside it, what did the kill drill catch in YOUR build, and what's the measured tax vs Young's prediction?</summary><div class="body">State: fields (ping-pong ACTIVE buffer only + step parity), step counter, RNG counters if stochastic BCs (B4/B7 P2's three integers), ledger accumulators (fp64 partials). Ledger inside because restart-with-reset-ledger silently forges conservation history (B7 Ex.1's named bug — the fixture asserts continuity ACROSS the restart boundary). The kill drill's typical catch (report yours honestly): first attempt wrote the checkpoint AFTER the swap but recorded the pre-swap step counter — off-by-one-step on restart, caught by ledger discontinuity at the boundary: exactly the class that only fires during disasters, found in staging where it's cheap (B7 §1's philosophy). Tax: Young interval 2.6 h predicted ~4%; measured 3.6% (writes faster than pilot estimate — NVMe staging) — the reconciliation line §6 exists for.</div></details>
+<details><summary>5. Translate the whole study to the wave equation in one paragraph: what changes (CFL, ledger, fixtures), what doesn't (the entire systems layer), and what that separation proves about your architecture.</summary><div class="body">Changes: physics kernel (two fields, leapfrog — B1's symplectic character wanted for waves), CFL to dt ≤ h/c (linear — B3 P1's dimension economics shift the step counts), ledger to energy (kinetic+potential; drifts BOUNDED not conserved-exactly under leapfrog — the fixture asserts boundedness per B1's worked example), analytic oracle to standing-mode frequencies. Unchanged: decomposition, halo machinery, the bitwise ladder, job scripts, checkpoint system (state schema gains one field), report skeleton, contract structure — i.e., ~90% of the repo. The separation proves the architecture put PHYSICS behind a narrow interface (update + ledger + fixtures) and SYSTEMS everywhere else — which is the design property that lets real groups (B6's 300k-line world) swap physics for decades on one plumbing investment. Saying "one paragraph of physics, zero paragraphs of MPI" IS the architecture review.</div></details>
+<details><summary>6. Price the implicit-diffusion extension: what the CFL wall's removal buys at fine grids (arithmetic), what each step now costs (B2's tridiagonal numbers), where the crossover sits, and which fixture NEWLY matters.</summary><div class="body">Explicit at h→h/2: dt ÷4 (the h² wall) → 8× work in 2D per halved h (4× cells × ... plus steps): refinement is brutal (B3 P1's 16× in the naive count for fixed horizon). Implicit: dt set by ACCURACY (~h-ish for the physics), each step = one tridiagonal solve per dimension (ADI): B2's worked example priced it at ~0.3 ms per 1M-unknown sweep — a few bandwidth passes. Crossover: whenever stability-dt ≪ accuracy-dt, i.e., fine grids or big α — for the 4096² study at h=1: explicit dt 0.25 vs accuracy needs ~2.5 → implicit wins ~10× on steps for ~2–3× per-step cost: net ~4×, GROWING as h shrinks (the B1 §2 trade, finally cashed in this repo). Newly-critical fixture: the solver's manufactured-solution test (b=A·u*, B2's oracle) + symmetry of the SOLVE (tridiagonal boundary rows — B2's scenario's lda ghost lives there). The extension is the track's two halves (numerics + systems) shaking hands in one weekend.</div></details>
+<details><summary>7. The 90-second full walkthrough (rehearse aloud): problem → oracle+fixtures → prediction-first single-GPU → bitwise parallel ladder → both curves with the predicted cliff → attributed losses → operations appendix → contract — ending with the one-sentence definition of a defensible study.</summary><div class="body">Skeleton: "A 2D heat solver, chosen because physics supplies free oracles — conservation to machine epsilon, an analytic spread law good to four digits, symmetry as a seam detector, and a CFL wall my startup audit refuses to cross [b10-heat]. The serial version exists to be RIGHT; every performance rung committed its prediction first — single-GPU landed within 12% of the bytes model, gap attributed to achieved bandwidth. Parallelism climbed a bitwise ladder: split-domain oracle, synchronous MPI equal to the last bit, then overlap budget-verified by twin runs against a κ-derived tolerance [B5/B8]. The study shows BOTH curves, labeled: weak at 97% of a 99% model — the 2% convicted by the timeline as Waitall jitter — and strong collapsing to 51% exactly where the two-lane arithmetic said 50%: the cliff arriving on schedule is my model VALIDATING, and the report offers the 16-rank knee as capacity guidance [quiz 1]. Operations are in the appendix as science: Young's-interval checkpoints with a tested kill drill, job arrays shaped for backfill, environment and flags recorded per run — the fast-math audit included, because I've measured that flag deleting an algorithm [B7/B8]. The numerics contract names its reproducibility rung with derived budgets and twin-run evidence. Definition to close: a defensible study is one where every number has a mechanism, every mechanism an instrument, and every instrument a committed script a stranger can run — speed is a corollary." Time it; trim it; it's the interview.</div></details>
+
+<div class="pager">
+  <a href="lesson-09.html">← Thrust, CUB & cuFFT</a>
+  <a href="../curriculum.html">Curriculum — Track B complete →</a>
+</div>
+<div class="footer">GPU Mastery · Track B · Capstone — works offline · progress saved in your browser</div>
+</div>
+<script src="../assets/diagramsB.js"></script>
+<script src="../assets/app.js"></script>
+</body>
+</html>

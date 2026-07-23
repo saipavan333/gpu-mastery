@@ -1,0 +1,180 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>5.1 Lab Setup & First Compile — GPU Mastery</title>
+<link rel="stylesheet" href="../assets/style.css">
+</head>
+<body data-lesson="m5l1">
+<nav><div class="inner">
+  <a class="logo" href="../index.html">GPU<span>Mastery</span></a>
+  <a class="item" href="../index.html">Home</a>
+  <a class="item on" href="../curriculum.html">Curriculum</a>
+  <a class="item" href="../labs.html">Labs</a>
+  <a class="item" href="../setup.html">Lab setup</a>
+  <a class="item" href="../prompt.html">Generator prompt</a>
+</div></nav>
+<div class="wrap">
+
+<div class="lesson-top">
+  <div><span class="badge">Module 5 · Lesson 1</span><span class="badge dim">≈ 2 h</span></div>
+  <button id="donebtn" class="donebtn">Mark lesson complete</button>
+</div>
+<h1>Lab Setup & First Compile — hardware, at last</h1>
+<p class="lead">Four modules of preparation end here: a real GPU runs your code today. This lesson gets the toolchain working (Colab or local), teaches nvcc as 3.1's pipeline-run-twice, and establishes the verify ritual you'll run on every machine you ever touch.</p>
+
+<h2>Concept</h2>
+
+<h3>Your GPU options, honestly ranked</h3>
+<table>
+<tr><th>Path</th><th>Cost</th><th>Notes</th></tr>
+<tr><td><strong>Google Colab</strong> (recommended start)</td><td>free</td><td>T4 (sm_75, 16 GB) typical; zero install; sessions expire — keep code in the notebook/Drive</td></tr>
+<tr><td>Kaggle notebooks</td><td>free</td><td>30 h/week quota; the backup tier</td></tr>
+<tr><td>Your NVIDIA GPU</td><td>owned</td><td>GTX 10-series+ still works for learning; WSL2/Linux per <a href="../setup.html">setup.html</a>. CUDA 13 needs Turing (sm_75)+ to COMPILE for</td></tr>
+<tr><td>Cloud by the hour</td><td>~$0.2–2/h</td><td>for 5.11's serious runs if Colab throttles; Lightning/RunPod/Lambda-class</td></tr>
+</table>
+
+<h3>The verify ritual (60 seconds, every machine, forever)</h3>
+<div class="diagram" data-diagram="m5l1-verify" data-caption="Driver ≠ toolkit — the M2 L7 §5 protocol grew its CUDA row."></div>
+<pre><code># Colab: Runtime → Change runtime type → GPU. Then, in cells:
+!nvidia-smi                    # driver + GPU + VRAM + max-supported CUDA
+!nvcc --version                # the toolkit you compile with (Colab: preinstalled)
+!nvidia-smi --query-gpu=name,compute_cap --format=csv    # → "Tesla T4, 7.5"</code></pre>
+
+<h3>nvcc: the 3.1 pipeline, twice</h3>
+<div class="diagram" data-diagram="m5l1-toolchain" data-caption="Host code → your g++. Device code → PTX → SASS per -arch. Stitched into a fatbinary."></div>
+<pre><code>nvcc -arch=sm_75 hello.cu -o hello       # T4. sm_89=L4 · sm_90=H100 · sm_120=RTX 5090
+nvcc -arch=native ...                     # "ask the GPU in this machine" (local builds)
+# CUDA 13 removed ≤ Volta targets. Wrong/missing arch at runtime:
+# "no kernel image is available for execution on the device" — a LINKER-stage-style
+# diagnosis (3.1's skill): the fatbin simply lacks your GPU's SASS (and no PTX to JIT).</code></pre>
+
+<h3>hello.cu — annotated</h3>
+<div class="diagram" data-diagram="m5l1-hello" data-caption="Three new tokens; everything else is Module 3."></div>
+<pre><code>#include &lt;cstdio&gt;
+__global__ void hello() {                       // __global__: GPU code, CPU-callable
+    printf("block %d thread %d\n", blockIdx.x, threadIdx.x);
+}
+int main() {
+    hello&lt;&lt;&lt;2, 4&gt;&gt;&gt;();                          // launch config: 2 blocks × 4 threads
+    cudaDeviceSynchronize();                     // launches are async (5.3) — wait,
+    return 0;                                    // or main exits before the GPU prints!
+}</code></pre>
+
+<h2>Worked example</h2>
+<div class="card">
+<p><strong>Task:</strong> The full Colab workflow, end to end — the cell pattern you'll use through 5.11.</p>
+<pre><code># cell 1 — write the file (M2 L7's %%writefile, now shipping CUDA)
+%%writefile hello.cu
+...the program above...
+
+# cell 2 — compile and run, chained (3.1's stale-binary killer)
+!nvcc -arch=sm_75 -O2 hello.cu -o hello && ./hello
+
+block 1 thread 0        ← note: block 1 FIRST this run —
+block 1 thread 1          4.4's "no block order" contract,
+...                       demonstrated on your first program
+block 0 thread 3</code></pre>
+<p><strong>Three observations that are the whole module in miniature:</strong> (1) the output interleaves across runs — blocks are independent and unordered (4.4 §4's contract, visible); (2) within a block, threads 0–3 print in order — a warp's lanes issued together (all 4 live in one warp); (3) delete the synchronize and the program prints <em>nothing</em> — main exited while the kernel sat in the queue (5.3's asynchrony, teaching its first lesson). <strong>Decision made:</strong> -O2 from the first compile and the && chain — 3.1's habits port verbatim; nvcc passes host flags straight to your g++.</p>
+</div>
+
+<h2>Key points</h2>
+<ul class="keypoints">
+<li>Colab free tier (T4, sm_75) is fully sufficient through this module; the verify ritual (smi / nvcc / compute_cap) runs on every machine, first.</li>
+<li>nvcc splits .cu into host (your Module-3 toolchain, unchanged) and device (PTX→SASS per -arch) paths, stitched into a fatbinary; PTX enables forward-compat JIT.</li>
+<li>-arch names: sm_75 T4 · sm_89 L4/Ada · sm_90 H100 · sm_100/103 B200 · sm_120 RTX 5090; CUDA 13 dropped ≤ Volta — "no kernel image" means your arch isn't in the binary.</li>
+<li>__global__ marks GPU-code-CPU-callable; &lt;&lt;&lt;blocks, threads&gt;&gt;&gt; is the launch config; built-ins blockIdx/threadIdx/blockDim/gridDim are your grid coordinates.</li>
+<li>Launches are asynchronous: synchronize (or hit an implicit sync) before reading results or exiting — the missing-output bug is everyone's first.</li>
+<li>Block execution order is unspecified by contract — your first program already proves it; never depend on it.</li>
+</ul>
+
+<h2>Quiz</h2>
+<div class="quiz">
+  <div class="q">1. Your binary, built with -arch=sm_90 on the cluster, prints "no kernel image is available" on your laptop's RTX 5090 (sm_120). But a colleague's old sm_75 binary RUNS on the 5090. Explain both facts.</div>
+  <button class="opt">The 5090 is broken — sm_120 should run everything</button>
+  <button class="opt" data-c="1">Your fatbin has sm_90 SASS only (newer GPUs don't run older-arch SASS directly, and you built without PTX or it was excluded); the colleague's binary carries PTX which the driver JIT-compiles forward to sm_120. Fix: -arch=native locally, or -gencode multiple targets + PTX for shipping</button>
+  <button class="opt">CUDA 13 dropped sm_90</button>
+  <button class="opt">Laptops can't run cluster binaries</button>
+  <div class="expl">SASS is architecture-specific machine code; PTX is the portable IR the driver can JIT for FUTURE architectures (the toolchain diagram's whole point). Default nvcc embeds PTX for the target's virtual arch — but explicit -arch=sm_90 as code=sm_90 only, or stripped PTX, breaks forward compat. Shipping binaries = fatbin with several SASS + top PTX. This exact confusion fills forums; you now debug it from the diagram.</div>
+</div>
+<div class="quiz">
+  <div class="q">2. hello<<<2, 4>>>() prints 8 lines. What does hello<<<1, 33>>>() do differently under the hood, and what would hello<<<1, 2048>>>() vs hello<<<1, 4096>>>() do?</div>
+  <button class="opt">All identical — thread count is just a loop bound</button>
+  <button class="opt" data-c="1">33 threads = 2 warps (one full, one with 1 live lane — 4.4's fractional-warp tax on display); 2048 = the per-block maximum (valid but heavy... actually 1024 is the block cap!); 4096 fails at LAUNCH with invalid configuration — checked by cudaGetLastError (5.4)</button>
+  <button class="opt">33 is illegal — must be a multiple of 32</button>
+  <button class="opt">4096 threads silently truncates to 1024</button>
+  <div class="expl">Warps are ceil(33/32)=2 (M1 L2's division allocating hardware); non-multiples are LEGAL but waste masked lanes. The block cap is 1024 threads (2048 is per-SM RESIDENCY, not per-block — a classic mix-up worth making once here, cheaply); exceeding it → cudaErrorInvalidConfiguration at launch, silent unless you CHECK (5.4's entire pitch). Nothing truncates silently — but nothing reports loudly either, unless you ask.</div>
+</div>
+
+<h2>Exercises</h2>
+<details><summary>Exercise 1 — Device interrogation: write query.cu using cudaGetDeviceProperties to print name, compute capability, SM count, max threads/block, shared memory/SM, registers/SM, warp size, and memory bus specs. Then compute and print the theoretical numbers YOUR Module-4 model needs: fp32 peak (SMs × 128 × 2 × clock) and the DRAM bandwidth — your machine-model header (4.7 P6), generated by the machine itself.</summary><div class="body">
+<pre><code>#include &lt;cstdio&gt;
+int main() {
+    cudaDeviceProp p;
+    cudaGetDeviceProperties(&amp;p, 0);
+    printf("%s  sm_%d%d  SMs=%d\n", p.name, p.major, p.minor, p.multiProcessorCount);
+    printf("maxThreads/block=%d  warp=%d\n", p.maxThreadsPerBlock, p.warpSize);
+    printf("shared/SM=%zu KB  regs/SM=%d\n", p.sharedMemPerMultiprocessor/1024, p.regsPerMultiprocessor);
+    double peak = p.multiProcessorCount * 128.0 * 2.0 * (p.clockRate * 1e3) / 1e12;
+    double bw   = 2.0 * p.memoryClockRate * 1e3 * (p.memoryBusWidth / 8.0) / 1e9;
+    printf("fp32 peak ≈ %.1f TF   BW ≈ %.0f GB/s   ridge ≈ %.0f FLOP/B\n",
+           peak, bw, peak*1e3/bw);
+    return 0;
+}
+/* T4 prints ≈ 8.1 TF, 320 GB/s, ridge ≈ 25 — a modest, honest machine whose
+   entire 4.7 roofline you now hold. (Clock fields are deprecated-ish on newest
+   toolkits — if zero, take clocks from nvidia-smi -q -d CLOCK instead.) */</code></pre>
+<p>This output IS your 4.7 P6 machine-model header — paste it atop every benchmark from here on. The 128 cores/SM constant holds for current consumer/datacenter parts you'll meet (T4 is 64/SM — Turing's layout; if the peak looks 2× high on a T4, that's why: check p.major==7 and use 64. Spec archaeology is part of the job, and the struct hands you the evidence).</p>
+</div></details>
+<details><summary>Exercise 2 — Break it four ways, file the messages (3.1 Ex.1's phrasebook, CUDA edition): (a) compile with -arch=sm_60 on CUDA 13; (b) run an sm_90-only binary on the T4; (c) launch <<<1, 2000>>>; (d) forget cudaDeviceSynchronize entirely. Record WHERE each failure surfaces (compile / launch / runtime / silence) — the stage-diagnosis table you'll debug from all module.</summary><div class="body">
+<p>(a) COMPILE: nvcc errors immediately — "unsupported gpu architecture 'compute_60'" (CUDA 13 removed it; the toolchain refuses cleanly — best failure mode of the four). (b) RUNTIME, first API check: "no kernel image is available" (quiz 1's fatbin story — the launch "succeeds" as a no-op unless checked!). (c) LAUNCH: cudaErrorInvalidConfiguration from cudaGetLastError after the launch — but SILENT if you never ask (the kernel simply doesn't run; downstream results are stale memory — 3.2's uninitialized ghosts at GPU scale). (d) SILENCE: program exits 0, prints nothing, "works" in scripts that don't read output — the most dangerous quadrant. The table's moral, worth the whole exercise: <strong>CUDA's default failure mode is silence; 5.4 exists to make every one of these loud.</strong> Keep the four messages in your notes file next to 3.1's.</p>
+</div></details>
+
+<hr>
+<h1>Go deeper — the working environment, professionally</h1>
+
+<h2>1. Colab survival kit</h2>
+<pre><code>%%writefile + !nvcc ... && ./prog        # the two-cell rhythm (worked example)
+!pip -q install nvcc4jupyter && %load_ext nvcc4jupyter   # optional: %%cuda cells
+Drive mount / git clone                   # code OUTLIVES the session; outputs → Drive
+runtime disconnects: save early, save often — treat sessions as preemptible (they are)
+throttling: heavy use → slower queues; 5.11's long sweeps → local GPU or a $0.50 cloud hour</code></pre>
+
+<h2>2. Local: the flags file (3.6's Makefile grows CUDA rows)</h2>
+<pre><code>NVCC      = nvcc
+NVCCFLAGS = -arch=native -O2 -g -lineinfo    # -lineinfo: source lines in profilers/sanitizer
+%.o: %.cu
+	$(NVCC) $(NVCCFLAGS) -c $&lt; -o $@
+# debug target adds: -G (device debug; SLOW — never benchmark it: 3.8's sanitized-bench gotcha)
+# CMake: enable_language(CUDA) + CMAKE_CUDA_ARCHITECTURES=native — 3.6 §5's promise</code></pre>
+
+<h2>3. Gotchas</h2>
+<div class="gotcha"><strong>Benchmarking with -G.</strong> Device-debug disables optimization: 10–50× slow. -G for cuda-gdb sessions; -lineinfo (cheap) for profiler line mapping; never confuse them.</div>
+<div class="gotcha"><strong>Guessing the arch.</strong> The compute_cap query answers in one line. Wrong guesses "work" via PTX JIT (slow first launch, silent) or fail at runtime — both worse than asking.</div>
+<div class="gotcha"><strong>Colab session amnesia.</strong> Files vanish on disconnect. Notebook cells + Drive/git are the source of truth; binaries are always disposable (3.1's rule anyway).</div>
+<div class="gotcha"><strong>printf-from-kernel as a habit.</strong> Fine for hello; in real kernels it serializes and buffers weirdly. It's a demo tool — 5.4's sanitizer and 5.10's profilers are the instruments.</div>
+<div class="gotcha"><strong>Exiting before sync.</strong> The silent-nothing bug (Ex.2d). Until 5.3's implicit-sync map is second nature, end every experiment with CUDA_CHECK(cudaDeviceSynchronize()).</div>
+<div class="gotcha"><strong>Toolkit-newer-than-driver.</strong> Local installs: nvcc 13.3 with a driver capped at 12.x → runtime failures. The ritual's comparison (toolkit ≤ driver max) catches it before the first mystery.</div>
+
+<h2>Scenario — the workshop that started with 40 broken laptops</h2>
+<p>You volunteer to run a "first CUDA kernel" workshop for your study group's wider circle — 40 attendees, 40 environments, one hour. Veterans of this exact hour warned you it dies in setup hell. Your countermeasure is this lesson operationalized: everyone gets a Colab template notebook — cell 1 the verify ritual (which immediately sorts the room into "T4, 7.5" and three people who forgot Runtime→GPU), cell 2 hello.cu prewritten, cell 3 the query.cu machine-model generator. Nineteen minutes in, all 40 have printed interleaved block orders and argued about why they differ (you let them argue — it's 4.4's contract teaching itself). The four planted failures from Ex.2 become the second half: each table gets one break to diagnose with the stage table. The wrap-up slide is the ritual + the failure quadrants, and the follow-up message you receive a week later — "used your stage table to fix our lab's 'no kernel image' in five minutes; we'd been reinstalling drivers for a day" — is this lesson's actual final exam, passed by someone else.</p>
+
+<h2>Practice</h2>
+<details><summary>1. Decode each -arch flag choice: a student notebook targeting Colab; a shipping binary for customers with unknown 30/40/50-series cards; your own workstation; a cluster of H100s with occasional B200 nodes.</summary><div class="body">Colab: -arch=sm_75 (T4 floor; runs via JIT if you land an L4). Shipping: -gencode for sm_75,sm_86,sm_89,sm_120 + compute_120 PTX (fatbin breadth + forward JIT — quiz 1's lesson). Workstation: -arch=native (ask the machine). Cluster: -gencode sm_90 + sm_100 + PTX. The pattern: breadth costs binary size and build time; PTX is the safety net; native is for machines you're sitting at.</div></details>
+<details><summary>2. hello<<<2, 4>>> prints block 1 before block 0 in about half your runs. A teammate adds code that "fixes" the order by having block 1 spin-wait on a flag block 0 sets. Predict the behavior across GPU sizes and condemn it with the right 4.4 clause.</summary><div class="body">On a big GPU both blocks are resident → it "works". On any GPU that schedules block 1 first AND has one SM-worth of space... block 1 spins forever waiting for block 0, which may never be scheduled while block 1 occupies the SM: DEADLOCK (intermittent, size-dependent — the worst kind). The clause: blocks are independent by CONTRACT, schedulable in any order, any subset concurrently (4.4 §4); inter-block coordination mid-kernel is forbidden (grid sync = separate kernel launches or cooperative groups with strict occupancy guarantees). First-week CUDA students write this bug; you've now condemned it before writing it.</div></details>
+<details><summary>3. Your first launch takes 210 ms; the second takes 0.4 ms. List the three cold-start contributors and the M1 L7 ritual line that handles them all.</summary><div class="body">(1) CUDA context creation on first API call (~100+ ms — driver init, per process); (2) PTX JIT if your arch wasn't in the fatbin (quiz 1 — and it caches afterward); (3) allocator/first-touch effects. The ritual line: WARMUP RUNS, DISCARDED (M1 L7, unchanged since Module 1) — every benchmark harness this module builds starts with it, and now you know precisely what the warmup is absorbing.</div></details>
+<details><summary>4. Translate the M2 L2 Python launch simulator to real CUDA syntax from memory (N=10, B=4, guard included) — then state which single line the simulator COULDN'T teach and this lesson's hardware did.</summary><div class="body"><code>saxpy&lt;&lt;&lt;(10+3)/4, 4&gt;&gt;&gt;(d_x, d_y, a, 10);</code> with <code>if (i &lt; n)</code> inside — identical arithmetic, three years of curriculum converging on one line. The unteachable line: <code>cudaDeviceSynchronize()</code> — Python's simulator was synchronous by nature; asynchrony (and its silent-exit failure) only exists on real hardware. That's why Ex.2d's quadrant needed a GPU to be felt.</div></details>
+<details><summary>5. A Makefile builds .cu files with -O2 but no -arch. It works on the dev box, and CI (different GPU) shows every kernel 6× slower on FIRST test run, normal after. Diagnose the mechanism and give the two-character-ish class of fix.</summary><div class="body">No -arch → nvcc's default target + embedded PTX; CI's newer GPU finds no matching SASS → JIT-compiles PTX on first use (the 6× first-run: JIT time amortizing — quiz 1's machinery measured in CI minutes). Fix class: SET THE ARCH — -arch=native per machine, or the CI matrix's explicit list. Bonus habit: JIT results cache in ~/.nv/ComputeCache — CI containers without persistent cache re-JIT forever, a real pipeline-cost bug you can now name in review.</div></details>
+<details><summary>6. Design your module-5 workspace: the repo layout (which 3.6/2.7 pieces port unchanged), the two Makefile targets that differ from CPU-land, the notebook↔repo sync policy for Colab work, and the one new provenance field every benchmark JSON gains (2.7 Ex.1's dict grows).</summary><div class="body">Layout unchanged: types.h, timer, tests/, scripts/, Makefile (3.6), provenance JSONs (2.7). New targets: <code>sanitize:</code> compute-sanitizer wrapper (replaces asan target — same role, 5.4) and <code>profile:</code> nsys/ncu invocations (5.10) — both on NON-debug builds. Colab policy: repo is truth (git clone in cell 1), notebooks are terminals — cells never hold code that isn't committed (the workshop scenario's discipline). New provenance fields: gpu name + compute_cap + driver + toolkit versions (the verify ritual, serialized) — because "same code, different numbers" across T4/L4 sessions is EXPECTED and must be attributable (M1 L7's environment honesty, GPU row).</div></details>
+<details><summary>7. Write the five-line "first day on any GPU machine" runbook you'd give a new teammate — commands only, each annotated with the failure it preempts. (This is the lesson as a checklist; it should fit on an index card.)</summary><div class="body"><code>nvidia-smi</code> — is there a GPU, driver alive, anyone else using it? (preempts: debugging code on a busy/absent device). <code>nvcc --version</code> + compare to smi's max — toolkit≤driver? (preempts: version-mismatch mysteries). <code>nvidia-smi --query-gpu=name,compute_cap --format=csv</code> — the -arch answer (preempts: JIT surprises, no-kernel-image). <code>nvcc -arch=&lt;that&gt; hello.cu -o h && ./h</code> — end-to-end smoke test in 30 s (preempts: discovering a broken toolchain inside a real debugging session). <code>./query</code> (Ex.1's binary) — machine model header into today's notes (preempts: benchmarking against the wrong roofline). Five commands, five classes of wasted afternoon — the card earns its lamination.</div></details>
+
+<div class="pager">
+  <a href="../curriculum.html">← Curriculum</a>
+  <a href="lesson-02.html">Next: Your first real kernel →</a>
+</div>
+<div class="footer">GPU Mastery · Module 5 · Lesson 1 — works offline · progress saved in your browser</div>
+</div>
+<script src="../assets/diagrams5.js"></script>
+<script src="../assets/app.js"></script>
+</body>
+</html>

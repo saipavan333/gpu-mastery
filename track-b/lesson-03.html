@@ -1,0 +1,195 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>B3 Stencils & Grid Codes — GPU Mastery</title>
+<link rel="stylesheet" href="../assets/style.css">
+</head>
+<body data-lesson="bl3">
+<nav><div class="inner">
+  <a class="logo" href="../index.html">GPU<span>Mastery</span></a>
+  <a class="item" href="../index.html">Home</a>
+  <a class="item on" href="../curriculum.html">Curriculum</a>
+  <a class="item" href="../labs.html">Labs</a>
+  <a class="item" href="../setup.html">Lab setup</a>
+  <a class="item" href="../prompt.html">Generator prompt</a>
+</div></nav>
+<div class="wrap">
+
+<div class="lesson-top">
+  <div><span class="badge">Track B · Lesson 3</span><span class="badge dim">≈ 3.5 h</span></div>
+  <button id="donebtn" class="donebtn">Mark lesson complete</button>
+</div>
+<h1>Stencils & Grid Codes — the workhorse pattern of computational science</h1>
+<p class="lead">Half of simulation is a grid where every point updates from its neighbors — heat, waves, fluids, fields. One pattern, one memory story (bandwidth, always), one parallel story (tiles + halos), and a set of physics-supplied fixtures so good they feel like cheating. Everything below is executed: conservation to 2e-16, the spread law to four digits, and a stability wall that hides for 200 steps before detonating at step 2000.</p>
+
+<h2>Concept</h2>
+
+<h3>The 5-point stencil: B1's second derivative, twice</h3>
+<div class="diagram" data-diagram="b3-stencil" data-caption="u_t = α∇²u discretizes to 'each cell moves toward its neighbors' average.' Five reads, one write, a handful of FLOPs — a bandwidth citizen by construction."></div>
+<pre><code>u'ᵢⱼ = uᵢⱼ + (α·dt/h²) · (uᵢ₊₁ⱼ + uᵢ₋₁ⱼ + uᵢⱼ₊₁ + uᵢⱼ₋₁ − 4uᵢⱼ)
+# arithmetic intensity: ~6 FLOPs per 5 reads + 1 write (fp64: 48 B) ≈ 0.12
+# FLOP/B — deep memory-cellar (4.7): stencil performance IS bandwidth
+# stewardship: 5.5's shared-memory tiling (load a tile+halo once, update the
+# interior from SRAM) and 5.7's coalesced rows are the whole optimization
+# story, and you already own both. GPUs eat stencils ~50–100× over serial
+# CPU for exactly the reason they eat saxpy: the bus, not the FLOPs.</code></pre>
+
+<h3>The CFL wall — B1's stability contract in 2D, with a fuse</h3>
+<pre><code>explicit heat step stable iff  dt ≤ h²/(2·d·α)   (d dims: 2D → h²/4α)
+MEASURED (α=1, h=1 → wall at 0.25), Gaussian initial condition:
+  dt = 0.24 → 2000 steps: max|u| = 1.6e-4  (smooth decay ✓)
+  dt = 0.26 → 200 steps: looks FINE (1.4e-3)… 2000 steps: 7.0e+46  ✗✗
+# the fuse: the unstable mode is the checkerboard (Nyquist) pattern, present
+# in smooth data only at ~1e-19 round-off amplitude; it grows ×|1−8dt| = 1.08
+# per step → 1.08^2000 ≈ 1e66 · 1e-19 ≈ 1e47 ✓ (the measured 7e46, derived).
+# "The sim was fine for weeks of steps, then exploded" is not a mystery —
+# it's an exponential incubating below the noise floor. The CFL audit at
+# STARTUP (B1 P6) is the only cure; watching plots is not.</code></pre>
+
+<h3>Halos: the parallel structure the stencil forces</h3>
+<div class="diagram" data-diagram="b3-halo" data-caption="Split the grid into subdomains; each owns its cells and borrows a one-cell ring. Exchange the ring, update the interior — surface/volume makes it scale."></div>
+<pre><code>tile n×n: exchange O(4n) halo bytes, compute O(n²) interior work
+  at n=512: halo/interior = 4·512/512² = 0.78% — comm VANISHES as tiles grow
+  (the same surface/volume law that made 5.11 P6's out-of-core GEMM work)
+overlap (5.9's law, grid edition): post async halo sends/recvs → compute the
+  INTERIOR (needs no halo) → wait → compute the 4 edge strips → next step.
+  Wider stencils (B1 §1's O(h⁴) five-point) need 2-cell halos: order costs
+  communication — a REAL trade you now price, not a footnote.</code></pre>
+
+<h3>Physics-supplied fixtures (the cheat codes, executed)</h3>
+<div class="diagram" data-diagram="b3-jacobi" data-caption="For iterative solvers: residual monotone down. For time-steppers: conservation ledgers and analytic solutions. Nature wrote your reference implementation."></div>
+<pre><code>conservation: insulated/periodic heat conserves Σu — MEASURED drift over
+  400 steps: 2.2e-16 (one ulp!). Any flux-bookkeeping bug shows here first.
+analytic spread: a Gaussian stays Gaussian with σ²(t) = σ₀² + 2αt —
+  MEASURED σ² = 201.00 vs theory 201.00 (σ₀²=9, t=96): four digits, free.
+symmetry: symmetric input must stay symmetric to round-off — indexing and
+  halo off-by-ones appear as creeping asymmetry LONG before visible wrongness.
+Jacobi (steady-state solver): residual must fall monotonically — measured
+  2.4e-3 → 4.8e-4 → 1.2e-4 over 100/500/2000 iters (slow: κ grows as 1/h² —
+  B2 §2's iteration law; why multigrid exists, and why B10 stays explicit).</code></pre>
+
+<h2>Worked example</h2>
+<div class="card">
+<p><strong>Task:</strong> The stencil kernel's GPU ladder, priced with the course ledger before writing code (T4, fp64, 4096² grid = 128 MB/field) — then checked against the fixtures above at every rung. This is B10's r1 rung, rehearsed.</p>
+<pre><code>bytes/step (two fields, ping-pong): read u (5 pts amortized to ~1 by cache/
+  tiling) + write u' → ideal ≈ 2 fields × 128 MB = 256 MB … naive (no tiling,
+  cold caches) ≈ 6 × 128 MB = 768 MB
+r0 serial C (one core):        ~1.2 GB/s effective → ~640 ms/step (oracle)
+r1 naive CUDA (5.2-style):     768 MB / 220 GB/s ≈ 3.5 ms/step  (~180×!)
+r2 tiled+coalesced (5.5/5.7):  ~300 MB / 220 ≈ 1.4 ms/step — 2.5× more,
+   exactly the traffic model's promise (measured effective BW is the fixture)
+r3 fused k-steps? tempting — temporal blocking exists (compute 2 steps per
+   tile load) but halos GROW per fused step (2-ring, 3-ring…): the 5.5-P4
+   trade returns; production stencil codes stop at r2 + overlap unless
+   PROFILING (5.10) demands more. Knowing where to stop is the skill (4.7).
+fixtures at every rung: conservation 2e-16-class · spread law to ≥3 digits ·
+   symmetry byte-clean · r-vs-r0 field diff within fp64 budget (order matters:
+   plumbing before physics before performance — M2 L6, always).</code></pre>
+<p><strong>What to internalize:</strong> the ENTIRE performance story was a bytes table — no FLOP appeared in any line (0.12 FLOP/B guarantees that). And the fixtures cost nothing: physics hands you conservation, self-similarity, and symmetry as executable oracles. A stencil code with those four fixtures green at every rung is trustworthy at 4096² because it was PROVEN at 128²; one without them is a rumor with pretty colormaps.</p>
+</div>
+
+<h2>Key points</h2>
+<ul class="keypoints">
+<li>Stencils are bandwidth citizens (0.12 FLOP/B measured for 2D heat fp64): the optimization story is 5.5 tiling + 5.7 coalescing + traffic accounting, and FLOPs never enter the arithmetic.</li>
+<li>The CFL wall (dt ≤ h²/2dα) is razor-sharp and FUSED: unstable modes incubate at round-off amplitude and grow exponentially — measured fine at 200 steps, 7e+46 at 2000. Audit dt at startup; plots can't save you.</li>
+<li>Domain decomposition = own your cells, borrow a halo ring: comm is O(surface), work is O(volume) — 0.78% ratio at 512² tiles — and async overlap (interior while halos fly) is 5.9's pipeline on a grid.</li>
+<li>Higher-order stencils buy accuracy with WIDER halos: order-vs-communication is a real HPC trade you price (B1 §1), not a pure win.</li>
+<li>Physics supplies fixtures better than any you could write: conservation (2e-16 measured), analytic self-similar solutions (σ² law to 4 digits), symmetry preservation, monotone residuals — wire all four into CI before performance work.</li>
+<li>Jacobi-style relaxation converges at a rate that collapses as grids refine (κ ~ 1/h²) — the measured 2000-iteration crawl is why multigrid/implicit methods exist, and why honest capstones state which they use.</li>
+</ul>
+
+<h2>Quiz</h2>
+<div class="quiz">
+  <div class="q">1. A group's production climate-adjacent run "went unstable after 11 days of wall-clock" — millions of healthy steps, then NaN in hours. The team suspects hardware (ECC logs clean) or a rare data race. The config shows dt was set to 0.995× the CFL limit "to maximize throughput." Explain the 11-day fuse quantitatively, exonerate the hardware, and give the two-line fix with its honest cost.</div>
+  <button class="opt">11 days of accumulating fp64 rounding finally overflowed</button>
+  <button class="opt" data-c="1">At 0.995×CFL the worst mode's amplification is |1−λdt| ≈ just barely... UNDER 1 in exact arithmetic — but the CFL limit is derived for the IDEALIZED operator: variable coefficients, boundary rows (B1 P1's one-sided stencils have different stability radii!), or a slightly deeper local α push the EFFECTIVE local limit below the global setting in a few cells → those cells' checkerboard mode grows at ×(1+ε) per step with ε ~ 1e-6-class → e^(εN) needs millions of steps to surface: the 11-day fuse is exp incubation from round-off seeds, exactly the measured 200-vs-2000-step demo stretched by a tiny ε. Hardware exonerated by mechanism: the growth is deterministic and reproducible at the same step count (rerun and see). Fix: dt at 0.8–0.9× the AUDITED limit (min over local coefficients AND boundary stencils) — costs ~10–20% more steps, deletes the failure class; or go implicit for the diffusion term (B1 §2) and retire the wall entirely</button>
+  <button class="opt">A race — the sanitizer must have missed it</button>
+  <button class="opt">NaNs from a log() of a negative — add clamps</button>
+  <div class="expl">The teaching is the FUSE ARITHMETIC: margin ε to the wall sets the incubation time as ~1/ε steps — 4% over blows in 2000 steps (measured), 0.1%-class effective violations take millions: "stable for days then explodes" is a signature, not a mystery. The 0.995 config line is the smoking gun reviewers should challenge on sight: stability margins exist because the textbook wall is for the textbook operator. Clamps (option 4) would hide the symptom and corrupt the physics silently — strictly worse than the crash.</div>
+</div>
+<div class="quiz">
+  <div class="q">2. Your halo-exchanged multi-GPU stencil passes conservation and spread-law fixtures at 1 GPU, but at 4 GPUs conservation drifts by 1e-9/step and a symmetric initial condition develops a faint seam along subdomain boundaries. Rank the three classic culprits, name the fixture that localizes each, and explain why the drift is 1e-9 rather than obviously wrong.</div>
+  <button class="opt">NCCL corruption — swap the interconnect</button>
+  <button class="opt" data-c="1">Culprits, base-rate order: (1) halo off-by-one — an edge column updated from a stale or shifted neighbor value (the seam!): localized by the SYMMETRY fixture per-subdomain (asymmetry appears exactly at the guilty edge) and by a 2-GPU minimal repro with a ramp initial condition (values encode positions — 3.4 Ex.2's recognizable-pattern doctrine); (2) double-counted or skipped flux at the boundary between owned and halo cells (conservation's 1e-9: ONE row of cells mis-accounted among millions ≈ row/total magnitude — the drift SIZE is the cell-count arithmetic, which is why it's subtle: 4096 cells wrong of 16.7M ≈ 2.4e-4 of the field's smallest scales × step size); (3) exchange/compute ordering race — computing edges before the halo lands (5.9's dependency, B5's tag/order rules): localized by forcing synchronous exchange (overlap OFF) — drift vanishes → the async path's ordering is guilty. All three are YOUR bugs; the fabric (option 1) doesn't round</button>
+  <button class="opt">fp64 isn't associative across GPUs — expected, ignore</button>
+  <button class="opt">Jacobi doesn't parallelize — switch methods</button>
+  <div class="expl">The drift-magnitude arithmetic is the senior move: 1e-9/step isn't "small noise," it's ~one-row-of-cells-per-step mis-accounted — a COUNTABLE bug, not a numerical mood (option 3 confuses 5.8's last-bit reduction wobble, ~1e-16-class, with a 7-orders-larger bookkeeping error: budgets exist so you can tell mechanism from mood). The localization ladder — symmetry per subdomain, ramp patterns, sync-vs-async A/B — converts a "spooky parallel bug" into an afternoon. Every multi-GPU stencil team meets this exact bug; now you'll meet it armed.</div>
+</div>
+
+<h2>Exercises</h2>
+<details><summary>Exercise 1 — Build the 2D heat stepper in NumPy (periodic + insulated variants) and wire ALL four physics fixtures (conservation, σ²(t) law, symmetry, monotone decay of max). Reproduce: conservation ≤ 1e-15-class, spread law to ≥3 digits, and the CFL fuse — dt=0.24 vs 0.26, showing "fine at 200, 7e+46 at 2000." Then find the fuse LENGTH as a function of margin: steps-to-explosion at dt ∈ {0.255, 0.26, 0.28, 0.35} — fit it and state the law.</summary><div class="body">
+<pre><code>expected: steps-to-1e6 ≈ log(1e6/1e-19)/log|1−8dt| → at dt=0.26 (g=1.08):
+~747 steps to 1e6-scale… measure ~where max|u| crosses 1: growth from 1e-19
+seeds: N ≈ 44/ln(g). dt=0.255 (g=1.04): ~1100 steps; 0.28 (1.24): ~200;
+0.35 (1.8): ~75. Fit ln(N) vs ln(g−1)… better: N·ln(g) ≈ const ≈ 44 —
+the fuse law: incubation ∝ 1/ln(g) ≈ 1/(margin) for small margins.
+Deliverable: the fuse plot + one sentence: "margin to the wall sets the
+EXPLOSION DATE, not the explosion PROBABILITY" — quiz 1, self-derived.</code></pre>
+</div></details>
+<details><summary>Exercise 2 — Colab: port the stepper to CUDA/Triton (your 5.5 tile or A4 skeleton — one kernel, ping-pong buffers), run the SAME four fixtures on-GPU, and measure the r1→r2 ladder: naive vs tiled effective bandwidth (bytes-model ÷ time vs 220 GB/s). Then the halo rehearsal for B5: split the grid into 2 subdomains IN ONE GPU's memory, exchange halos via explicit copies, assert bitwise equality with the unsplit run — the decomposition harness, debugged where debugging is easy.</summary><div class="body">
+<pre><code>expected: naive ~60–70% of the 768 MB model's prediction (cache helps some);
+tiled reaches ~70–85% of 220 GB/s on the 300 MB model — report BOTH as
+"achieved vs modeled" (5.10's discipline). The split-domain bitwise assert
+is the exercise's crown: same arithmetic, same order, same bits (5.11's
+bitwise doctrine applies — splitting changes LOADS, not adds) — and every
+future B5 MPI bug will be diffed against this known-good single-GPU
+decomposition. You just built the oracle for the distributed version.</code></pre>
+</div></details>
+
+<hr>
+<h1>Go deeper — grid-code craft</h1>
+
+<h2>1. Boundaries: where correctness goes to die</h2>
+<pre><code>periodic:   np.roll semantics — cleanest, great for fixtures
+Dirichlet:  pinned values (u=1 wall) — the boundary ROW uses B1 P1's
+            one-sided stencils or ghost cells holding the pinned value
+Neumann:    zero-flux (insulated) — ghost = mirror of interior neighbor;
+            get the mirror index wrong by one and conservation drifts
+            (quiz 2's culprit #2 is USUALLY here)
+ghost-cell discipline: allocate N+2 per dim, fill ghosts each step (from
+boundary rule or neighbor's halo — SAME code path: boundaries are just
+halos whose neighbor is physics), then update interior uniformly — one
+branch-free kernel (5.6's divergence economy) + one fill routine per rule.</code></pre>
+
+<h2>2. Beyond heat: the same skeleton, harder physics</h2>
+<pre><code>wave equation: two fields (u, u_t), CFL now dt ≤ h/c (LINEAR in h — advection
+  and waves are gentler than diffusion's h²: refine the grid 2×, pay 2× steps
+  not 4×); energy fixture replaces conservation-of-sum
+advection: upwind stencils (direction-aware — central differences BLOW UP on
+  pure advection: a famous trap), flux limiters for shocks
+Navier–Stokes: all of the above + pressure solves (B2's Poisson every step)
+the pattern's constant: neighbors + timestep + boundary rules + a conserved
+ledger — master heat's skeleton and the harder equations are new COEFFICIENTS
+on old bones (B10 stays with heat so the SYSTEMS lessons stay in focus).</code></pre>
+
+<h2>3. Gotchas</h2>
+<div class="gotcha"><strong>dt at 0.99× the textbook wall.</strong> Quiz 1's fuse. Real operators (variable α, boundaries) shave the wall; 0.8–0.9× the AUDITED minimum is the professional margin.</div>
+<div class="gotcha"><strong>In-place updates.</strong> Updating u while reading u makes cell (i,j) see half-new neighbors — a Gauss–Seidel sweep when you meant Jacobi: different (sometimes convergent-anyway!) mathematics, silently. Ping-pong buffers, always, unless you CHOSE Gauss–Seidel.</div>
+<div class="gotcha"><strong>Fixtures only on periodic domains.</strong> Periodic hides boundary bugs by having no boundaries. The suite runs on ALL boundary variants — Neumann's mirror index is where quiz 2 lives.</div>
+<div class="gotcha"><strong>Halo width vs stencil order mismatch.</strong> Upgrading to the O(h⁴) stencil without widening halos to 2 reads garbage edges that LOOK like slightly-wrong physics (the worst kind — 3.2's flavor). Halo width is derived from stencil radius, asserted at startup.</div>
+<div class="gotcha"><strong>Judging convergence by eyeball.</strong> "The plot stopped changing" at Jacobi's 1e-4 residual can be 1% wrong in the quantity you publish (κ-slow modes linger invisibly). Residual thresholds tied to the SCIENCE's budget (B8), never to visual quiescence.</div>
+<div class="gotcha"><strong>One-field-in-cache assumptions from CPU days.</strong> The GPU traffic model (worked example) counts every field's round trip; CPU-era "it fits in L3" intuitions undercount by the ping-pong factor. Model bytes, then measure achieved BW — the gap names your tiling quality (5.10's loop).</div>
+
+<h2>Scenario — the seam that published, almost</h2>
+<p>A geophysics group runs multi-GPU wave propagation for a survey-imaging paper. Results look excellent; a reviewer asks for a resolution-doubling study. At the finer grid, a faint grid-aligned artifact appears in figure 3 — dismissed initially as "imaging noise," until a student overlays the subdomain boundaries and the artifact snaps onto them exactly (quiz 2's seam, in the wild). The audit — run in one afternoon because the group had Ex.2's single-GPU split-domain oracle — finds culprit #1: the halo exchange filled ghost columns correctly but the EDGE update read the ghost from the PREVIOUS timestep on one side only (an ordering slip in the overlap refactor two months prior; 5.9's dependency law, violated by a well-intentioned "optimization" that moved a wait). The wave speed across seams was wrong by O(dt) — utterly invisible in coarse runs, systematic at fine ones. The fixes: the ordering restored (one line), AND — the real fix — the symmetry fixture and the split-vs-unsplit bitwise oracle promoted to per-commit CI, which would have caught the refactor the day it merged. The paper shipped correct, with a methods paragraph the reviewer praised: fixtures named, drift budgets stated (b8-repro's ladder, rung 3). The moral for the wall: <em>parallel-boundary bugs masquerade as subtle physics and surface at exactly the resolution where your career is watching — the split-domain oracle costs an afternoon and stands guard forever.</em></p>
+
+<h2>Practice</h2>
+<details><summary>1. Derive the 2D CFL limit from the amplification factor: plug the checkerboard mode u = (−1)^(i+j) into the explicit step and find the dt where |factor| = 1. Then explain why the WAVE equation's limit scales as h while diffusion's scales as h² — and what that means for the cost of doubling resolution in each.</summary><div class="body">Checkerboard: each neighbor is −u → lap = −4u−4u = −8u (h=1) → u' = (1−8·α·dt/h²)u → |1−8αdt/h²| ≤ 1 → dt ≤ h²/(4α) ✓ (the measured 0.25). Diffusion's h²: the operator is second-order in space — its fastest mode stiffens quadratically as grids refine. Waves: first-order-in-time pairs with c·dt/h ≤ 1 (information moves one cell per step, max — the CFL's original meaning). Cost of 2× resolution: diffusion pays 4× cells × 4× steps = 16× (why implicit diffusion is everywhere); waves pay 4× × 2× = 8×. One exponent, entire software architectures downstream (B1 §2's implicit trade, priced by equation type).</div></details>
+<details><summary>2. Price temporal blocking (r3): fusing k=2 steps per tile load needs a halo of width 2 and recomputes the overlap region. For a 32×32 shared-memory tile, compute the traffic saved vs the redundant compute added, and state when it wins (hint: it's a bandwidth-vs-FLOP trade on a 0.12 FLOP/B kernel).</summary><div class="body">Traffic: one load serves 2 steps → ~½ the HBM bytes. Redundancy: step 1 must be computed on the 34×34 region to feed step 2's 32×32 interior → extra compute ≈ (34²−32²)/32² ≈ 13% more FLOPs, plus 2-wide halo loads (36×36 vs 34×34 footprint: +12% bytes on the load). Net: ~45% traffic saved for ~13% extra FLOPs — on a kernel with 100× more bandwidth-pressure than FLOP-pressure, that's a clear WIN in theory… and in practice it wins when the tile machinery (two syncs, register pressure for two time levels) doesn't eat the margin — 5.6's dial decides, per card. The general law: temporal blocking converts bandwidth into compute — exactly the direction 4.7 says to trade on a 0.12 FLOP/B kernel; production stencil frameworks (and B6's compilers, sometimes) do k=2–4 when profiling confirms.</div></details>
+<details><summary>3. Your Neumann (insulated) boundary uses ghost = interior-neighbor mirror. Write the THREE lines that can be wrong (which cell mirrors, when ghosts refresh, corner handling), the fixture that catches each, and why corners are the perennial off-by-one graveyard.</summary><div class="body">(1) WHICH mirror: ghost[0] = u[1] (mirror across the face) vs u[0] (copy) — the copy version leaks flux (conservation fixture: drifts ~boundary-row/total per step — quiz 2's arithmetic). (2) WHEN: ghosts must refresh AFTER each update, BEFORE next step's reads — stale ghosts = one-step-lagged boundary (symmetry fixture catches: seam at the wall; the scenario's exact class). (3) CORNERS: need mirroring in BOTH axes (ghost[0][0] from u[1][1] via two reflections) — lazy codes fill faces only and corners inherit garbage: invisible on conservation (4 cells!), caught by the SYMMETRY fixture on a diagonal-symmetric input (which is why the suite includes one). Corners are the graveyard because they're the intersection of two boundary code paths — the 2D version of every off-by-one you met in M3; the fix is the ghost-cell discipline of §1: ONE fill routine, all edges+corners, unit-tested on a 4×4 grid you can check by hand.</div></details>
+<details><summary>4. Convert the worked example's ladder to the WAVE equation (two fields, dt ~ h): which rungs' arithmetic changes, which fixtures swap in, and why the halo-exchange OVERLAP matters more for waves than for heat at the same grid size.</summary><div class="body">Traffic doubles-ish (two fields ping-ponged: ~4 fields' round trips) but the SHAPE is identical — still bandwidth-priced, still 5.5/5.7 territory. Fixtures: conservation-of-sum → ENERGY ledger (kinetic+potential, drifts bounded like B1's symplectic story — leapfrog IS symplectic, the standard wave stepper); spread law → known traveling-wave/standing-mode solutions (sine mode oscillates at known frequency: assert the period to 3 digits). Overlap matters more because dt ~ h means MORE steps per unit physics at fine grids (P1's 8× vs 16× — more step-boundaries per second of simulated time), so per-step comm latency amortizes over LESS compute: the comm/compute ratio worsens linearly vs diffusion's quadratic forgiveness… careful — diffusion takes MORE steps (h²); actually waves take FEWER steps than diffusion at fine h, but each wave step is CHEAPER (2 fields, same bytes) while halo latency is FIXED: the ratio halo-time/step-time grows as steps shrink in cost. Net: latency-hiding (interior-first overlap) is the difference between 90% and 60% scaling for wave codes — B5's worked example will put numbers on exactly this.</div></details>
+<details><summary>5. A colleague ports the stepper to fp32 "since the GPU does fp32 2× faster and the traffic halves." Using B1's V-floor, the conservation ledger, and κ-thinking (B2 §2), write the three-part verdict: what genuinely improves, what breaks first, and the mixed strategy that gets most of the win.</summary><div class="body">Improves: traffic halves → ~2× on a bandwidth-bound kernel (real, immediate — the ledger's honest column) plus cache footprints halve (tiles fit better: 5.5's budget). Breaks first: the conservation ledger — fp32's eps 1e-7 turns the 2e-16 drift into ~1e-7/step-class accumulation over millions of steps → percent-level mass error by run's end (B8's O(n·eps) law on the Σ fixture); and fine-grid Laplacians difference nearly-equal neighbors (u varies by ~h² locally): cancellation eats fp32's 7 digits exactly where the physics lives (B1's V-floor argument, spatially). Mixed strategy: fp32 STORAGE + fp64 accumulation for ledgers/reductions (A6's spine, science edition), or fp32 fields with fp64 "carry" corrections (compensated stepping — B8's Kahan generalized); modern practice: measure the science's budget FIRST (B8), then buy exactly the precision it needs — many engineering runs pass at fp32-storage; climate/long-horizon runs don't. The verdict's shape — improves/breaks/hybrid with cited mechanisms — is the reusable part.</div></details>
+<details><summary>6. Design the minimal-repro kit for quiz 2's seam bug, assuming you DIDN'T have the split-domain oracle: grid size, initial condition, GPU count, fixture order, and the binary-search structure that names the guilty line in ≤ 5 experiments.</summary><div class="body">Grid 64² (small enough to print), 2 GPUs (minimal parallelism), initial condition = ramp u[i,j] = i·1000+j (positions encoded in values — any misplaced read IDENTIFIES its source cell by value: 3.4's recognizable-garbage doctrine). Experiments: (1) sync-exchange mode: seam gone? → ordering/overlap guilty; persists? → indexing/flux. (2) [if indexing] one exchange direction at a time (N/S only, then E/W): which axis carries the seam. (3) Print the 4 columns at the boundary after ONE step vs hand-computed truth (the ramp makes truth mental arithmetic). (4) [if ordering] move the wait earlier — bisect the overlap region's edges vs interior split. (5) Confirm with the symmetry fixture green + conservation flat over 1000 steps. Five experiments, each halving the suspect space (5.4's rung discipline, distributed edition) — and then you build the split-domain oracle anyway, because the NEXT refactor is coming (scenario's real lesson).</div></details>
+<details><summary>7. Interview closer: "Walk me through parallelizing a stencil code to N GPUs" — 90 seconds: decomposition + halo mechanics, surface/volume scaling, overlap scheduling, the fixture suite that keeps it honest, the boundary/corner discipline, and the two failure signatures (seam, slow drift) with their diagnoses.</summary><div class="body">Skeleton: "Decompose the grid; each rank owns cells plus a ghost ring sized by the stencil radius — boundaries are just halos whose neighbor is physics, one fill routine covers both [§1]. Comm is surface, work is volume: 0.8% ratio at 512² tiles, so it scales IF latency hides — post async exchanges, compute the interior, then edges: 5.9's overlap on a grid [b3-halo]. Stability is audited, not hoped: explicit diffusion's wall is h²/4α, it's fused — I've measured 4%-over looking fine for 200 steps and hitting 1e46 by 2000 — so dt sits at 0.85× the audited local minimum [§CFL]. Honesty comes from physics-supplied fixtures in CI: conservation to machine-eps, analytic spread laws, symmetry preservation, plus a single-GPU split-domain BITWISE oracle that every distributed run diffs against [worked ex, Ex.2]. Failure signatures I pattern-match instantly: a grid-aligned SEAM = halo indexing or exchange ordering — localize with a ramp initial condition and sync-mode A/B; a slow conservation DRIFT = flux bookkeeping at boundaries, and its magnitude is countable (one mis-accounted row ≈ row/total per step) — budgets distinguish bookkeeping bugs from 5.8's benign last-bit wobble [quiz 2]. Scaling reports show weak AND strong curves with the comm model overlaid — an unlabeled scaling graph is marketing [B5]." Every clause is a measured number or a named fixture — which is the entire B-track signature.</div></details>
+
+<div class="pager">
+  <a href="lesson-02.html">← cuBLAS, cuSPARSE & cuSOLVER</a>
+  <a href="lesson-04.html">Next: Monte Carlo & cuRAND →</a>
+</div>
+<div class="footer">GPU Mastery · Track B · Lesson 3 — works offline · progress saved in your browser</div>
+</div>
+<script src="../assets/diagramsB.js"></script>
+<script src="../assets/app.js"></script>
+</body>
+</html>

@@ -1,0 +1,255 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>3.6 Structs, Headers & the Build — GPU Mastery</title>
+<link rel="stylesheet" href="../assets/style.css">
+</head>
+<body data-lesson="m3l6">
+<nav><div class="inner">
+  <a class="logo" href="../index.html">GPU<span>Mastery</span></a>
+  <a class="item" href="../index.html">Home</a>
+  <a class="item on" href="../curriculum.html">Curriculum</a>
+  <a class="item" href="../labs.html">Labs</a>
+  <a class="item" href="../setup.html">Lab setup</a>
+  <a class="item" href="../prompt.html">Generator prompt</a>
+</div></nav>
+<div class="wrap">
+
+<div class="lesson-top">
+  <div><span class="badge">Module 3 · Lesson 6</span><span class="badge dim">≈ 3 h</span></div>
+  <button id="donebtn" class="donebtn">Mark lesson complete</button>
+</div>
+<h1>Structs, Headers & the Build — from files to projects</h1>
+<p class="lead">One file was fine for learning; real code is many files sharing types and promises. Today: structs (records with a memory layout you control), headers (the promises), and make (the machine that rebuilds exactly what changed). This is M2 L7's repo ritual, compiled — and it's the skeleton CMake will wrap around your CUDA projects.</p>
+
+<h2>Concept</h2>
+
+<h3>struct: a record with an address layout</h3>
+<pre><code>typedef struct {
+    char    name[24];        /* fixed-size — the struct OWNS its bytes           */
+    double  ms;              /* M2's benchmark record {name, ms}, compiled       */
+    int32_t block;
+    bool    outlier;
+} Benchmark;
+
+Benchmark b = { .name = "tiled", .ms = 12.5, .block = 128 };   /* designated init  */
+b.ms = 11.9;                          /* field access                             */
+Benchmark *p = &amp;b;
+p-&gt;ms = 11.7;                         /* arrow = (*p).field — pointer access      */
+Benchmark runs[64];                   /* array of structs: AoS (3.4 §3's choice)  */</code></pre>
+<p>A struct is M2 L4's dict with the keys compiled away: fields live at fixed byte offsets, access is pointer arithmetic the compiler does for you. Passing: small structs by value are fine; big ones (or ones the callee mutates) by pointer — <code>const Benchmark *</code> for read-only (3.3's contract grammar extends naturally).</p>
+
+<h3>Padding: the layout you didn't ask for</h3>
+<div class="diagram" data-diagram="m3l6-padding" data-caption="Fields align to their own size; the order YOU write determines the bytes you pay."></div>
+<pre><code>struct Bad  { char c; double d; int i; };   /* 1+7pad+8+4+4pad = 24 bytes          */
+struct Good { double d; int i; char c; };   /* 8+4+1+3pad      = 16 bytes (-33%)   */
+printf("%zu %zu\n", sizeof(struct Bad), sizeof(struct Good));   /* 24 16           */</code></pre>
+<p>Rule: each field sits at an offset that's a multiple of its own alignment; the whole struct rounds up to its largest member (so arrays of it stay aligned — M1 L1's masks as law). Order fields big→small and padding mostly vanishes. At 10M records, 8 wasted bytes = 80 MB of nothing moving through your caches (M1 L3's bytes budget) — and on GPU, struct layout gates vectorized loads. <code>offsetof(struct Bad, d)</code> (from stddef.h) lets you SEE the offsets; the exercise makes you predict them first.</p>
+
+<h3>Headers: promises shared across compilation units</h3>
+<div class="diagram" data-diagram="m3l6-units" data-caption="Each .c compiles alone against the header's promises; the linker verifies delivery."></div>
+<pre><code>/* buffer.h — the PROMISE (declarations only)                                     */
+#ifndef BUFFER_H                     /* include guard: pasted twice = defined once */
+#define BUFFER_H
+#include &lt;stddef.h&gt;
+typedef struct { float *data; size_t len, cap; } FloatBuf;
+int  fb_push(FloatBuf *b, float v);
+void fb_free(FloatBuf *b);
+#endif
+
+/* buffer.c — the DELIVERY (definitions)                                          */
+#include "buffer.h"                  /* your own header FIRST: catches mismatches */
+#include &lt;stdlib.h&gt;
+int fb_push(FloatBuf *b, float v) { /* 3.5's body */ }
+
+/* main.c just #includes "buffer.h" and calls fb_push — 3.1's matchmaker joins them */</code></pre>
+<p>The model: each .c + its included headers = one <em>compilation unit</em>, compiled alone to a .o; the linker stitches. Headers carry declarations, types, and inline helpers; definitions live in exactly one .c (or you get 3.1's "multiple definition" at link). <code>static</code> on a file-level function makes it private to that unit — C's module-privacy (M2 L7's underscore convention, enforced).</p>
+
+<h3>make: the dependency graph that ends stale binaries</h3>
+<div class="diagram" data-diagram="m3l6-make" data-caption="Edit buffer.c → only buffer.o and program rebuild. Timestamps drive everything."></div>
+<pre><code># Makefile — tabs, not spaces, before each command (the classic first error)
+CC      = gcc
+CFLAGS  = -Wall -Wextra -O2 -g -std=c17        # 3.1 §5's professional default
+OBJS    = main.o buffer.o timer.o
+
+program: $(OBJS)
+	$(CC) $(OBJS) -o program -lm
+
+%.o: %.c buffer.h timer.h                       # pattern rule: any .o from its .c
+	$(CC) $(CFLAGS) -c $&lt; -o $@                 # $&lt; = the .c, $@ = the .o
+
+test: program                                    # phony targets = named commands
+	./program --self-test
+clean:
+	rm -f $(OBJS) program
+.PHONY: test clean</code></pre>
+<p><code>make</code> compares timestamps: target older than any prerequisite → rerun the recipe. That's the whole engine — and it kills 3.1's stale-binary bug structurally. <code>make test</code> and <code>make clean</code> as named workflows are M2 L7's scripts/ directory, compiled culture. CMake (deep dive §5) generates these graphs portably and is what CUDA projects use; learn make's model first — CMake makes no sense without it.</p>
+
+<h2>Worked example</h2>
+<div class="card">
+<p><strong>Task:</strong> Assemble the course's C project skeleton — the one 3.9 fills with matmul and Module 5 extends with .cu files. Three units, two headers, one Makefile, zero stale builds.</p>
+<pre><code>gpu-bench/
+├── Makefile                  # above, verbatim
+├── timer.h                   # promise: double now_ms(void);
+├── timer.c                   # delivery: clock_gettime(CLOCK_MONOTONIC) → ms
+├── buffer.h / buffer.c       # 3.5's FloatBuf, now a shared module
+└── main.c                    # the edge: argv parsing (3.4 P5), calls, printing
+
+/* timer.c — the one non-obvious delivery: */
+#include "timer.h"
+#include &lt;time.h&gt;
+double now_ms(void) {
+    struct timespec ts;                          /* a struct from the OS's API!   */
+    clock_gettime(CLOCK_MONOTONIC, &amp;ts);         /* out-param by pointer — 3.3    */
+    return ts.tv_sec * 1e3 + ts.tv_nsec / 1e6;   /* M2's perf_counter, unmasked   */
+}</code></pre>
+<pre><code>$ make            # builds all three units, links
+$ touch buffer.c &amp;&amp; make
+gcc ... -c buffer.c -o buffer.o          ← ONLY buffer.o and program rebuilt
+gcc main.o buffer.o timer.o -o program
+$ make test
+[self-test] fb_push 10000 values... OK   ← 3.5's acceptance test, now a target</code></pre>
+<p><strong>What to notice:</strong> CLOCK_MONOTONIC (not wall-clock — NTP adjustments would corrupt benchmarks; M1 L7's measurement hygiene reaching into the OS API); the timespec out-param is 3.3's pattern in the wild; and the two-file module shape (promise/delivery) is exactly how every library you've ever linked is built. <strong>Decision made:</strong> headers list their OWN includes (buffer.h includes stddef.h for size_t) so any .c can include any header in any order — "include what you use," the hygiene rule that prevents the header-spaghetti scenario below.</p>
+</div>
+
+<h2>Key points</h2>
+<ul class="keypoints">
+<li>Structs are records with compiled-away keys: fields at fixed offsets, . for values, -> through pointers, designated initializers for clarity.</li>
+<li>Padding follows alignment law (field at multiple of its size; struct rounds to largest member): order big→small or pay in cache traffic.</li>
+<li>Headers declare (promises), exactly one .c defines (delivery); include guards make double-paste harmless; static = unit-private.</li>
+<li>Each .c compiles alone → .o; the linker joins. "Multiple definition" = two deliveries; "undefined reference" = none (3.1's matchmaking, at project scale).</li>
+<li>make rebuilds by timestamp along the dependency graph — stale binaries die; test/clean become named, shared workflows.</li>
+<li>This skeleton (headers + units + Makefile + make test) is the repo ritual of M2 L7 compiled — and the base CMake/CUDA builds on.</li>
+</ul>
+
+<h2>Quiz</h2>
+<div class="quiz">
+  <div class="q">1. sizeof(struct { int32_t a; double b; int32_t c; }) on a normal 64-bit system?</div>
+  <button class="opt">16 — 4+8+4, packed tight</button>
+  <button class="opt" data-c="1">24 — a(4)+pad(4)+b(8)+c(4)+pad(4): b needs offset 8; the struct rounds to 8 for arrays</button>
+  <button class="opt">20 — only b needs padding</button>
+  <button class="opt">Implementation-defined, could be anything</button>
+  <div class="expl">b's alignment (8) forces 4 pad bytes after a; trailing pad brings 20→24 so runs[1].b stays aligned in an array (the diagram's rule). Reorder as {double b; int32_t a, c;} → 16 bytes, zero waste. Padding IS deterministic given the ABI — 'could be anything' undersells how predictable (and exploitable for savings) it is.</div>
+</div>
+<div class="quiz">
+  <div class="q">2. You edit a constant in buffer.h. make rebuilds main.o, buffer.o, AND program — but you "only touched a header." Correct behavior or broken Makefile?</div>
+  <button class="opt">Broken — headers shouldn't trigger rebuilds</button>
+  <button class="opt" data-c="1">Correct — every unit that PASTED buffer.h compiled that constant into its .o; all of them are now stale. Headers are inputs to every unit that includes them</button>
+  <button class="opt">Correct but wasteful — make should diff the change</button>
+  <button class="opt">Broken — only program should relink</button>
+  <div class="expl">#include is paste (3.1): the header's text is INSIDE each unit's compilation. The Makefile's %.o: %.c buffer.h line declares that truth. The REAL bug is the opposite: a Makefile that omits header deps quietly keeps stale .o files — mixed-version binaries with impossible bugs. (Real projects auto-generate header deps with -MMD; deep dive §4.)</div>
+</div>
+
+<h2>Exercises</h2>
+<details><summary>Exercise 1 — Layout forensics: predict sizeof and every offsetof for <code>struct Particle { float x, y, z; uint8_t flags; float mass; }</code>, verify with a program, then reorder for minimum size. How many bytes per 10M particles did you save, and which M1 lesson prices the win?</summary><div class="body">
+<pre><code>#include &lt;stdio.h&gt;
+#include &lt;stddef.h&gt;
+#include &lt;stdint.h&gt;
+struct Particle { float x, y, z; uint8_t flags; float mass; };
+/* prediction: x@0 y@4 z@8 flags@12 pad(3) mass@16 → sizeof 20                    */
+int main(void) {
+    printf("%zu | %zu %zu %zu %zu %zu\n", sizeof(struct Particle),
+        offsetof(struct Particle, x), offsetof(struct Particle, y),
+        offsetof(struct Particle, z), offsetof(struct Particle, flags),
+        offsetof(struct Particle, mass));      /* 20 | 0 4 8 12 16 ✓             */
+    return 0;
+}</code></pre>
+<p>Reorder: {float x,y,z,mass; uint8_t flags;} → 4×4+1+3pad = still 20 (trailing pad to 4). Same size! The float-heavy struct was already near-optimal — the LESSON is that you predict-then-measure rather than cargo-cult "reorder always wins" (it wins when mixed sizes interleave — quiz 1's 24→16). The honest win here: dropping flags into a separate parallel array (SoA — 3.4 §3) makes Particle 16 bytes: 40 MB saved per 10M AND float4-alignable for GPU loads. Priced by M1 L3 (bytes are the budget) and M1 L1 (alignment). Layout decisions compose: padding rules + AoS/SoA + alignment, one design space.</p>
+</div></details>
+<details><summary>Exercise 2 — Build archaeology: with the worked example's Makefile, predict exactly what recompiles for each edit, then verify with make's output: (a) touch main.c; (b) touch timer.h; (c) touch Makefile (change CFLAGS); (d) rm buffer.o; (e) nothing touched. Which case exposes a real flaw in our simple Makefile, and what's the fix?</summary><div class="body">
+<p>(a) main.o + link. (b) ALL .o + link (every unit lists both headers as deps in the pattern rule — over-broad but safe: our rule says every .o depends on both headers even if it includes only one). (c) NOTHING recompiles — the flaw! CFLAGS changed but no timestamp make tracks did; you now have -O2 objects under a Makefile claiming -O3: mixed-flag builds, the stale-binary bug's sneaky cousin. Fixes: <code>make clean &amp;&amp; make</code> after flag changes (the honest hammer), or list Makefile as a prerequisite in the pattern rule, or (real projects) encode flags into the build dir path (build-O2/, build-asan/ — which is exactly what CMake does with build directories). (d) buffer.o rebuilt + link (make repairs deletions — it's declarative). (e) "program is up to date" — the whole point. Case (c)'s lesson generalizes: a build is a function of sources AND flags; any system tracking only sources will lie to you eventually. CMake's separate build dirs per configuration exist because of this exact class of pain.</p>
+</div></details>
+
+<hr>
+<h1>Go deeper — the complete guide</h1>
+<p>Struct semantics you'll be quizzed on (copies! comparisons!), binary I/O and why padding breaks it, header hygiene at scale, auto-dependencies, and the minimal honest CMake for the CUDA road ahead.</p>
+
+<h2>1. Struct semantics: value type, all the way</h2>
+<pre><code>Benchmark a = {...}, b;
+b = a;                        /* COPIES all bytes — C++ value semantics (3.7)     */
+                              /* started HERE; arrays inside copy too!            */
+if (a == b)                   /* ERROR: no struct ==. memcmp? DANGER: padding     */
+                              /* bytes are indeterminate → false negatives.       */
+                              /* Write field-by-field equals functions.           */
+Benchmark f(void);            /* returning by value: legal, copies (or is         */
+                              /* optimized away — don't fear small-struct returns)*/
+b.name = "x";                 /* ERROR: arrays don't assign — snprintf into it    */</code></pre>
+<p>Structs assign-by-copy (unlike Python's tag-move — M2 L1's chart completes) but don't compare, don't hash, and their inner arrays copy-with-them but can't be reassigned. The memcmp trap is sneaky: two structs with identical FIELDS can differ in PADDING bytes (3.2's uninitialized garbage lives there) — field-wise comparison functions are the rule, and this same padding is why hashing structs or using them as file/network records raw is fraught (§2).</p>
+
+<h2>2. Binary I/O: structs on disk, and why it's a trap you must know</h2>
+<pre><code>fwrite(runs, sizeof runs[0], n, f);      /* dump the array — FAST, and fragile:   */
+fread(runs, sizeof runs[0], n, f);       /* readable ONLY by the same ABI:        */
+                                          /* same padding, same endianness (M1 L1!),*/
+                                          /* same sizes. x86↔ARM or a compiler     */
+                                          /* upgrade can silently garble it.       */</code></pre>
+<p>The honest menu (M2 L7's format lesson, compiled): <strong>same-machine scratch/checkpoints</strong> — raw fwrite is fine, version-stamp the header; <strong>portable data</strong> — serialize field-by-field with fixed-width types in a declared byte order, or use a format (npy! — you can write M2 L5's .npy from C: magic + header + raw floats — a beautiful exercise in exactly this); <strong>never</strong> — raw structs across the network or between GPU/CPU builds with different packing. The .npy insight closes a loop: that format exists precisely because someone solved this trap for numeric arrays once, properly.</p>
+
+<h2>3. Header hygiene at scale (the rules that prevent spaghetti)</h2>
+<table>
+<tr><th>Rule</th><th>Why</th></tr>
+<tr><td>Every header self-sufficient (includes what IT needs)</td><td>any include order works — the worked example's decision</td></tr>
+<tr><td>Include your own header first in your .c</td><td>proves self-sufficiency on every build</td></tr>
+<tr><td>Forward-declare instead of include where a POINTER suffices</td><td><code>struct Ctx; void f(struct Ctx *);</code> — cuts rebuild cascades (quiz 2's blast radius)</td></tr>
+<tr><td>No definitions in headers except: inline functions, types, constants</td><td>one delivery per symbol (3.1's law)</td></tr>
+<tr><td>#pragma once or guards — always, immediately</td><td>double-paste = redefinition errors that point everywhere but the cause</td></tr>
+</table>
+<p>The forward-declaration row is the pro move worth internalizing: if buffer.h's API only passes <code>Ctx*</code>, it doesn't need ctx.h's contents — an <em>opaque pointer</em>. Taken further, hiding the struct definition entirely inside ctx.c (header has only <code>typedef struct Ctx Ctx;</code> + functions) gives C true encapsulation: callers CAN'T touch fields, layout can change freely. That pattern is cuBLAS's <code>cublasHandle_t</code>, FILE*, and every professional C library you'll meet — now you know what those opaque handles ARE.</p>
+
+<h2>4. make, industrial grade (still 20 lines)</h2>
+<pre><code>CC      = gcc
+CFLAGS  = -Wall -Wextra -O2 -g -std=c17 -MMD -MP     # -MMD: emit .d dependency files
+SAN     = -fsanitize=address,undefined                # make SAN=1 builds (3.8)
+SRCS    = $(wildcard *.c)
+OBJS    = $(SRCS:.c=.o)
+program: $(OBJS)
+	$(CC) $(CFLAGS) $(OBJS) -o $@ -lm
+-include $(OBJS:.o=.d)                                # auto header deps — quiz 2's
+%.o: %.c                                              # over-broad rule, retired:
+	$(CC) $(CFLAGS) -c $&lt; -o $@                       # gcc itself reports what each
+.PHONY: clean                                         # .c REALLY includes</code></pre>
+<p><code>-MMD</code> makes the compiler write each unit's true header dependencies to .d files; <code>-include</code> folds them in. Now touching timer.h rebuilds only units that actually include it — precision instead of the pattern-rule's blanket. This 20-liner is a legitimately professional Makefile; the next step up isn't more make, it's CMake:</p>
+
+<h2>5. CMake: the 8 lines that carry you to CUDA</h2>
+<pre><code># CMakeLists.txt
+cmake_minimum_required(VERSION 3.24)
+project(gpu_bench C)                        # Module 5: project(gpu_bench C CXX CUDA)
+add_executable(program main.c buffer.c timer.c)
+target_compile_options(program PRIVATE -Wall -Wextra -O2 -g)
+target_link_libraries(program PRIVATE m)
+# usage: cmake -B build &amp;&amp; cmake --build build     ← separate build dir = Ex.2(c) solved</code></pre>
+<p>CMake generates the dependency graph (make's or ninja's) portably, and its separate build directories solve the flags-staleness flaw structurally (build-debug/, build-release/, build-asan/ coexist). The reason it's THE tool for CUDA: <code>enable_language(CUDA)</code> teaches it nvcc's dual-compilation dance (3.1's pipeline, twice — host + device), architectures (<code>CMAKE_CUDA_ARCHITECTURES 90</code>), and separable compilation — hand-rolling that in make is genuinely painful. Course policy: make for single-directory C (you understand every character), CMake from the moment CUDA enters (5.1).</p>
+
+<h2>6. Gotchas</h2>
+<div class="gotcha"><strong>Space instead of tab in a Makefile recipe.</strong> "missing separator" — the most famous unhelpful error in build history. Recipes start with a TAB; configure your editor to show it.</div>
+<div class="gotcha"><strong>Struct defined in a .c, used in two.</strong> Each unit invents its own layout expectations → works until it doesn't. Shared types live in headers, definitions of FUNCTIONS in one .c (the promise/delivery split, strictly).</div>
+<div class="gotcha"><strong>memcmp/fwrite-ing structs with padding.</strong> Indeterminate pad bytes → phantom inequality, garbled files (§1, §2). Field-wise compare; serialize deliberately.</div>
+<div class="gotcha"><strong>-> vs . autopilot.</strong> p.field on a pointer / s->field on a value — both are instant compile errors (nice!) but the FIX-by-reflex (sprinkle * or & until it compiles) breeds bugs. Know which you hold (3.3's discipline).</div>
+<div class="gotcha"><strong>Header changed, no rebuild (hand-rolled deps).</strong> The inverse of quiz 2: missing header prerequisites = stale .o mixing old struct layouts with new code = "impossible" crashes. -MMD (§4) retires the whole class.</div>
+<div class="gotcha"><strong>Global mutable state shared via header.</strong> <code>extern int g_count;</code> spreads M2 L3's global disease across units — now with link-time surprises. Pass state; or one static owner + accessor functions (the opaque pattern, §3).</div>
+
+<h2>Scenario — the 40-minute build that became 40 seconds</h2>
+<p>You join a robotics lab whose C codebase has "always been like this": 90 files, every .c includes a god-header <code>all.h</code> (which includes everything else), no make — a shell script recompiles all 90 files every run, taking 40 minutes on the lab machine, so people batch changes and debug blind. Applying this lesson over a week: <strong>(1)</strong> Write the §4 Makefile with -MMD — first build still compiles everything (fine), but the second build after a one-file edit takes 4 seconds; people start compiling per-change again, which alone changes how the lab works. <strong>(2)</strong> Break all.h: each header self-sufficient, forward declarations where only pointers cross (§3) — the .d files now show the TRUE dependency fan-out dropping from 90-units-per-header-touch to a median of 3; header edits stop being feared. <strong>(3)</strong> The padding audit (Ex.1's technique) on the core <code>SensorFrame</code> struct — 10 Hz × 6 sensors × 88 bytes-of-which-26-padding logged for months: reordering fields shrinks the ring buffer 30% and, delightfully, fixes an unrelated "USB backlog" (less memcpy per frame — M1 L3's budget, again). <strong>(4)</strong> One dragon found sleeping: logs written with raw <code>fwrite(&amp;frame, ...)</code> read back on a lab laptop with a different compiler — subtly shifted fields for months (§2's trap, live); the fix is a field-wise serializer plus a version byte, and a one-page RFC the professor frames. Forty minutes → forty seconds, and none of it was clever: promises in headers, deliveries in units, timestamps in make, bytes where you can see them.</p>
+
+<h2>Practice</h2>
+<details><summary>1. Predict sizeof for: (a) struct {char a; char b; int32_t c;}; (b) struct {int64_t x; int64_t y;}; (c) struct {char tag; double v;} arr[10] — total bytes; (d) the same as (c) but tag moved after v.</summary><div class="body">(a) 8: a@0, b@1, pad2, c@4. (b) 16: no padding needed. (c) sizeof = 16 (1+7pad+8), array = 160. (d) STILL 16 (8+1+7 trailing pad — the round-to-largest rule for arrays) — reordering can't help a lone char beside a double; only packing multiple small fields together into the pad hole does (add 7 more chars: still 16!). The array-forces-trailing-pad insight is the one people miss.</div></details>
+<details><summary>2. Write eq_benchmark(const Benchmark *a, const Benchmark *b) correctly (name via strcmp, ms via M1 L8-appropriate comparison — which is it here?), and explain why memcmp fails even for two structs assigned from the SAME initializer via different code paths.</summary><div class="body"><code>bool eq_benchmark(const Benchmark *a, const Benchmark *b) { return strcmp(a-&gt;name, b-&gt;name) == 0 &amp;&amp; a-&gt;ms == b-&gt;ms &amp;&amp; a-&gt;block == b-&gt;block &amp;&amp; a-&gt;outlier == b-&gt;outlier; }</code> — and ms with == is CORRECT here: these are stored/copied values, not results of different computations (M1 L8's legitimate-== case; if ms came from two different timing runs you'd never compare at all — different question entirely). memcmp fails because padding bytes carry whatever stack/heap garbage preceded them (3.2's uninitialized rule): two logically identical structs, different pad bytes, memcmp says unequal. Bonus subtlety: name[24] after the \0 also carries garbage unless you snprintf'd into a zeroed struct — one more reason field-wise wins.</div></details>
+<details><summary>3. The opaque-pointer kata: convert FloatBuf to an opaque type — write the new buffer.h (typedef struct FloatBuf FloatBuf; + create/push/len/data/destroy signatures), state what callers LOSE and GAIN, and name two real APIs (one C stdlib, one CUDA-adjacent) built exactly this way.</summary><div class="body"><code>typedef struct FloatBuf FloatBuf;
+FloatBuf *fb_create(void);  int fb_push(FloatBuf*, float);
+size_t fb_len(const FloatBuf*);  const float *fb_data(const FloatBuf*);
+void fb_destroy(FloatBuf*);</code> — struct body moves into buffer.c. Callers lose: stack allocation (must go through create — heap only), direct field pokes, sizeof. Gain: layout freedom (add fields, reorder, change growth policy — zero recompiles beyond buffer.c: §3's blast-radius math), enforced invariants (len ≤ cap can't be violated from outside), and a stable ABI. Real twins: FILE* (you've never seen its fields) and cublasHandle_t / cudaStream_t (Module 5's handles — now demystified: they're this kata). The create/destroy pair is 3.5 §4's ownership row, formalized.</div></details>
+<details><summary>4. Trace make's decisions: given deps program←(main.o, buffer.o), main.o←(main.c, buffer.h), buffer.o←(buffer.c, buffer.h), timestamps main.c=10:00, buffer.c=10:05, buffer.h=10:20, main.o=10:15, buffer.o=10:25, program=10:26 — what does make rebuild and in what order? (Work it like the graph diagram.)</summary><div class="body">main.o (10:15) is OLDER than buffer.h (10:20) → rebuild main.o. buffer.o (10:25) is newer than both its deps → keep. program (10:26) — but its prerequisite main.o is about to get a NEW timestamp → relink after. Order: main.o, then program. One header edit, one unit recompiled, one link — precision (because buffer.o's 10:25 postdates the header change; someone already rebuilt it). Being able to run make's algorithm by hand is the difference between using the tool and trusting it.</div></details>
+<details><summary>5. Design the .npy writer from §2: given float *data, size_t n, write spec-compliant version 1.0 .npy (magic \x93NUMPY, version bytes, header length, the dict string with descr '&lt;f4', fortran_order False, shape (n,), padded to 64 with the header ending in \n, then raw bytes). Which THREE M1/M3 concepts does the format's design itself encode?</summary><div class="body">Sketch: <code>fwrite("\x93NUMPY\x01\x00", 1, 8, f);</code> build header string <code>{'descr': '&lt;f4', 'fortran_order': False, 'shape': (n,), }</code>, pad with spaces so 10+len+1 ≡ 0 mod 64, append '\n', write uint16 length (little-endian!), the string, then <code>fwrite(data, 4, n, f)</code>. Verify by np.load in Python — cross-language round-trip as the acceptance test (M2 L7 Ex.2's exactness rule, now with YOU as the writer). The three encoded concepts: (1) '&lt;f4' = explicit endianness + width — M1 L1/§2's portability trap, solved by declaration; (2) fortran_order flag = row-vs-column-major — M1 L6's schism, carried as metadata; (3) 64-byte header padding = alignment so the data block can be mmap'd aligned — M1 L1 masks/3.5 §5. A file format is frozen engineering judgment; reading one this way is a transferable skill (you'll do it again for safetensors in Track A).</div></details>
+<details><summary>6. Why does the SAN=1 build (Makefile §4) need its own object files? Trace the failure if you make, then make SAN=1 without cleaning: which objects are sanitized, what happens at link/run, and how do CMake build dirs make the mistake unrepresentable?</summary><div class="body">make SAN=1 sees all .o files up to date (timestamps! flags aren't tracked — Ex.2(c)'s flaw striking again) → relinks OLD unsanitized objects, possibly with ASan's runtime → a binary that's part-instrumented or fails to link cleanly; worst case it RUNS with main.o sanitized and buffer.o not — ASan misses everything in buffer.c and you conclude "no bugs" falsely (a lying safety net is worse than none — M2 L6's flaky-test ethics). CMake: -B build-asan puts every artifact of that configuration in its own tree; the wrong-flag object CANNOT collide because paths differ. Fix in raw make: per-config object suffixes (%.asan.o) or the clean-on-flag-change discipline. The general law: build outputs are a function of (source, flags, toolchain) — any cache keyed on less will eventually serve you a lie.</div></details>
+<details><summary>7. Design: the header layout for 3.9's matmul capstone — which headers exist (types, timer, matmul, harness), what each declares, where IDX lives, what's opaque vs transparent and WHY per §3's table, and the Makefile targets (all/test/bench/asan/clean) with their prerequisite logic. This design gets built next lesson-but-two; make it worth building.</summary><div class="body"><code>types.h</code>: 3.2 P7's content (stdint includes, idx_t, clamp_u8, static_asserts) — foundation, included by all. <code>timer.h</code>: double now_ms(void) — tiny, transparent. <code>matmul.h</code>: <code>void matmul_naive(const float *A, const float *B, float *C, size_t M, size_t N, size_t K);</code> + variants (ikj, blocked) with IDENTICAL signatures — swappable implementations behind one contract (the M2 L4 registry idea, C edition); IDX macro lives HERE (one source of truth — 3.4's rule — and matmul's the only user). <code>harness.h</code>: opaque <code>Bench</code> handle (create/run/report/destroy) — opaque because its internals (FloatBuf of timings, warmup policy) WILL change and nothing outside should care (§3 blast-radius logic); matmul.h transparent because its contract IS the point. Makefile: <code>all</code>: program; <code>test</code>: build + run fixture checks (golden 2×3·3×2 from M1 L6 + random-vs-oracle within budget — M2 L6 playbook layers 1-4); <code>bench</code>: test first (correctness gates performance — the playbook's iron rule), then timing runs; <code>asan</code>: full rebuild with SAN flags into distinct objects (P6's law); <code>clean</code>. Prerequisite logic: bench depends on test passing — encoded as target deps, so the Makefile itself enforces the course's deepest testing principle. You've now DESIGNED the capstone; 3.9 is execution.</div></details>
+
+<div class="pager">
+  <a href="lesson-05.html">← Stack, heap & malloc</a>
+  <a href="lesson-07.html">Next: C++ essentials for CUDA →</a>
+</div>
+<div class="footer">GPU Mastery · Module 3 · Lesson 6 — works offline · progress saved in your browser</div>
+</div>
+<script src="../assets/diagrams3.js"></script>
+<script src="../assets/app.js"></script>
+</body>
+</html>

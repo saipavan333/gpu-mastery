@@ -1,0 +1,205 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>A10 Deployment — Containers, Serving, Monitoring — GPU Mastery</title>
+<link rel="stylesheet" href="../assets/style.css">
+</head>
+<body data-lesson="al10">
+<nav><div class="inner">
+  <a class="logo" href="../index.html">GPU<span>Mastery</span></a>
+  <a class="item" href="../index.html">Home</a>
+  <a class="item on" href="../curriculum.html">Curriculum</a>
+  <a class="item" href="../labs.html">Labs</a>
+  <a class="item" href="../setup.html">Lab setup</a>
+  <a class="item" href="../prompt.html">Generator prompt</a>
+</div></nav>
+<div class="wrap">
+
+<div class="lesson-top">
+  <div><span class="badge">Track A · Lesson 10</span><span class="badge dim">≈ 3 h</span></div>
+  <button id="donebtn" class="donebtn">Mark lesson complete</button>
+</div>
+<h1>Deployment — where kernels meet pagers</h1>
+<p class="lead">Everything before this lesson made code fast; this lesson keeps it fast at 3 a.m., on 200 heterogeneous nodes, through driver upgrades and traffic spikes. The material is unglamorous and decisive: version invariants, warmup contracts, metrics that don't lie, and the discipline of treating every operational rule as a mechanism you can cite — because in production, superstition scales worse than anything.</p>
+
+<h2>Concept</h2>
+
+<h3>Containers: the driver stays outside</h3>
+<div class="diagram" data-diagram="a10-container" data-caption="One kernel driver per host (you don't ship it); each container brings its own CUDA runtime/toolkit. The invariant: container CUDA ≤ what the host driver supports — 5.1's law, fleet-wide."></div>
+<pre><code>host:      NVIDIA kernel driver + nvidia-smi        (ops owns; one per machine)
+container: CUDA runtime, cuDNN/NCCL, torch, YOUR code (you own; pinned)
+           nvidia-container-toolkit mounts the driver's user-space libs in
+THE INVARIANT: every container's CUDA version ≤ every target host's driver
+  support — a fleet-wide assertion (5.1's driver≥toolkit law), enforced in
+  CI and at pod start, or discovered as a Friday crashloop (scenario).
+image hygiene: pin exact tags (never :latest — an unpinned base is a time
+  bomb with a vendor's fuse), multi-stage builds (compile in a fat builder,
+  ship a slim runtime — UNLESS torch.compile JITs in prod: then the
+  Triton/C++ toolchain must ride along or you ship AOTInductor artifacts
+  instead: A9 §2's decision, now a Dockerfile decision).</code></pre>
+
+<h3>The serving path: every hop is a place p99 goes to die</h3>
+<div class="diagram" data-diagram="a10-serving" data-caption="Ingress → queue/batcher → GPU worker → detokenize/stream — with per-stage metrics. Tails compose across hops; you cannot fix what you meter as one blob."></div>
+<pre><code>the stages and their owners:
+  ingress/deserialize   (CPU; big payloads = hidden CPU tax)
+  queue + batcher       (continuous batching lives here — A8; queue DEPTH is
+                         your load signal, not GPU util)
+  GPU worker            (the 5.9 pipeline + A9's compiled model + watchdog:
+                         sticky error → kill, respawn, quarantine — 5.4 quiz 1
+                         as an architecture, not an aspiration)
+  detokenize/stream     (per-token streaming: backpressure handling)
+SLO decomposition: p99(total) ≠ Σ p99(stages) — tails convolve; meter
+  end-to-end AND per-stage or you'll optimize the innocent stage (5.10
+  quiz 1's Amdahl discipline, applied to organizational attention).</code></pre>
+
+<h3>Metrics that lie, metrics that don't</h3>
+<div class="diagram" data-diagram="a10-metrics" data-caption="nvidia-smi util% = 'a kernel was resident' — one spinning warp reads 98%. SOL-class metrics (DCGM) measure work against ceilings. Dashboards get the honest ones or fleets get sized by fiction."></div>
+<pre><code>util% (nvidia-smi/DCGM GPU_UTIL): ANY kernel resident this sample → busy.
+  a blocked NCCL spin-kernel (A7 P4), a 1-warp confetti kernel, a
+  memory-bound decode at 31% SM (A8 quiz 1) — ALL read "~100% busy".
+the honest set (DCGM SOL-class):  SM occupancy · SOL-memory (bandwidth vs
+  ceiling) · SOL-compute (FLOPs vs ceiling) · plus SYSTEM signals: queue
+  depth, tokens-in-flight, KV-pool headroom, recompile/fallback counters
+  (A9), per-stage latency. Autoscaling reads queue depth + KV headroom —
+  scaling on util% is quiz 2's death spiral, prewritten.
+capacity truth: observed tokens/s vs the A8 envelope's PREDICTION — the
+  one dashboard line that catches regressions no single metric names
+  (arithmetic as an alerting rule: this course's whole theory of ops).</code></pre>
+
+<h2>Worked example</h2>
+<div class="card">
+<p><strong>Task:</strong> The production-readiness review for a vLLM-style deployment of A8's 7B model — the checklist as it would actually read, every line citing its mechanism. (This artifact IS the deliverable teams pin next to the deploy button.)</p>
+<pre><code>□ IMAGE     base pinned (cuda:12.x.y-runtime), torch/vllm/triton pinned;
+            CI asserts container-CUDA ≤ min(fleet driver support) [a10-container]
+□ PREFLIGHT pod-start script: nvidia-smi ok → compute-cap ∈ allowed set
+            (no silent PTX-JIT on a straggler arch — 5.1) → known-answer
+            kernel runs (CUDA context ALIVE, not just process alive — 5.4)
+□ WARMUP    readiness probe replays one request per shape-bucket × dtype:
+            autotune keys hot (A4 q2), compile graphs built (A9 q1),
+            CUDA graphs captured — pod serves ONLY after (cold starts are
+            self-inflicted p99)
+□ METRICS   per-stage latency + queue depth + KV headroom + SOL set +
+            recompile/fallback counters + envelope-vs-observed tokens/s
+□ FAILURE   watchdog: sticky CUDA error → kill worker, respawn warm spare,
+            quarantine request for offline sanitizer replay [5.4 q1]
+            OOM request → reject-with-429 at ADMISSION (KV arithmetic
+            screens BEFORE scheduling — A8's calculator as a bouncer)
+□ ROLLOUT   canary on REPRESENTATIVE traffic (incl. long-context whales —
+            A8's scenario), rollback = one flag, model+image+flags
+            versioned as ONE artifact
+load test verdict: measured 91% of the A8 envelope at target p99 ✓ — gap
+            attributed (scheduler overhead + detokenize CPU) and FILED, not
+            shrugged (4.7's gap doctrine, operationalized)</code></pre>
+<p><strong>What to internalize:</strong> nothing in this checklist is folklore — every box is a mechanism from a prior lesson wearing ops clothes, which means every box can be DEFENDED in review and DEBUGGED when it fires. That's the difference between a runbook and a ritual: runbooks cite. When you inherit a fleet whose checklist can't explain itself, this lesson is the audit you run first.</p>
+</div>
+
+<h2>Key points</h2>
+<ul class="keypoints">
+<li>The driver lives on the host, the toolkit in the container, and container-CUDA ≤ fleet-driver-support is a CI-enforced invariant (5.1's law) — version skew is prevented, not debugged.</li>
+<li>Serving is a staged pipeline with per-stage metrics: queue depth is the load signal, tails convolve across hops, and the batcher (continuous batching, A8) is where throughput is actually decided.</li>
+<li>util% measures residency, not work: memory-bound decode, spin-waiting collectives, and confetti all read ~100% — dashboards and autoscalers consume SOL-class + system signals (queue, KV headroom) or they lie at fleet scale.</li>
+<li>Warmup is a contract, not a courtesy: autotune keys, compile graphs, CUDA-graph captures replayed per bucket in the readiness probe — pods serve only warm (A4/A9's lazy machinery, pre-paid).</li>
+<li>Failure handling is architecture: known-answer preflight (context alive), sticky-error watchdog with warm spares (5.4), admission-time KV screening (A8's calculator as bouncer), one-flag rollback of the model+image+flags artifact.</li>
+<li>The strongest alert is arithmetic: observed tokens/s vs the A8 envelope prediction — a drifting ratio catches regressions that no individual metric names (predict-first, as an SLO).</li>
+</ul>
+
+<h2>Quiz</h2>
+<div class="quiz">
+  <div class="q">1. Friday, 2 a.m.: after a rolling HOST driver "upgrade" (ops replaced several nodes with a different image), 30% of pods crashloop with CUDA init errors while 70% run fine; the canary — which ran on the newest nodes — was green. Reconstruct the failure, explain why the canary lied, and name the two controls that make this class of incident structurally impossible.</div>
+  <button class="opt">The new driver is buggy — roll back all nodes</button>
+  <button class="opt" data-c="1">Version-skew inversion: the replaced nodes came up with an OLDER (or differently-capped) driver than the fleet's floor, and containers pinned to a CUDA runtime NEWER than those drivers support fail at init — the a10-container invariant violated on a SUBSET. The canary lied by sampling bias: it scheduled onto the newest nodes (the compatible ones) — a canary validates the CARTESIAN PRODUCT only if it runs on every (image × node-class) combination, not a lucky corner. Controls: (1) preflight assert at pod start — container CUDA vs THIS host's driver, fail fast with a named error (the worked example's box, doing its job at t=0 instead of 2 a.m.); (2) fleet invariant as CI/admission policy — driver floor recorded, image builds gated on it, node pools labeled and scheduling constrained until upgraded (make the invariant a scheduler constraint, not a wiki page)</button>
+  <button class="opt">Kubernetes randomly kills GPU pods — add retries</button>
+  <button class="opt">The 30% of pods have bad GPUs — RMA them</button>
+  <div class="expl">The deep content is the canary-coverage lesson: canaries sample a matrix (image × node × traffic-shape), and every green canary that "lied" was sampling one cell (A8's scenario had the traffic-shape version of this). Retries against a deterministic init failure (option 3) are the ops equivalent of 5.4 quiz 1's retry-the-corpse. The mechanism-first reconstruction — WHICH invariant, violated WHERE, hidden by WHAT sampling — is the incident-review skill this track has been building since "read the report like a machine log" (5.4).</div>
+</div>
+<div class="quiz">
+  <div class="q">2. An autoscaler configured on "GPU utilization &gt; 80% for 3 min → add node" produces a Monday-morning oscillation: nodes added, p99 WORSENS for ~10 minutes, utilization stays high, more nodes added, then mass scale-down at noon, repeat. Decompose the feedback loop's three broken links and design the replacement policy.</div>
+  <button class="opt">The threshold is wrong — use 90%</button>
+  <button class="opt" data-c="1">Link 1 — the signal lies: decode is memory-bound; util% reads high regardless of headroom (a10-metrics; A8 quiz 1) — the scaler can't see real capacity. Link 2 — new nodes HURT before helping: cold pods pay compile+autotune+capture warmup on live traffic (A9 quiz 1's stalls) and steal batch density from warm pods (continuous batching thrives on FAT batches — splitting load across more half-empty workers RAISES per-token cost, A8 quiz 2's amortization law reversed), so p99 worsens → util stays high → scale again: positive feedback. Link 3 — scale-down triggers on the same blind signal, dumping capacity right before the next wave. Replacement: scale UP on queue depth + tokens-in-flight vs envelope capacity (arithmetic headroom, not busyness), gate pod readiness on the warmup contract (never route to cold), scale DOWN on sustained queue emptiness with drain-then-remove, and keep a warm-spare floor sized to traffic's known daily shape</button>
+  <button class="opt">Autoscaling doesn't work for GPUs — size statically</button>
+  <button class="opt">Add faster nodes instead of more nodes</button>
+  <div class="expl">A control loop is only as good as its sensor and its actuator model: here the sensor (util%) measures the wrong thing and the actuator (cold pod) has a NEGATIVE transient — textbook conditions for oscillation, no exotic bug required. The fix pattern (measure headroom arithmetically, make the actuator's transient non-negative via warmup gating) generalizes to every lazily-initialized system this track met: autotune, compile, CUDA graphs, and now fleets. Option 3 surrenders real elasticity; option 1 tunes a broken sensor.</div>
+</div>
+
+<h2>Exercises</h2>
+<details><summary>Exercise 1 — Write the preflight + healthcheck pair (runnable Python/bash skeletons; test the logic anywhere, GPU parts on Colab): preflight asserts driver-vs-runtime compatibility, compute capability ∈ allowlist, and a known-answer kernel (tiny matmul vs precomputed result — 5.4's fixture as a liveness probe); the periodic healthcheck re-runs the known-answer op and exports {ok, latency_ms} — explain in comments why "process responds" ≠ "CUDA context healthy" (5.4's sticky errors) and why the healthcheck's latency is itself a signal (thermal/clock drift, M1 L7).</summary><div class="body">
+<pre><code>skeleton beats:  torch.cuda.is_available() → props check → allowlist gate
+→ y = known_op(x); assert allclose(y, GOLDEN, rtol=1e-5) → export.
+comments to write (the actual deliverable): a process whose CUDA context
+died sticky (5.4) still answers HTTP happily while every inference returns
+garbage or errors — the known-answer op is the ONLY probe that exercises
+the full path (context, kernel launch, memory, compute). Healthcheck
+latency creeping 2× = thermal throttle or a neighbor saturating the card
+(MIG/MPS worlds) — a free early-warning M1 L7 would approve of.</code></pre>
+<p>Wire both into the worked example's checklist positions (preflight at start, healthcheck on a timer + readiness). This ~60-line pair prevents the two most embarrassing incident classes: serving from a dead context, and serving from a node that should never have started.</p>
+</div></details>
+<details><summary>Exercise 2 — The failure-mode table: for each of {node loss mid-request, driver/runtime skew, single OOM request, sticky CUDA error, recompile storm, KV pool exhaustion, thermal throttle}, fill four columns — detector (which metric/probe), blast radius, automated response, and the lesson that supplied the mechanism. Then mark which three rows your CURRENT (or imagined) stack actually implements, and write the gap ticket for the worst missing one.</summary><div class="body">
+<pre><code>sample rows (yours should argue with these):
+sticky error | healthcheck known-answer fails; error-rate spike | one worker |
+  watchdog kill→respawn warm spare, quarantine request | 5.4 q1
+recompile storm | A9 counters &gt;0 sustained | pod p99 | route away, alarm,
+  bucket audit | A9 q1
+KV exhaustion | pool headroom &lt; reserve | admission | 429 at bouncer +
+  shed longest-idle | A8 envelope
+thermal | healthcheck latency drift + DCGM clocks | node throughput |
+  derate node weight in LB | M1 L7/Ex.1</code></pre>
+<p>The table's value is the fourth column: every response traces to a mechanism you can defend in review — the worked example's "runbooks cite" doctrine, exercised. The gap ticket (title, detector to add, response to automate, mechanism citation) is the format that gets ops work prioritized, because it arrives pre-argued.</p>
+</div></details>
+
+<hr>
+<h1>Go deeper — fleet craft</h1>
+
+<h2>1. Sharing silicon: MIG and MPS (when one GPU serves many tenants)</h2>
+<pre><code>MIG (A100/H100-class): hardware-partition one GPU into up to 7 isolated
+  instances — own SMs, own memory slice, own faults (a sticky error in one
+  MIG slice doesn't kill neighbors: 5.4's blast radius, fenced by silicon).
+  For: many small models, strict isolation, per-tenant SLOs.
+MPS: software-shares one context among processes — no isolation (one
+  client's sticky error can poison all — know this before choosing), but
+  fine-grained sharing for cooperative workloads.
+decision axis: isolation need vs utilization need; small-model fleets
+  waste whole GPUs without one of these (the envelope math per SLICE —
+  A8's calculator with MIG-slice bandwidth/memory as inputs).</code></pre>
+
+<h2>2. The cost sheet (connecting A8's envelope to invoices)</h2>
+<pre><code>$/1M output tokens ≈ (GPU $/hr) ÷ (tokens/s × 3600) × 1e6 ÷ utilization
+representative: H100 at $2.5/hr serving A8's envelope at batch-heavy
+  ~5,000 tok/s aggregate, 60% real utilization:
+  2.5 / (5000·3600) · 1e6 / 0.6 ≈ $0.23 per 1M tokens — and every term is a
+  lever you own: tokens/s (this whole track), utilization (this lesson's
+  batching/scaling), $/hr (procurement + spot/reserved mix for BATCH work —
+  latency fleets can't ride spot; training and offline eval can).
+the audit habit: recompute this sheet per model per quarter; A8's scenario
+  (mispriced long-context) was one uncomputed term of exactly this formula.</code></pre>
+
+<h2>3. Gotchas</h2>
+<div class="gotcha"><strong>:latest anything.</strong> Unpinned base images, "cu12" metapackages, driver auto-updates on hosts — each is a deferred incident with a vendor-controlled fuse. Pin, and upgrade deliberately with the quiz-1 controls.</div>
+<div class="gotcha"><strong>Ops-added syncs.</strong> A well-meaning metrics patch adds a per-request .item()/synchronize in the worker — 5.9's scenario shipping as observability. The lint rule (justify every sync) applies to SIDECAR code too; per-stage metrics come from events and counters, not drains.</div>
+<div class="gotcha"><strong>Healthchecks that never touch the GPU.</strong> HTTP-200 liveness on a process whose CUDA context died sticky = a zombie serving garbage behind a green dashboard (Ex.1's whole reason). Known-answer or it isn't a healthcheck.</div>
+<div class="gotcha"><strong>Cold pods behind the load balancer.</strong> Routing to a pod before its warmup contract completes converts every scale-up into a p99 incident (quiz 2's link 2). Readiness = warm, by definition.</div>
+<div class="gotcha"><strong>Heterogeneous fleet, silent PTX-JIT.</strong> One node-pool with an older arch quietly JIT-compiles PTX at startup (5.1's fatbin story) — minutes of mystery cold-start on exactly those nodes. The preflight's compute-cap allowlist exists for this.</div>
+<div class="gotcha"><strong>Averages on the dashboard.</strong> p50 graphs hide everything this lesson cares about (quiz 2's oscillation lived in p99; A9's stalls lived in the tail). Percentiles per stage, or the dashboard is decoration.</div>
+
+<h2>Scenario — the green dashboard and the silent 12%</h2>
+<p>A platform team runs 60 GPUs of mixed inference. Dashboards: util% ~92% fleet-wide, p50 stable — everyone believes the fleet is "hot and healthy." A new hire — this course's graduate, on their second week, again — adds one dashboard line from the worked example: <em>observed tokens/s ÷ envelope-predicted tokens/s, per model.</em> The line reads 0.88 on day one, drifts to 0.76 over two weeks, no alarm anywhere else. The investigation the ratio forces: per-stage percentiles show worker-side inflation; A9's counters show eager-fallback firing on two models (a quiet torch upgrade changed guard behavior — recompiles exceeded the cache limit; gotcha: nobody re-ran the warmup inventory after the upgrade); DCGM shows one node-pool's clocks derated (a datacenter airflow change — the healthcheck-latency signal from Ex.1 had been drifting, unwatched, because "the pods were green"). Three fixes later the ratio sits at 0.93 and — the actual point — the fleet's REAL capacity is now a known, alarmed number: the next capacity plan needs 7 fewer GPUs than the util%-based plan had budgeted, which is roughly one engineer-year of money. The moral is the track's thesis in ops clothing: <em>util% told everyone the GPUs were busy; only arithmetic could say whether they were busy doing the right amount of work.</em> Dashboards that predict — envelope math as an SLO — turn regressions from archaeology into a single drifting line.</p>
+
+<h2>Practice</h2>
+<details><summary>1. Classify each signal as load, health, efficiency, or lie-prone (and why): util%, queue depth, SOL-memory, tokens-in-flight, p99 TTFT, healthcheck latency, recompile counter, envelope ratio, SM occupancy, pod restart count.</summary><div class="body">Load: queue depth, tokens-in-flight (what's ARRIVING vs capacity). Health: healthcheck latency (context alive + thermal drift), pod restarts, recompile counter (A9's pathology detector). Efficiency: SOL-memory (honest work vs ceiling), envelope ratio (the master efficiency line), SM occupancy (contextual — low is CORRECT for decode, A8 q1). Lie-prone: util% (residency ≠ work — the lesson's villain), p99 TTFT is honest but COMPOSITE (queue+prefill: decompose before acting). The classification drill matters because autoscalers, alerts, and capacity plans each must consume the RIGHT class — quiz 2 was one misclassification cascading into a control-loop failure.</div></details>
+<details><summary>2. Your fleet must upgrade torch (security CVE, non-negotiable, one week). Write the six-step upgrade runbook that survives A9's guard changes, A3's extension ABI, and quiz 1's skew — each step with its verification.</summary><div class="body">(1) Build candidate image, PINNED; CI: extension rebuild against new torch (A3 §2's ABI — stable-ABI ops skip this pain; verify which you have) + fixture suite green at deployment dtypes. (2) Re-run the compile inventory: explain() break counts and recompile behavior PER MODEL (A9 guard semantics shift across versions — the scenario's silent regression), refresh warmup scripts. (3) Envelope re-benchmark on one node: observed/predicted ratio within historical band (the master line as an upgrade gate). (4) Canary across the FULL matrix — every node-class × every model family × representative traffic incl. whales (quiz 1's lesson: canaries validate products, not corners). (5) Rolling deploy with the ratio + recompile counters as auto-halt triggers. (6) Post-deploy: re-record baselines (ptxas-style perf tripwires, envelope ratios) — the new version is the new normal, versioned as one artifact. Every step is a prior lesson's mechanism with a checkbox; that's what makes it a runbook someone ELSE can execute at 2 a.m.</div></details>
+<details><summary>3. Price the isolation decision: 14 small models (each needing ~8 GB, ~600 GB/s to hit SLO) on H100s (80 GB, 3.35 TB/s). Compare: one model per GPU; MPS-shared 4-per-GPU; MIG 3g/4-slice-per-GPU-ish plans — on utilization, blast radius, and SLO independence; cite the mechanism that disqualifies MPS for rowdy tenants.</summary><div class="body">One-per-GPU: 14 GPUs, ~10% memory and ~18% bandwidth used each — beautiful isolation, indefensible invoice (the §2 cost sheet screams). MPS 4-per: ~4 GPUs, great utilization, but ONE shared context: a single tenant's sticky CUDA error (5.4) or memory leak poisons all four — disqualified for untrusted/rowdy workloads by mechanism, not preference. MIG: hardware slices with own memory/SMs/faults — a 7-slice plan gives ~10 GB + ~1/7 bandwidth per slice (~480 GB/s: check vs the 600 SLO → use larger 2-slice or 3-slice profiles: envelope math PER SLICE, A8's calculator re-parameterized) → ~4–5 GPUs with real isolation and per-slice SLOs. The general rule: utilization pressure pushes toward sharing; failure-domain arithmetic (5.4's blast radius) decides HOW — silicon fences for strangers, software sharing for siblings.</div></details>
+<details><summary>4. An incident review claims: "root cause — GPU ran out of memory; fix — added retry with backoff." Rewrite this review to this course's standard: the three questions the original skipped, the plausible ACTUAL root causes (two candidates from this track), and why retry-on-OOM is specifically harmful in a KV-pooled server.</summary><div class="body">Skipped questions: WHICH memory consumer grew (weights are static — so: KV pool? fragmentation? a leaked tape from a debug flag? — A7 q2's three-column ledger applies to serving too); WHY admission let it in (the A8 bouncer's screening arithmetic — was a long-context whale unpriced?); WHAT the error's blast radius was (per-request rejection vs sticky context death — 5.4's taxonomy decides the response). Likely candidates: KV admission bug (context length unchecked → pool exhaustion under a whale wave — A8's scenario shape) or fragmentation from non-paged allocations alongside the pool (3.5's ghost, still haunting). Retry-harm: an OOM'd request re-enters the queue and re-claims KV blocks under the SAME pressure — retries synchronize into pressure waves (thundering herd on the exact resource that's exhausted), converting one rejection into oscillating brownouts; correct: reject-with-429 at admission (backpressure to the client), shed by policy, alarm on headroom. The rewrite's meta-lesson: "OOM" is a symptom CATEGORY, and reviews that stop there ship the next incident with a retry loop attached.</div></details>
+<details><summary>5. Design the two-tier observability budget: which five signals stream at 1-second resolution to the autoscaler/pager path, which live at 1-minute for capacity/debugging, and the one signal you compute DAILY — with the reasoning rule that assigns a signal to a tier.</summary><div class="body">1-second (control-loop + page): queue depth, tokens-in-flight, per-stage p99 (rolling), healthcheck ok/latency, sticky-error/watchdog events — the rule: signals whose CONSUMERS act in seconds (scalers, LBs, pagers) need second-resolution or the control loop lags into oscillation (quiz 2). 1-minute (humans + capacity): SOL set, KV headroom trend, recompile/fallback counters, per-model envelope ratio, clock/thermal state — consumers are engineers and daily planning; minute-resolution halves the observability bill without losing diagnosis (5.10's per-commit vs weekly CI logic, applied to telemetry). Daily: the §2 cost sheet per model ($/1M tokens with real utilization) — its consumer is strategy, and its drift is the business-level regression detector (A8's scenario, institutionalized). Tiering by consumer-reaction-time is the principle; unbudgeted observability becomes its own perf tax (gotcha 2's sync-in-a-sidecar is the extreme case).</div></details>
+<details><summary>6. A teammate proposes skipping AOTInductor: "we'll torch.compile in prod at startup; simpler pipeline." Argue both sides honestly for (a) a 3-model latency-critical fleet and (b) a 40-model internal batch platform — then state the deciding variable and the hybrid that most real fleets land on.</summary><div class="body">JIT-in-prod: simpler builds (no export step), always matched to the exact runtime — but pods carry the full compiler toolchain (fatter, larger attack/failure surface), and startup pays full compile per pod × per deploy (minutes at fleet scale; quiz 2's cold-start transient multiplied). AOT: instant warm starts, slim images, artifacts testable BEFORE deploy (the fixture gate moves earlier — always good) — but an export pipeline to own, per-arch artifacts to matrix (5.1's fatbin lesson at the artifact registry), and version coupling to manage. (a) Latency fleet: AOT wins — cold-start is the enemy, model count is small, the export pipeline amortizes. (b) 40-model batch platform: JIT acceptable — startup cost amortizes over long jobs, model churn makes 40 export pipelines expensive. Deciding variable: (cold-start cost × restart frequency × pod count) vs (export pipeline maintenance) — an arithmetic, as always. The common hybrid: AOT for the latency tier's stable heroes, JIT-with-warmup-contract for the long tail — tiered by the same math.</div></details>
+<details><summary>7. Interview closer: "You're handed a 30-GPU inference fleet with 'occasional slowness' complaints and a wall of green dashboards. First hour?" — 90 seconds: the three lies to check in the dashboards, the one line you add immediately, the per-stage decomposition move, the two counters most teams don't export, and the closing sentence about prediction-based alerting.</summary><div class="body">Skeleton: "First, distrust the green: util% measures residency not work — memory-bound decode and spin-waits both read busy [a10-metrics]; averages hide tail incidents — I pull per-stage p99s, not p50s; and 'GPU healthy' probes that never launch a kernel can't see a sticky-dead context [Ex.1]. The line I add in hour one: observed tokens/s over envelope-predicted, per model — four numbers give me the prediction [A8], and that ratio drifting is the regression detector nothing else provides [scenario: it found a torch-upgrade fallback and a thermal derate behind a 92%-util wall]. Then decompose: queue vs prefill vs decode vs detokenize percentiles — tails convolve, and the guilty stage is usually obvious once metered separately [a10-serving]. The two counters I check teams export almost never: torch recompile/eager-fallback [A9 — silent win-evaporation] and healthcheck LATENCY trend [thermal/clock drift]. And my alerting philosophy in one sentence: dashboards that only describe can tell you something broke; dashboards that PREDICT — envelope math as an SLO — tell you it's breaking, which is the entire difference between a page and a postmortem." That last sentence tends to end the interview early, favorably.</div></details>
+
+<div class="pager">
+  <a href="lesson-09.html">← torch.compile</a>
+  <a href="lesson-11.html">Next: Capstone — the fused epilogue, shipped →</a>
+</div>
+<div class="footer">GPU Mastery · Track A · Lesson 10 — works offline · progress saved in your browser</div>
+</div>
+<script src="../assets/diagramsA.js"></script>
+<script src="../assets/app.js"></script>
+</body>
+</html>

@@ -1,0 +1,190 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>5.10 Nsight Profiling — GPU Mastery</title>
+<link rel="stylesheet" href="../assets/style.css">
+</head>
+<body data-lesson="m5l10">
+<nav><div class="inner">
+  <a class="logo" href="../index.html">GPU<span>Mastery</span></a>
+  <a class="item" href="../index.html">Home</a>
+  <a class="item on" href="../curriculum.html">Curriculum</a>
+  <a class="item" href="../labs.html">Labs</a>
+  <a class="item" href="../setup.html">Lab setup</a>
+  <a class="item" href="../prompt.html">Generator prompt</a>
+</div></nav>
+<div class="wrap">
+
+<div class="lesson-top">
+  <div><span class="badge">Module 5 · Lesson 10</span><span class="badge dim">≈ 3 h</span></div>
+  <button id="donebtn" class="donebtn">Mark lesson complete</button>
+</div>
+<h1>Nsight Profiling — two instruments, one loop, zero guessing</h1>
+<p class="lead">You've been optimizing by MODEL all module: rooflines predicted, tables audited, measurements confirmed. The profilers close the triangle — nsys answers <em>where does the time go</em> (the timeline), ncu answers <em>why is this kernel slow</em> (the counters). Today they stop being previews and become your daily loop.</p>
+
+<h2>Concept</h2>
+
+<h3>The division of labor — never confuse the instruments</h3>
+<div class="diagram" data-diagram="m5l10-loop" data-caption="The loop: nsys names the time sink → if it's a kernel, ncu names its ceiling → ONE change → re-measure. Exit when the model says you're near a physical bound (4.7's stopping rule)."></div>
+<pre><code>nsys profile -o run ./app     # SYSTEM view: every kernel, copy, sync, gap
+                              #   on one timeline. Question: WHERE?
+ncu --set full ./app          # KERNEL view: hardware counters for one launch.
+                              #   Question: WHY is this one slow?
+# The order is law: nsys FIRST. ncu-ing a kernel that's 4% of wall time is
+# the classic month-waster (today's scenario) — 5.9's quiz shapes (gaps,
+# fences, launch storms) are all nsys findings that NO amount of kernel
+# tuning touches. Optimize the timeline, then the kernels the timeline indicts.</code></pre>
+
+<h3>Reading an nsys timeline like a native</h3>
+<div class="diagram" data-diagram="m5l10-nsys" data-caption="The four shapes that matter: dense healthy rows; GAPS (starved GPU); picket-fence barriers; confetti of tiny launches. Each shape has a named fix from a named lesson."></div>
+<pre><code>row: CUDA HW kernels   → dense back-to-back?  healthy — go to ncu for the fat ones
+                       → gaps between kernels? the GPU is WAITING: look UP at
+                         the CPU rows — unpipelined copies (5.9), CPU preprocessing,
+                         or launch storms (thousands of &lt;10 µs kernels: 5.2's floor —
+                         fix by fusing/graphs, NOT by tuning kernels)
+row: memory transfers  → serial with compute? the 5.9 ring is missing/broken
+row: CUDA API (CPU)    → cudaDeviceSynchronize picket fence? scenario of 5.9
+CLI triage without the GUI (Colab-friendly):
+  nsys stats run.nsys-rep   → cuda_gpu_kern_sum (top kernels by total time),
+                              cuda_gpu_mem_time_sum (copy bill), api_sum (sync bill)</code></pre>
+
+<h3>Reading an ncu report: SOL first, always</h3>
+<div class="diagram" data-diagram="m5l10-ncu" data-caption="Speed-of-Light: Memory% and Compute% against hardware ceilings — the measured roofline. High mem + low compute = 4.7's memory-bound verdict, now from counters instead of your arithmetic."></div>
+<pre><code>Section: Speed Of Light        ← READ FIRST — the roofline verdict, measured
+  Memory Throughput   87%      → memory-bound: your 4.7 arithmetic, confirmed
+  Compute Throughput  12%        (both LOW = latency/occupancy problem — 5.6;
+                                  both HIGH = you're done, ship it)
+Section: Memory Workload       ← the 5.7 audit, automated
+  L1 sectors/request  ~4 float landmark = clean | ~32 = scatter floor (5.7 §1)
+  L2 hit rate         quiz-2-of-5.7's rescuer, quantified
+Section: Occupancy             ← the 5.6 table, measured
+  theoretical vs ACHIEVED — a big gap means tails/imbalance, not the min() table
+Section: Scheduler / Warp State Statistics
+  stall reasons, sampled: 'long scoreboard' = waiting on memory (feed it warps
+  or ILP — 5.6 P6) | 'barrier' = __syncthreads convoys (5.5's tax, measured)
+  | 'wait' = execution dependencies (unroll for ILP) | 'selected' high = healthy</code></pre>
+
+<h3>Profiling hygiene (numbers you can defend)</h3>
+<pre><code>ncu replays kernels MANY times (locks clocks, flushes caches between passes) —
+  its per-kernel numbers are stable but its WALL time is meaningless: never
+  quote "the app took 9 s under ncu". nsys overhead is small but nonzero.
+GPU clocks boost and throttle (M1 L7's laptop lesson at datacenter scale):
+  for A/B numbers, GpuTimer's median-of-K warm (5.9 Ex.2) OR lock clocks
+  where permitted. Colab note: T4 ncu access works; some managed environments
+  block counters (ERR_NVGPUCTRPERM) — nsys always works, and 5.1's fallback
+  applies: rent a box when you graduate to counter-level tuning.</code></pre>
+
+<h2>Worked example</h2>
+<div class="card">
+<p><strong>Task:</strong> Profile the matmul ladder's three rungs (5.5's v1-bad, v2-coalesced-naive, v3-tiled) and watch the METRICS migrate as each fix lands — the module's arithmetic, now in counters. T4, N=1024.</p>
+<pre><code>                     v1 bad-naive    v2 idx-swapped   v3 tiled-16
+SOL Memory %             96%             91%              68%
+SOL Compute %             2%              9%              41%
+L1 sectors/req (B lds)  ~31.7            ~4.1             ~4.0
+achieved occupancy       97%             98%              96%
+stall: long scoreboard   dominant        dominant         much reduced
+GFLOP/s (GpuTimer)        2.1             ~95              ~600
+READING v1: mem 96% + sectors 31.7 = scatter floor (5.7's fingerprint) —
+  the fix is an INDEX fix, and sectors/request said so before any code reading.
+READING v2: sectors clean, still mem-bound at 91% — traffic is now honest but
+  UNREDUCED: AI still 0.25 → the fix is REUSE (5.5), and SOL said so.
+READING v3: mem 68 / compute 41 — leaving the memory cellar, not yet at any
+  ceiling: occupancy fine, scoreboard stalls down → next lever is per-thread
+  work (register tiling, 5.11) — the REPORT wrote the capstone's roadmap.</code></pre>
+<p><strong>The meta-lesson:</strong> at every rung, the profiler's numbers matched what Modules 4–5 computed by hand — sectors matched 5.7's floor, SOL matched 4.7's roofline, occupancy matched 5.6's table. That's not coincidence; that's what the counters ARE: your models, instrumented. Engineers who skip the models read ncu like tea leaves ("Memory 91%... make it lower?"); you read it like a lab report confirming a diagnosis you already drafted. The profiler's job is to referee your hypotheses and catch the surprise — not to think for you.</p>
+</div>
+
+<h2>Key points</h2>
+<ul class="keypoints">
+<li>nsys first (WHERE: gaps, fences, confetti, serial copies), ncu second (WHY: one kernel's counters) — tuning a kernel the timeline didn't indict is the canonical wasted month.</li>
+<li>Read ncu SOL as the measured roofline: Memory% vs Compute% high/low = memory-bound; both low = latency-starved (5.6); both high = done — 4.7's stopping rule with hardware's signature.</li>
+<li>The landmark metrics are ones you already own: sectors/request ≈ 4 clean / ≈ 32 scatter (5.7), achieved vs theoretical occupancy (5.6), stall long-scoreboard = memory latency (4.4).</li>
+<li>ncu replays and clock-locks: its kernel numbers are gold, its wall time is garbage; A/B wall numbers come from GpuTimer medians (5.9) with warmup (M1 L7).</li>
+<li>Every optimization enters as a hypothesis with a predicted metric delta; the profile confirms or falsifies it — one change per loop iteration, exit at the physical bound (M1 L7 + 4.7, unified).</li>
+<li>The gap between predicted and measured is never noise to shrug at — it's either your model missing a term (find it) or a real discovery (name it); both are the job (4.7's law, final form).</li>
+</ul>
+
+<h2>Quiz</h2>
+<div class="quiz">
+  <div class="q">1. nsys shows your training step: 41% kernels (dense), 38% H2D copies (serial, between kernel bursts), 21% gaps aligned with CPU spikes labeled "dataloader". Two engineers propose: (A) "ncu the top kernel — it's 18% of kernel time"; (B) "fix the copy/loader pipeline first." Arbitrate with arithmetic.</div>
+  <button class="opt">A — kernels are the GPU's real work</button>
+  <button class="opt" data-c="1">B, and it isn't close: copies + loader gaps = 59% of wall time that kernel tuning cannot touch. Perfect-overlap pipelining (5.9's ring for copies, prefetching loader threads for the CPU gaps) targets up to ~1.7× on wall time (1/(1−0.42)... compute: hiding most of 59% behind the 41% kernels bounds near 2.4×, realistically 1.5–2×). Best case for A: the 18% kernel at even 2× faster = 41%×18%×½ ≈ 3.7% of wall. Amdahl (4.4's law) arbitrates: B's denominator is 16× bigger. ncu's turn comes AFTER the timeline is dense</button>
+  <button class="opt">Do both in parallel — they don't conflict</button>
+  <button class="opt">Neither — buy a faster GPU</button>
+  <div class="expl">The numbers are the answer: Amdahl assigns each proposal its ceiling before any work starts (4.4's habit, applied to engineering time — the scarcest resource). "Both in parallel" sounds mature but splits attention across a 3.7%-ceiling task; and a faster GPU makes the kernel slice SMALLER, worsening the copy/loader share (the classic upgrade-disappointment, 4.6's economics). The senior tell in this answer: converting profiler percentages into bounded speedups before choosing — thirty seconds of arithmetic that redirects a quarter's roadmap.</div>
+</div>
+<div class="quiz">
+  <div class="q">2. ncu on your "optimized" kernel: SOL Memory 34%, SOL Compute 29%, achieved occupancy 24% (theoretical 75%), stall reasons dominated by 'long scoreboard'. Diagnose the kernel's actual disease, explain the theoretical-vs-achieved gap NOT being the min() table's fault, and prescribe in order.</div>
+  <button class="opt">Memory-bound — apply 5.7's coalescing fixes</button>
+  <button class="opt" data-c="1">Both SOLs LOW = the starved regime: the GPU is waiting, not working (5.6's knee, from the wrong side). Achieved 24% vs theoretical 75% says the min() table PERMITS 3× more warps than show up — the gap is dynamic: grid too small (few blocks < SMs×capacity — 5.2's saturation rule), severe load imbalance (some blocks 10× longer: tail effect), or launch confetti (kernel too brief to fill). Prescribe: (1) check grid size vs SM count ×blocks/SM — the 30-second one; (2) nsys for confetti/short-kernel evidence; (3) if grid is big and balanced, THEN feed latency: more ILP per thread (5.6 P6) or merge work per block. Coalescing is innocent: sectors weren't cited, and Memory 34% means the bus is IDLE, not abused</button>
+  <button class="opt">Register spills — apply __launch_bounds__</button>
+  <button class="opt">The kernel is fine; ncu overhead distorts small kernels</button>
+  <div class="expl">Both-low is the third SOL regime and the least taught: not memory-bound, not compute-bound — STARVED (latency-bound). The tell-pair is (low SOLs, big achieved-occupancy gap) + long-scoreboard: warps exist on paper but not in flight, or too few exist at all. Option 1 is the reflex this module must extinguish: coalescing fixes traffic EFFICIENCY, not traffic EXISTENCE. Spills would show as local-memory traffic in the Memory tables (5.6 P4's signature) — checkable, absent here. Regime first, lever second: every prescription in this course hangs off that order.</div>
+</div>
+
+<h2>Exercises</h2>
+<details><summary>Exercise 1 — Profile 5.9's three pipeline builds (healthy, pageable-poisoned, sync-poisoned) with nsys on Colab; produce the annotated triptych: for each, one sentence naming the shape and the row that convicts it. Then run <code>nsys stats</code> and reconcile the CLI's cuda_gpu_mem_time_sum with your GpuTimer's serial-vs-pipelined delta (they should tell one story).</summary><div class="body">
+<p>The healthy build shows staircase overlap (copy rows offset against kernel rows); pageable shows the same CALLS but flattened serial (API row still says MemcpyAsync — the timeline exposes the lie the API accepted, quiz 1 of 5.9 in pixels); sync-poisoned shows the picket fence in the API row with kernels huddled between fences. The reconciliation habit matters most: CLI stats, GUI timeline, and GpuTimer are three witnesses — when they agree you have a fact; when they don't you have a probe-placement bug (5.9 quiz 2) or a regime mislabel (5.9 P6). File the triptych; it's your visual grammar for every future "GPU util is low" ticket.</p>
+</div></details>
+<details><summary>Exercise 2 — The full audit, solo: take YOUR 5.8 reduction v3 and run the complete loop — nsys (is the reduction even the story, or is H2D?), ncu SOL + Memory + Occupancy + stalls, one-page verdict in the worked example's table format, one hypothesis with predicted metric delta, the change, the re-profile. Whatever the outcome, write the two-line postmortem: model right? counter surprise?</summary><div class="body">
+<p>Likely findings, so you know the terrain: SOL Memory ~85–95% (it's a streaming read — that IS the design working); sectors ~4 (grid-stride coalesced, 5.7 P3); the H2D upload dwarfing the kernel in nsys if you time the full program (the 5.9 lesson ambushing you on purpose: a 0.33 ms kernel behind a 22 ms upload — the honest report says "reduction is done; the PROGRAM is a transfer problem"). A worthy hypothesis if kernel-side: bump per-thread work ×8→×16 → predict fewer blocks, same bandwidth, ~equal time (already at ceiling — a null-result prediction is still science, and CONFIRMING you're at the ceiling is the exit criterion, 4.7). The postmortem discipline — stating beforehand what number should move and by how much — is what separates profiling from scrolling.</p>
+</div></details>
+
+<hr>
+<h1>Go deeper — the profiler craft sheet</h1>
+
+<h2>1. The metric→lesson dictionary (your triage card)</h2>
+<pre><code>SOL mem HIGH, compute low   memory-bound  → traffic levers: reuse 5.5, dtype M1L8,
+                                            fusion (Track A) — NOT occupancy
+SOL both LOW                starved       → grid size 5.2, ILP 5.6 P6, confetti 5.9 P7
+SOL compute HIGH            compute-bound → algorithm, TCs (Track A), or DONE (4.7)
+sectors/req ≈ 32 (fp32)     scatter floor → 5.7's three fixes
+sectors/req ≈ 8 on structs  AoS stride    → SoA (5.7)
+L2 hit HIGH + sectors bad   cache-rescued gather → maybe fine! (5.7 quiz 2)
+achieved ≪ theoretical occ  small grid / imbalance / confetti (5.10 quiz 2)
+stall long-scoreboard       memory latency→ warps or ILP (5.6)
+stall barrier               __syncthreads convoys → fewer/looser barriers (5.5 P4)
+stall LG throttle           memory-system backpressure: you've SATURATED it —
+                                            good news wearing a stall's name (4.7)
+local memory traffic &gt; 0    register spills → 5.6's cliff; check ptxas -v</code></pre>
+
+<h2>2. Profile-guided CI (the regression tripwire)</h2>
+<pre><code>per tracked kernel, per merge:  GpuTimer median (±tolerance gate)
+                                ptxas -v regs/spills (5.6's compile-time canary)
+                                ncu --metrics sectors,occupancy,SOL (weekly, not
+                                per-commit — counter runs cost minutes)
+perf regressions caught at PR time cost minutes; caught in production they
+cost the 5.9 scenario. The tripwire IS the 5.4 CI idea (sanitizer weekly),
+extended to performance — correctness and speed age the same way (silently).</code></pre>
+
+<h2>3. Gotchas</h2>
+<div class="gotcha"><strong>Tuning the wrong denominator.</strong> Quiz 1's arithmetic: a kernel that's 7% of wall time, doubled, buys 3.5%. nsys percentages × Amdahl BEFORE opening ncu — every time, no exceptions.</div>
+<div class="gotcha"><strong>Quoting ncu wall time.</strong> Replay + clock-lock makes it a lab condition, not an experience. Kernel metrics: yes. App time: GpuTimer/nsys only.</div>
+<div class="gotcha"><strong>Profiling debug builds.</strong> -G disables device optimization (5.4's gotcha): every counter describes a kernel that doesn't ship. -O2 -lineinfo is the profiling build, always.</div>
+<div class="gotcha"><strong>One-run conclusions on boosting clocks.</strong> First run boosts, tenth throttles (thermals) — deltas under ~10% between runs are weather until median-of-K says otherwise (M1 L7, forever).</div>
+<div class="gotcha"><strong>Metric worship without a model.</strong> "Achieved occupancy 24%! raise it!" — quiz 2 showed 24% can be a SYMPTOM (small grid) not a dial. Every metric gets interpreted through its lesson's model or it's numerology.</div>
+<div class="gotcha"><strong>Forgetting the CPU rows.</strong> nsys shows host threads too: a "GPU problem" that's actually a Python loader pegging one core (quiz 1's 21%) is diagnosed by looking UP two rows. The timeline is a SYSTEM instrument — read the whole thing.</div>
+
+<h2>Scenario — the month of tiling that should have been an afternoon of streams</h2>
+<p>A robotics startup's perception stack runs at 19 fps; they need 30. The GPU lead — strong on kernel craft, raised on optimization blog posts — spends five weeks rewriting the three heaviest kernels: shared-memory tiling, vectorized loads, a hand-rolled reduction; each kernel individually now 2.3–3.1× faster, verified with ncu, genuinely excellent work. System throughput: 21 fps. Morale: cratered. A new hire — this course's graduate, in their second week — asks the impolite first question: "has anyone captured nsys on the WHOLE pipeline?" The timeline: kernels occupy 31% of each frame; 47% is five serial H2D/D2H hops between processing stages (intermediate images bouncing host↔device because two stages were still CPU OpenCV — 4.6's ledger, unread); 22% is per-frame cudaMalloc/cudaFree pairs (5.3's hot-loop gotcha, at 19 fps). The afternoon of fixes: keep intermediates resident (delete four of five hops — the fifth is the camera itself), pool the allocations (5.3 P6), ring-buffer the camera upload (5.9). 33 fps by Friday, zero kernel lines touched. The five weeks of kernel work wasn't wasted — it was PREMATURE: at 31% kernel share, its ceiling was always +10 fps-ish hidden behind 69% of untouched wall time (quiz 1's arithmetic, unlearned). The moral is the lesson's title: two instruments, one ORDER. The timeline indicts; the counters convict; reversing them convicts the innocent — and the innocent, here, billed five weeks. Epilogue, because credit matters: once the timeline was dense, the lead's tiled kernels carried the margin from 30 to 33 fps. Both skills were real; only the sequence was wrong.</p>
+
+<h2>Practice</h2>
+<details><summary>1. Match each nsys shape to its fix-lesson without looking: (a) kernel confetti, thousands under 10 µs; (b) copy rows serial with kernel rows; (c) API-row picket fence of syncs; (d) dense kernels, one 40× longer than the rest; (e) gaps synced to CPU spikes; (f) healthy density but wall time still too slow.</summary><div class="body">(a) 5.2's launch floor → fuse / CUDA Graphs (5.9 §2). (b) 5.9's ring + pinned pool. (c) 5.9's scenario → event/callback timestamps, lint the syncs. (d) The whale kernel → NOW ncu earns its keep (5.10's order: this is the indicted kernel). (e) Host-side starvation → loader threads/prefetch (quiz 1's 21%); not a CUDA fix at all. (f) Timeline healthy = the system is running at its kernels' honest speed → per-kernel rooflines (ncu SOL) decide which have headroom vs which are AT ceiling (4.7's stopping rule — sometimes the answer is "buy the bigger GPU with cleared conscience", 4.6's economics). Six shapes, six different lessons, one instrument — the triage card in action.</div></details>
+<details><summary>2. Your CI tripwire fires: kernel X's median +22% since last week; ptxas regs 40→64, spills 0→0; sectors/request unchanged; achieved occupancy 66%→41%. No one touched X's file. Reconstruct the likely cause and the two-step confirmation.</summary><div class="body">Regs +60% with X untouched = the compiler inlined something new INTO X (a header-only helper edited elsewhere, a template instantiation change, or an nvcc version bump — 5.6's "register counts are weather" gotcha) → occupancy dial turned (5.6's table: 64 regs × 256 threads = 16384... at 65536/SM: 4 blocks → but threads may allow more: the reg budget became binding) → fewer resident warps → +22%. Confirm: (1) diff the build log's nvcc version + git log the kernel's INCLUDES (not its file); (2) ncu stall check — long-scoreboard should have RISEN (fewer warps to hide latency). Fix menu: __launch_bounds__ to pin the contract (5.6), or noinline the fat helper. The meta-lesson: performance has UPSTREAM dependencies; the tripwire caught what code review structurally couldn't (nobody reviews a header edit for a distant kernel's occupancy).</div></details>
+<details><summary>3. Design the 10-minute triage you'd run on a total stranger's slow CUDA app (you get a shell, nsys, ncu, and nothing else): the four commands in order, what each rules out, and the three possible verdicts you can reach inside the budget.</summary><div class="body">(1) <code>nsys profile -o r ./app</code> + <code>nsys stats r</code> (4 min): api_sum exposes sync fences and malloc storms; mem_time_sum vs kern_sum splits transfer-story from kernel-story; kern_sum's top-5 names the whales. (2) If kernel-story: <code>ncu --set basic -k top_kernel</code> (3 min): SOL regime → memory/compute/starved. (3) If memory-bound: sectors + L2 (1 min): scatter vs honest-traffic. (4) ptxas -v rebuild if regs suspected (1 min). Verdicts reachable: "system problem — pipeline/syncs/allocations, lessons 5.3/5.9, kernels innocent"; "kernel X memory-bound with dirty access (sectors 30): 5.7 fix, predicted ~5×"; "kernel X at 91% SOL — hardware-bound: optimization over, procurement conversation begins (4.6)". Ten minutes to a NAMED, lesson-cited verdict — that's the standard; anything less specific is scrolling, not triage.</div></details>
+<details><summary>4. ncu shows stall 'barrier' at 38% on your tiled matmul (5.5's v3). Walk the chain: what hardware moment does each barrier-stall sample represent, why does the tax GROW with better memory behavior (the cruel irony), and which two design changes from this module's lessons shrink it — with their side-effect bills.</summary><div class="body">Each sample: a warp DONE with its tile-phase work, parked at __syncthreads waiting for sibling warps (the block's slowest warp sets everyone's pace — convoy effect, 4.4's pipeline bubble at block scale). The irony: as loads get faster/cleaner (5.7 fixes), compute phases shorten, so the FIXED barrier latency becomes a LARGER fraction — optimizing memory promotes the barrier to bottleneck (bottlenecks rotate: 4.7's whack-a-mole, measured). Fixes: (1) double-buffering (5.5 P4) — removes one barrier per iteration; bill: 2× shared memory → occupancy check (the dial, 5.6); (2) more work per thread between barriers (register tiling, 5.11) — amortizes each barrier over 4–16× the math; bill: registers → same dial, other side. Both fixes pay the SAME resource (SM budget) from different pockets — the capstone's central tension, met here in a stall counter.</div></details>
+<details><summary>5. A teammate's PR claims "kernel 1.4× faster" with a screenshot of one ncu run before/after. List the four ways this evidence is inadequate by this course's standards, and specify the minimal evidence bundle your review would accept.</summary><div class="body">Inadequate: (1) n=1 — no median/variance (M1 L7; clocks boost/throttle); (2) ncu replay conditions ≠ production regime (locked clocks, flushed caches — the number is real but describes the lab); (3) no fixture citation — faster and WRONG is the classic pair (M2 L6: the diff that broke rtol arrives with the diff that won 1.4×); (4) no regime statement — 1.4× on N=512 says nothing about N=8192 if the kernel changes regimes (5.7's "one N" gotcha). Acceptable bundle: GpuTimer median-of-K warm, both builds, production-shaped N (labeled); fixture suite green incl. tolerance policy; ptxas delta (regs/spills — future-you's tripwire baseline); one-line mechanism claim tied to a metric delta ("sectors 31→4, hence bandwidth") so the REASON is auditable, not just the outcome. Speed claims are scientific claims; hold them to lab standards — that sentence is your review-comment template forever.</div></details>
+<details><summary>6. Reconcile three "contradicting" instruments on one kernel: GpuTimer says 2.1 ms, nsys shows 2.3 ms per launch, ncu reports 1.7 ms. Which is "true", what explains each offset, and which number goes in (a) the PR description, (b) the capacity-planning sheet, (c) the optimization worklog?</summary><div class="body">All three are true about different questions (5.9 P6's regimes, cross-instrument edition). GpuTimer 2.1: warm median, YOUR stream, boost clocks as-they-come — the honest production estimate → (a) PR. nsys 2.3: includes launch/queue context in a real app flow (plus small tracing tax) — the system experience → (b) capacity sheet (systems pay wall time, not kernel time). ncu 1.7: locked (lower, steady) clocks, flushed caches, isolated replay — the controlled-lab number whose VALUE is its stability across runs for A/B of code changes → (c) worklog deltas. The interview-grade sentence: "I don't ask which instrument is right; I ask which QUESTION each answers, and I never compare numbers across instruments — only within one." Cross-instrument deltas are probe physics, not performance news.</div></details>
+<details><summary>7. Interview closer: "You have ncu output for an unfamiliar kernel: SOL Mem 91%, Compute 18%, sectors/request 4.2, L2 hit 31%, occupancy achieved 89%, stalls long-scoreboard 61%. In 90 seconds: regime, what's ALREADY good, the only lever family left, and the question you ask the kernel's author."</summary><div class="body">Regime: memory-BANDWIDTH-bound, genuinely — 91% SOL with CLEAN access (sectors 4.2 = coalesced, 5.7's landmark) and HEALTHY occupancy (89% achieved — latency-hiding is working; scoreboard stalls at 61% are the NORMAL face of a saturated bus, not a disease: 4.4). Already good: pattern, occupancy, no spills implied — the usual suspects are all alibied; this kernel is a well-built streamer AT its ceiling. Only lever family: reduce BYTES — algorithmic reuse (tiling if there's unexploited locality, 5.5), narrower dtypes (fp16/bf16 halves the bill, M1 L8's budget question), kernel fusion with neighbors (skip the HBM round-trip entirely — Track A's daily bread), or accept + budget (4.7's cleared-conscience exit). The author question: "is every byte this kernel reads actually NEEDED — what's the reuse factor and could this fuse with its producer?" (L2 at 31% hints stream-once data: fusion territory.) Closing sentence for the interviewer: "the counters say this kernel won its category; the remaining wins are above the kernel — in what we ask it to move." That's a principal-engineer answer assembled from five lesson landmarks.</div></details>
+
+<div class="pager">
+  <a href="lesson-09.html">← Streams, events & async</a>
+  <a href="lesson-11.html">Next: Capstone — the matmul ladder →</a>
+</div>
+<div class="footer">GPU Mastery · Module 5 · Lesson 10 — works offline · progress saved in your browser</div>
+</div>
+<script src="../assets/diagrams5.js"></script>
+<script src="../assets/app.js"></script>
+</body>
+</html>

@@ -1,0 +1,160 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>4.7 Spec Sheets & the Roofline — GPU Mastery</title>
+<link rel="stylesheet" href="../assets/style.css">
+</head>
+<body data-lesson="m4l7">
+<nav><div class="inner">
+  <a class="logo" href="../index.html">GPU<span>Mastery</span></a>
+  <a class="item" href="../index.html">Home</a>
+  <a class="item on" href="../curriculum.html">Curriculum</a>
+  <a class="item" href="../labs.html">Labs</a>
+  <a class="item" href="../setup.html">Lab setup</a>
+  <a class="item" href="../prompt.html">Generator prompt</a>
+</div></nav>
+<div class="wrap">
+
+<div class="lesson-top">
+  <div><span class="badge">Module 4 · Lesson 7 · module capstone</span><span class="badge dim">≈ 2–3 h</span></div>
+  <button id="donebtn" class="donebtn">Mark lesson complete</button>
+</div>
+<h1>Spec Sheets & the Roofline — one chart to locate every kernel</h1>
+<p class="lead">The module's graduation exercise: turn any spec sheet into a machine model, and any kernel into a dot on one chart that tells you — before profiling, before writing code — what its ceiling is and which lever moves it. This is the estimation habit from M1 L3, grown into a professional instrument.</p>
+
+<h2>Concept</h2>
+
+<h3>Reading a spec sheet without being marketed to</h3>
+<div class="diagram" data-diagram="m4l7-specsheet" data-caption="Six rows, six different questions. The asterisk on tensor peaks is doing heavy lifting."></div>
+<p>The reading method, row by row: <strong>FP32 peak</strong> answers graphics/HPC lane throughput (4.4 P1's lanes×2×clock — verify it yourself, always). <strong>Tensor peaks carry asterisks</strong>: "1676 TF*" means 2:4 structured sparsity — dense is half, and dense-vs-sparse confusion inflates half the benchmark claims you'll read. <strong>Memory capacity</strong> answers "does it fit" (a 14B-param fp16 model = 28 GB — one subtraction decides the 32 GB card's fate, before any speed talk). <strong>Bandwidth</strong> is the inference ceiling (M1 L3 Ex.1's tokens/s ≈ BW ÷ model bytes — still the most predictive single line in LLM serving). <strong>Balance = peak ÷ BW</strong> is the machine's personality in one number. <strong>TDP/price</strong> decide fleets (4.3 §4's joules). Six rows, six different engineering questions — never let one row answer another's question.</p>
+
+<h3>The roofline: the machine model as one picture</h3>
+<div class="diagram" data-diagram="m4l7-roofline" data-caption="Memory slope (BW × AI), compute roof (peak), ridge at balance. Every kernel is a dot; its position names its lever."></div>
+<pre><code>attainable GFLOP/s = min( AI × BW ,  peak )          — the whole model, one line
+ridge (balance):  RTX 5090 fp32 ≈ 104,800/1,792 ≈ 58 FLOP/B
+                  B200 dense fp16 ≈ 4,500,000/8,000 ≈ 560 FLOP/B (!)
+place your dots (AI from M1 L3 §4's W/Q arithmetic):
+  saxpy 0.17         → memory-bound at 0.3% of peak — FOREVER (4.4's verdict)
+  stencil ~1         → memory-bound; tiling raises AI toward ~2–4 (4.5 Ex.2)
+  attention (fused)  → ~4–16 depending on head dims — the FlashAttention fight
+  big matmul ~n/6    → compute-bound past n≈350 on 5090; tensor-core territory</code></pre>
+<p>The chart's two commandments: <strong>left of the ridge, only more reuse helps</strong> (fuse, tile, batch — raise AI: everything 3.9/4.5 taught); <strong>right of it, only more FLOP/s helps</strong> (tensor cores, lower precision — M1 L8's formats as a performance lever). And note what the B200's 560 ridge means culturally: on modern AI silicon, <em>almost everything except big matmul is memory-bound</em> — which is why kernel fusion (Track A9) became an industry and why "FLOPS go brrr" headlines mislead: the roofs grew apart, and the slope is where most kernels live.</p>
+
+<h3>MFU: the honest scoreboard</h3>
+<div class="diagram" data-diagram="m4l7-ladder" data-caption="From brochure to your first kernel: know which rung a number lives on before comparing."></div>
+<pre><code>MFU = achieved useful FLOPs ÷ dense peak       (model FLOPs utilization)
+frontier training runs: 40–60% MFU is bragging-rights territory
+your 3.9 CPU audit: 20% of peak — same ladder, same honesty, and 5.11's
+GPU capstone will climb from ~2% (first kernel) toward 60%+ (near-cuBLAS),
+each rung a named fix from this module.</code></pre>
+
+<h2>Worked example</h2>
+<div class="card">
+<p><strong>Task:</strong> The full pre-purchase/pre-port analysis — LLM inference for a 8B-param bf16 model on three candidates, using ONLY spec rows and this module's laws. (The exact analysis teams run before committing clusters.)</p>
+<pre><code>candidates:      RTX 5090 (32 GB, 1.79 TB/s) · H100 (80 GB, 3.35) · B200 (192 GB, 8.0)
+fit (capacity):  weights 16 GB + KV cache… 5090: fits, tight (batch-limited) ✓
+                 H100/B200: fits with room for real batches ✓✓
+decode ceiling (bandwidth row — each token reads all weights, M1 L3):
+                 5090: 1790/16 ≈ 112 tok/s  ·  H100: 209  ·  B200: 500  (per stream)
+prefill (compute row — long prompts are big matmuls, AI ≈ hundreds → compute-bound):
+                 tensor dense fp16-ish: 5090 ~838 TF · H100 989 · B200 ~4500 →
+                 B200 prefills ~5× faster: PROMPT-heavy workloads skew to compute row
+batching (4.6 §4 + 4.4 §5): decode at batch B reads weights ONCE per step for B
+                 streams → tok/s scales ~×B until the COMPUTE roof or KV-bandwidth
+                 binds: the roofline's slope-walk, priced per candidate
+verdict grid:    chat (decode-heavy, modest batch): $/token tracks BANDWIDTH row →
+                 5090 fleet wins on capex for small scale; B200 wins joules at scale
+                 long-context RAG (prefill-heavy): COMPUTE row rules → B200/H100
+                 the sentence for the meeting: "name the workload's roofline
+                 position, then read ONE spec row — the rest is marketing."</code></pre>
+<p><strong>Decision made:</strong> every number above came from a spec row + a course law (fit = subtraction; decode = bandwidth ÷ bytes; prefill = the compute roof; batching = AI manufactured by reuse). No benchmarks were run — and when you DO run them (5.10's methods), deviations from these predictions localize the software problem (a decode rate below the bandwidth ceiling = your kernels/KV layout, not the silicon). Prediction-first is what makes measurement diagnostic instead of decorative — the module's method, applied to a million-dollar question.</p>
+</div>
+
+<h2>Key points</h2>
+<ul class="keypoints">
+<li>Spec rows answer different questions — capacity (fits?), bandwidth (decode/streaming ceiling), compute+asterisk (prefill/matmul, halve sparse claims), balance (personality), TDP (fleet economics). Never cross-answer.</li>
+<li>Roofline: attainable = min(AI × BW, peak); the ridge is the machine's balance — 58 FLOP/B (5090 fp32) to 560 (B200 fp16): modern AI silicon makes almost everything memory-bound.</li>
+<li>Left of ridge: raise AI (fuse, tile, batch — the 3.9/4.5 toolkit). Right: raise FLOP/s (tensor cores, precision — M1 L8 as a lever). The dot's position names the lever.</li>
+<li>MFU (achieved ÷ dense peak) is the honest scoreboard: 40–60% is frontier bragging; know which ladder rung any quoted number lives on.</li>
+<li>Prediction-first turns measurement into diagnosis: a kernel below its roofline position is a software bug with a named lesson; at position, done — move on.</li>
+<li>This chart + the 4.4 launch ritual + the 4.6 bridge audit = the complete pre-GPU toolkit; Module 5 is these predictions, confirmed by hardware.</li>
+</ul>
+
+<h2>Quiz</h2>
+<div class="quiz">
+  <div class="q">1. A vendor slide claims "our kernel achieves 1,650 TFLOPS on RTX 5090!" Your one-glance audit?</div>
+  <button class="opt">Plausible — it's below the 1676 spec</button>
+  <button class="opt" data-c="1">1650 &gt; the 838 TF DENSE fp16 peak: the claim only parses against the sparsity-doubled brochure number — so it's either 2:4-sparse workload FLOPs (fine, must be labeled), counting skipped zeros as work (marketing), or fiction. Ask: dense or sparse, and what precision?</button>
+  <button class="opt">Impossible — nothing reaches spec numbers</button>
+  <button class="opt">Fine if they used fp8</button>
+  <div class="expl">The asterisk audit, reflexive: dense fp16 tops at ~838; 1650 ≈ the sparse brochure line. (fp8 would double dense again — which is why "what precision, dense or sparse" is ONE question, not pedantry.) Sparsity claims count the zeros you didn't multiply — legitimate for genuinely 2:4-sparse models, deceptive otherwise. This 10-second audit has saved real procurement meetings; the ladder diagram is its cheat sheet.</div>
+</div>
+<div class="quiz">
+  <div class="q">2. Your fused elementwise kernel measures 1.72 TB/s effective on the 5090 (96% of the memory roof) at AI = 0.4. The team wants it "optimized to use the tensor cores." Response?</div>
+  <button class="opt">Agree — tensor cores are always faster</button>
+  <button class="opt" data-c="1">It's DONE: at AI 0.4 the roofline caps it at 0.4×1792 ≈ 717 GFLOP/s regardless of compute units, and it's already at 96% of the binding roof. Tensor cores move the FLAT roof, which this kernel never touches. The only real lever is raising AI — fuse MORE into the pass or restructure the algorithm</button>
+  <button class="opt">Rewrite in fp8 to double throughput</button>
+  <button class="opt">Raise occupancy to break the roof</button>
+  <div class="expl">The chart's commandments, applied: left-of-ridge kernels are immune to compute-side upgrades (fp8 halves BYTES — that one actually helps by raising effective AI per element! — but 'use tensor cores' on a streaming kernel is category error). Declaring a kernel FINISHED — at 96% of its physical roof — is a skill exactly as valuable as optimization, and rarer. The roofline is how you defend 'done' with physics instead of fatigue.</div>
+</div>
+
+<h2>Exercises</h2>
+<details><summary>Exercise 1 — Build your machine's roofline from measurements, not brochures: using 4.2 Ex.1's bandwidth measurement and a peak-FLOPs micro-bench (the 4.1 Ex.1 partial-sums loop, fully unrolled with FMA, or dgemm via OpenBLAS as the practical peak), draw YOUR CPU's roofline (ASCII or matplotlib), place 3.9's four kernels on it by their measured GFLOP/s and computed AI, and write one sentence per kernel: at roof, or gap = which named fix?</summary><div class="body">
+<p>Typical laptop outcome: measured BW ≈ 45 GB/s, practical peak ≈ 250 GFLOP/s (OpenBLAS) → ridge ≈ 5.5 FLOP/B. Placements: naive matmul (AI ≈ 0.5 effective, due to the stride-N B-walk destroying reuse — measured 0.9 GF ≈ 45×0.5 × cache-miss tax: BELOW even the memory line → fix: access pattern, 4.2); ikj (effective AI ~2 via line reuse: near the slope ✓); blocked (AI engineered to ~8–15: past the ridge, now compute-territory at 60% of the lane peak → gap = SIMD width, 3.9 §3's honest ceiling); OpenBLAS (at the roof: the reference dot). The meta-deliverable: the same four dots, GPU edition, is 5.11's report figure — and you've now built the chart both ways: brochure-down (worked example) and measurement-up (this exercise). When they disagree, the measurement is the machine; the brochure is the aspiration.</p>
+</div></details>
+<details><summary>Exercise 2 — The precision ladder as a roofline family: for one hypothetical kernel with AI_fp32 = 20 FLOP/B on the 5090, compute attainable throughput at fp32 (104.8 TF peak), fp16 tensor dense (838 TF, and AI DOUBLES — why?), and fp8 (1676 TF dense, AI ×4). Which precision steps actually pay, and which law from M1 L8 sets the stopping condition?</summary><div class="body">
+<p>fp32: AI 20 &lt; ridge 58 → memory-bound: 20 × 1792 = 35.8 TF... wait — 35.8 &lt; 104.8 ✓ memory-bound at 35.8 TF. fp16: HALVING bytes doubles AI (same FLOPs, half the traffic — the M1 L8 §"fewer bits" trade, roofline edition): AI 40 × 1792 = 71.7 TF, still &lt; 838 → memory-bound, 2× win. fp8: AI 80 &gt; new ridge (1676/1792 ≈ 935?? no — ridge = 1676TF/1.792TB/s = 935 FLOP/B): AI 80 ≪ 935 → STILL memory-bound: 80 × 1792 = 143 TF — another 2×, and note we never touched a compute roof: every gain came from BYTES, none from FLOPS. The pattern: precision descent is a bandwidth play on memory-bound kernels (each halving of bytes ≈ 2×) until M1 L8's stopping law bites — the error budget: fp8's ~2 significant digits must survive your kernel's accumulation length (K·ε analysis, 2.6/3.9's tolerance discipline). Precision is a dial with a numerics invoice; the roofline prices the benefit, M1 L8 prices the cost, and Track A6 is the negotiation between them.</p>
+</div></details>
+
+<hr>
+<h1>Go deeper — the module's closing arguments</h1>
+
+<h2>1. The roofline's fine print (what the simple chart hides)</h2>
+<p>Real kernels see <em>multiple</em> rooflines: L2-bandwidth and shared-memory rooflines sit above the HBM slope (a tiled kernel may be L2-bound — between the naive lines), and instruction-issue can roof you below peak FLOPs (4.4 §1's mix budget: a kernel spending half its issue slots on address math halves its effective compute roof — why 4.5 quiz 1's float4 trick matters beyond traffic). Nsight Compute draws the hierarchical version automatically (5.10); the skill this module built is reading it as a MAP — which roof binds, therefore which lever — rather than as a grade. And the honest limitation: rooflines model steady-state throughput; latency-bound patterns (pointer chases, tiny kernels below a wave — 4.4 §5) live off-chart, in Little's-law territory (4.2 P4).</p>
+
+<h2>2. The module's laws, on one card</h2>
+<table>
+<tr><th>Law</th><th>One-line form</th><th>Owner</th></tr>
+<tr><td>Pipeline throughput</td><td>fill once, complete 1/cycle; flushes cost the depth</td><td>4.1</td></tr>
+<tr><td>The line/sector tax</td><td>traffic = touched-units × unit-size, never payload</td><td>4.2/4.5</td></tr>
+<tr><td>Little's law</td><td>concurrency = bandwidth × latency — someone must supply it</td><td>4.2 P4/4.4</td></tr>
+<tr><td>Amdahl + roofs</td><td>speedup = min(serial ceiling, resource roofs, clocks)</td><td>4.3</td></tr>
+<tr><td>Latency hiding</td><td>waits don't shrink; they get covered — warps, streams, nodes</td><td>4.4/4.6</td></tr>
+<tr><td>Coalescing/banks</td><td>the warp's address SET is judged, unit by unit</td><td>4.5</td></tr>
+<tr><td>Bridge economics</td><td>tolls × count + bytes ÷ width; residency dissolves both</td><td>4.6</td></tr>
+<tr><td>Roofline</td><td>min(AI × BW, peak); the ridge names your lever</td><td>4.7</td></tr>
+</table>
+
+<h2>3. Gotchas (the module's greatest hits, condensed)</h2>
+<div class="gotcha"><strong>Comparing numbers from different ladder rungs.</strong> Sparse brochure vs dense achieved vs MFU — quiz 1's audit before ANY comparison.</div>
+<div class="gotcha"><strong>Optimizing the wrong side of the ridge.</strong> Tensor-coring a streaming kernel; fusing a compute-bound matmul. The dot's position names the lever — plot before touching.</div>
+<div class="gotcha"><strong>Trusting theoretical BW/peak in the model.</strong> Measured roofs (Ex.1) run 70–90% of brochure; building the chart from brochures inflates every "gap" and demoralizes correct kernels (quiz 2's 96% was of MEASURED roof).</div>
+<div class="gotcha"><strong>Roofline-ing latency-bound work.</strong> Tiny grids, pointer chases, toll-bound pipelines live off-chart (§1) — Little's law and 4.6's toll arithmetic are their instruments.</div>
+<div class="gotcha"><strong>Forgetting AI is per-KERNEL, not per-app.</strong> An app is a portfolio of dots; the report (4.3 P7 + 4.6 P7 templates) plots each phase — one aggregate number hides the fixable outliers.</div>
+<div class="gotcha"><strong>Answer-shopping spec rows.</strong> Wanting the compute row to answer a decode question (worked example's whole point). Workload first, THEN the row.</div>
+
+<h2>Scenario — the module, cashed in one meeting</h2>
+<p>Recall this module's opening promise: explain 3.9's mysteries and arm you for the GPU. The closing scenario is the arming, tested. Your team must commit: port the analytics engine to GPU, or buy a bigger CPU fleet. The meeting has slides with TFLOPS on them. You bring four artifacts, one per lesson-pair: <strong>(1)</strong> the workload's dot placements — three kernel classes at AI 0.3, 1.2, and 45 (M1 L3 arithmetic on the codebase's hot loops); <strong>(2)</strong> the candidate GPU's measured-model roofline (Ex.1's method on a borrowed 5090: ridge 58) — dots 1 and 2 land memory-bound at 8× and 15× over the CPU's measured roof, dot 3 compute-bound at ~40×; <strong>(3)</strong> the bridge audit (4.6): dataset shards resident, 2 crossings/batch, toll-clean — projected end-to-end 11×, Amdahl'd honestly against the un-ported 6% (4.3: ceiling 14×); <strong>(4)</strong> the joules row: 9× perf/W → the fleet-cost curve crosses at month seven. The decision takes eleven minutes; the CFO's question — "what's the risk this projection is wrong?" — gets the module's best answer: <em>"Each number is a physical ceiling or a measured floor; the risk is our software not REACHING ceilings, which the profiler will localize to specific fixes — I've listed the likely three."</em> Module 5 is where you go build exactly that software. The mysteries are spent; the predictions are loaded.</p>
+
+<h2>Practice</h2>
+<details><summary>1. Ridge drills: compute the balance for — (a) H100 fp32 (67 TF, 3.35 TB/s); (b) B200 dense fp8 (~9,000 TF, 8 TB/s); (c) your laptop from Ex.1; (d) PCIe gen5 as a "memory" (64 GB/s) against the 5090's fp32 peak. What does (d)'s absurd ridge re-derive?</summary><div class="body">(a) 20 FLOP/B. (b) 1,125 FLOP/B (!!— at fp8, virtually the entire computable universe is memory-bound on-device). (c) typical: 4–8. (d) 104,800/64 ≈ 1,640 FLOP/B — which is exactly 4.6's PCIe balance: the bridge IS a roofline with a catastrophic ridge, and 'ship it only with ~1,600 reuses' was this chart all along. One model, every interconnect — that unification is why the roofline earns its fame.</div></details>
+<details><summary>2. Place these on the B200 fp16 chart (ridge ~560) and name each one's lever: (a) layernorm (AI ≈ 1); (b) 8-head attention, unfused (AI ≈ 4); (c) FlashAttention-style fused (effective AI ≈ 40–80 via SRAM reuse); (d) the 8192³ matmul (AI ≈ 1365). Which single software idea moved (b)→(c), and where did this course first teach it?</summary><div class="body">(a) slope, 1×8 = 8 TF attainable — fuse it into neighbors (lever: AI). (b) slope, 32 TF — embarrassing for 'the' AI operation. (c) slope still! 40–80 × 8 = 320–640 TF, brushing the ridge — a 10–20× win from ZERO new FLOPs. (d) roof: 4,500 TF, tensor-core land. The idea that moved (b)→(c): tiling/staging to keep the working set in fast memory and never re-reading the N² intermediate — M1 L2's fusion algebra + 3.9's blocking + 4.5's shared-memory staging: this course taught FlashAttention's core move in three costumes before naming it (Track A5 names it). The roofline shows WHY it was worth a famous paper: the dot crossed half the chart.</div></details>
+<details><summary>3. MFU forensics: a training report claims 52% MFU on B200s for a 70B model. List the four numbers you'd demand to verify it, and the two most common ways such claims inflate. (The ladder diagram is your rubric.)</summary><div class="body">Demand: (1) the FLOPs-per-token formula used (6ND standard vs 'creative' counts including recomputation as useful work — inflation #1); (2) dense peak used as denominator (sparse-doubled denominator would DEFLATE MFU, but mixed fp8/fp16 accounting inflates — state the precision per phase); (3) wall-clock basis (excluding checkpointing/eval/restarts inflates — inflation #2: 'MFU while it was running well'); (4) global batch + sequence length (MFU is workload-dependent; comparing across configs is rung-mixing). A verifiable MFU claim fits in four lines; an unverifiable one is a brochure. You now read training reports the way 4.7 taught you to read spec sheets — same skill, opposite direction.</div></details>
+<details><summary>4. The fp8 decode dividend: recompute the worked example's decode ceilings if weights are fp8 (8 GB) with bf16 KV-cache. Which spec row moved, which didn't, and what NEW row starts binding at high batch? (M1 L8's invoice clause applies — state it.)</summary><div class="body">Decode ceiling doubles: 5090 → 224 tok/s/stream, B200 → 1000 (bandwidth row ÷ half the bytes — Ex.2's law in production form: quantization is a bandwidth play). Capacity row also relaxes (8 GB: the 5090 gains real batch headroom). Unmoved: the compute row's relevance to prefill (already compute-bound; fp8 tensor peaks help there separately). New binder at high batch: KV-cache bandwidth+capacity (per-token KV reads scale with batch × context — the cache becomes the 'weights' of the bandwidth argument: A8's PagedAttention exists for this row). Invoice: fp8 weights cost ~2 significant digits (M1 L8) — acceptance = perplexity/task-metric budget, not vibes; the roofline prices the win, the error budget gates it (Ex.2's closing law, now with a product attached).</div></details>
+<details><summary>5. Off-chart triage: three workloads the roofline mishandles — (a) graph BFS with tiny frontiers; (b) a 512-block kernel on a 170-SM GPU; (c) an RPC-per-item inference service. Name each one's actual governing law from this module's card (§2), and the instrument that measures it.</summary><div class="body">(a) latency-bound pointer chasing: Little's law governs (concurrency = BW×latency — the frontier can't supply it); instrument: 4.2 Ex.1's chase methodology, device edition. (b) wave/tail arithmetic (4.4 §5): 512/(16×170) &lt; 1 wave — utilization ceiling ~19% before any memory talk; instrument: the wave formula, then occupancy timeline. (c) bridge tolls + sync serialization (4.6 quiz 2): governed by fixed costs × count; instrument: the toll budget + timeline overlap evidence. The skill: recognizing WHICH law owns a workload in one glance — the §2 card is a differential-diagnosis table, and this practice item is its board exam.</div></details>
+<details><summary>6. Write the six-line "machine model" block that will head every 5.x benchmark report (values for your actual hardware once you have it; structure now): measured BW, measured dense peak per precision, ridge(s), toll costs (launch, copy), wave quantum (SMs × blocks/SM), and the three workload dots you care about. Justify each line's presence with the lesson that uses it.</summary><div class="body">Template: <code>MACHINE MODEL (measured, date, driver): HBM BW: ___ GB/s (roof for AI&lt;ridge) [4.2/4.5 floors] · Dense peak: fp32 ___ / fp16 ___ / fp8 ___ TF [quiz 1's audit basis] · Ridges: ___/___/___ FLOP/B [lever selection, 4.7] · Tolls: launch ___ µs, copy setup ___ µs [4.6 batching decisions] · Wave quantum: ___ blocks (___ SMs × ___ res.) [4.4 §5 small-grid triage] · Reference dots: saxpy ___ %roof, transpose ___ %floor, matmul ___ %peak [the canary kernels: drift in THESE flags driver/thermal/config regressions before your kernels do]</code>. Six lines, measured once per machine/driver, pasted atop every report — turning each new benchmark into a delta against a calibrated model rather than a number in a void. This block is the module's entire content, operationalized into a header comment.</div></details>
+<details><summary>7. The graduation synthesis: write the one-paragraph "why GPUs are shaped like that" answer you'd give in a systems interview, required to touch: the latency/throughput fork (4.3), latency hiding via residency (4.4), the register-file inversion, the memory ladder with a user-managed rung (4.5), the bridge (4.6), and the roofline consequence (4.7) — in under 150 words, no diagram allowed. Then note which single sentence you'd keep if allowed only one.</summary><div class="body">Model answer: "A GPU bets everything on throughput: instead of one heroic core hiding latency with caches and predictions, it keeps thousands of threads RESIDENT — registers permanently allocated, so a stalled warp costs nothing to bypass — and covers every memory wait with some other thread's arithmetic. That's why the register file outweighs the cache, why the fast memory level is a user-managed scratchpad rather than a speculative copy, and why occupancy — the supply of stall-coverage — is a first-class resource. Memory is judged warp-wide in sectors, so layout IS performance; the host lives across a bridge two orders narrower than local HBM, so residency IS architecture. The consequence fits one chart: attainable = min(AI×BW, peak) — and on modern parts the ridge sits so high that the game, most days, is moving bytes less, not multiplying faster." Keep-one sentence: the last one — it's the module in twenty-six words, and every optimization you'll ever ship is an argument with it.</div></details>
+
+<div class="note"><strong>Module 4 complete — and the core's theory is done.</strong> You can now predict a kernel's ceiling from a spec sheet, size a launch on a napkin, audit a pipeline's bridge in one question, and decode every mystery your own benchmarks produce. Nothing between you and CUDA remains except CUDA. <strong>Module 5 (CUDA Fundamentals)</strong> turns every prediction in this module into a measurement — generate it with the <a href="../prompt.html">prompt</a>, and bring the launch-ritual card.</div>
+
+<div class="pager">
+  <a href="lesson-06.html">← The host-device bridge</a>
+  <a href="../curriculum.html">Module 4 complete → Curriculum</a>
+</div>
+<div class="footer">GPU Mastery · Module 4 · Lesson 7 — works offline · progress saved in your browser</div>
+</div>
+<script src="../assets/diagrams4.js"></script>
+<script src="../assets/app.js"></script>
+</body>
+</html>

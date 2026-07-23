@@ -1,0 +1,222 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>1.1 Numbers, Bases & Binary — GPU Mastery</title>
+<link rel="stylesheet" href="../assets/style.css">
+</head>
+<body data-lesson="m1l1">
+<nav><div class="inner">
+  <a class="logo" href="../index.html">GPU<span>Mastery</span></a>
+  <a class="item" href="../index.html">Home</a>
+  <a class="item on" href="../curriculum.html">Curriculum</a>
+  <a class="item" href="../labs.html">Labs</a>
+  <a class="item" href="../setup.html">Lab setup</a>
+  <a class="item" href="../prompt.html">Generator prompt</a>
+</div></nav>
+<div class="wrap">
+
+<div class="lesson-top">
+  <div><span class="badge">Module 1 · Lesson 1</span><span class="badge dim">≈ 2–3 h</span></div>
+  <button id="donebtn" class="donebtn">Mark lesson complete</button>
+</div>
+<h1>Numbers, Bases & Binary — how machines count</h1>
+<p class="lead">Every index, address, mask, and pixel a GPU touches is a binary number. This lesson rebuilds counting from scratch so that binary, hex, and overflow become obvious instead of mysterious.</p>
+
+<h2>Concept</h2>
+
+<h3>Counting in tens is a choice, not a law</h3>
+<p>When you write <strong>473</strong>, you are using a compact code: 4 hundreds + 7 tens + 3 ones. Each position is worth ten times the one to its right — that's all "base 10" means. We use ten symbols (0–9) probably because we have ten fingers. Nothing about mathematics requires ten.</p>
+<pre><code>473 = 4×10² + 7×10¹ + 3×10⁰      (10⁰ = 1 — anything to the power 0 is 1)</code></pre>
+<p>A computer is built from billions of transistors, and a transistor is reliable at exactly two states: current flowing or not. So computers count with two symbols — 0 and 1 — and each position is worth <em>two</em> times the one to its right. Same idea, different base.</p>
+
+<h3>Reading binary: place value with powers of 2</h3>
+<pre><code>10101101₂ = 1×128 + 0×64 + 1×32 + 0×16 + 1×8 + 1×4 + 0×2 + 1×1 = 173
+             128    64     32     16     8     4     2     1   ← position weights</code></pre>
+<div class="diagram" data-diagram="m1l1-binary" data-caption="One binary number, read three ways: place value, decimal, hex."></div>
+<p>To go the other way (decimal → binary), repeatedly divide by 2 and keep the remainders, bottom-up:</p>
+<pre><code>173 ÷ 2 = 86 r 1   ↑ read remainders upward: 10101101
+ 86 ÷ 2 = 43 r 0
+ 43 ÷ 2 = 21 r 1
+ 21 ÷ 2 = 10 r 1
+ 10 ÷ 2 =  5 r 0
+  5 ÷ 2 =  2 r 1
+  2 ÷ 2 =  1 r 0
+  1 ÷ 2 =  0 r 1</code></pre>
+<p>Memorize the small powers of two — they are the multiplication table of this field:</p>
+<table>
+<tr><th>2ⁿ</th><td>2⁰</td><td>2¹</td><td>2²</td><td>2³</td><td>2⁴</td><td>2⁵</td><td>2⁶</td><td>2⁷</td><td>2⁸</td><td>2¹⁰</td><td>2¹⁶</td><td>2²⁰</td><td>2³⁰</td><td>2³²</td></tr>
+<tr><th>=</th><td>1</td><td>2</td><td>4</td><td>8</td><td>16</td><td>32</td><td>64</td><td>128</td><td>256</td><td>1 024</td><td>65 536</td><td>~1 M</td><td>~1 B</td><td>~4.3 B</td></tr>
+</table>
+
+<h3>Hexadecimal: binary for humans</h3>
+<p>Binary is precise but unreadable — 32 bits is a wall of digits. Hexadecimal (base 16) uses symbols 0–9 then A–F (A=10 … F=15). Its superpower: <strong>16 = 2⁴</strong>, so one hex digit is exactly one group of 4 bits (a <em>nibble</em>). Conversion is pure pattern-matching, no arithmetic:</p>
+<pre><code>10101101₂ → split: 1010 | 1101 → A | D → 0xAD
+memory address you'll meet in CUDA:  0x7f8a3c001200   (48-bit pointer)</code></pre>
+<p>The <code>0x</code> prefix just means "what follows is hex." GPU memory addresses, error codes, color values (<code>#FF8800</code>), and bit masks are all written in hex.</p>
+
+<h3>Negative numbers: two's complement</h3>
+<p>Hardware has no minus sign. The trick: for an n-bit signed integer, the top bit's weight is <em>negative</em>. For 8 bits, the weights are <strong>−128</strong>, 64, 32, 16, 8, 4, 2, 1. That single change gives a range of −128…+127, and — the beautiful part — the <em>same</em> adder circuit works for positive and negative numbers.</p>
+<pre><code>to negate: invert all bits, add 1
+ 5 = 00000101 → invert → 11111010 → +1 → 11111011 = −5
+check: 11111011 = −128+64+32+16+8+2+1 = −5  ✓</code></pre>
+<div class="diagram" data-diagram="m1l1-twoscomp" data-caption="int8: the top bit decides the sign; 127 + 1 wraps to −128."></div>
+
+<h3>Fixed width and overflow</h3>
+<p>Math has infinitely many integers; a register has a fixed number of bits. C, C++, and CUDA integers come in fixed widths, and when a result doesn't fit, it does <em>not</em> raise an error — it wraps or worse:</p>
+<table>
+<tr><th>Type</th><th>Bits</th><th>Range</th><th>On overflow</th></tr>
+<tr><td><code>int8_t</code></td><td>8</td><td>−128 … 127</td><td rowspan="3">signed: <strong>undefined behavior</strong> in C/CUDA — compiler may assume it can't happen</td></tr>
+<tr><td><code>int32_t</code> (<code>int</code>)</td><td>32</td><td>−2 147 483 648 … 2 147 483 647</td></tr>
+<tr><td><code>int64_t</code> (<code>long long</code>)</td><td>64</td><td>±9.2 × 10¹⁸</td></tr>
+<tr><td><code>uint8_t</code></td><td>8</td><td>0 … 255</td><td rowspan="2">unsigned: wraps modulo 2ⁿ (255 + 1 = 0), defined but silent</td></tr>
+<tr><td><code>uint32_t</code></td><td>32</td><td>0 … 4 294 967 295</td></tr>
+</table>
+<div class="note">Python integers grow without limit (<code>2**1000</code> just works) because Python secretly manages multiple machine words for you. The moment you enter C/CUDA/NumPy territory, fixed width is back and overflow is your problem. <code>np.int32(2**31 - 1) + 1</code> already misbehaves.</div>
+<div class="diagram" data-diagram="m1l1-units" data-caption="The unit ladder: from a single bit to the 128-byte transactions GPU memory serves."></div>
+
+<h2>Worked example</h2>
+<div class="card">
+<p><strong>Task:</strong> A grayscale image stores one byte per pixel (0 = black, 255 = white). A pixel reads <code>0xAD</code>. What brightness is it, what happens if a filter adds 100 to it, and how should the code prevent that?</p>
+<p><strong>1 — decode:</strong> <code>0xAD</code> → A=10, D=13 → 10×16 + 13 = <strong>173</strong> (a light gray, since 173/255 ≈ 68% white).</p>
+<p><strong>2 — the bug:</strong> 173 + 100 = 273, but the pixel is a <code>uint8_t</code> (max 255). It wraps: 273 mod 256 = <strong>17</strong> — a nearly-black pixel in the middle of a bright region. This is a real, visible artifact: bright spots turn into black speckles.</p>
+<p><strong>3 — the fix:</strong> compute in a wider type, then clamp:</p>
+<pre><code>int v = pixel + 100;              // int is 32-bit: 273 fits fine
+pixel = (v > 255) ? 255 : v;      // clamp to the valid range ("saturate")</code></pre>
+<p><strong>Decision made:</strong> widen-then-clamp costs one comparison per pixel and is the standard pattern in image kernels (CUDA even has saturating intrinsics). Letting it wrap costs nothing and corrupts the image. Cheap insurance wins.</p>
+</div>
+
+<h2>Key points</h2>
+<ul class="keypoints">
+<li>A number system is just place value: position i is worth baseⁱ. Binary uses base 2 because transistors have two reliable states.</li>
+<li>Decimal → binary: divide by 2 repeatedly, read remainders bottom-up. Binary → decimal: add the weights of the 1-bits.</li>
+<li>One hex digit = exactly 4 bits. Addresses, masks, and colors are hex because it's binary compressed 4:1 for human eyes.</li>
+<li>Two's complement makes the top bit worth −2ⁿ⁻¹; negate = invert + 1. One adder circuit then handles all integers.</li>
+<li>Fixed-width integers overflow silently: unsigned wraps modulo 2ⁿ; signed overflow in C/CUDA is undefined behavior, not just a wrong number.</li>
+<li>2¹⁰ ≈ 10³ (1 KiB), 2²⁰ ≈ 10⁶ (1 MiB), 2³⁰ ≈ 10⁹ (1 GiB); int32 tops out near 2.1 × 10⁹ — small enough that real arrays exceed it.</li>
+</ul>
+
+<h2>Quiz</h2>
+<div class="quiz">
+  <div class="q">1. What is 0x2F in decimal?</div>
+  <button class="opt">29 — just read the digits</button>
+  <button class="opt" data-c="1">47 — 2×16 + 15</button>
+  <button class="opt">32 — 2 then F is invalid</button>
+  <button class="opt">207 — 2×100 + F</button>
+  <div class="expl">Hex is base 16: 0x2F = 2×16¹ + F(=15)×16⁰ = 32 + 15 = 47. Reading hex digits as if they were decimal (29) is the classic first-week mistake.</div>
+</div>
+<div class="quiz">
+  <div class="q">2. An <code>int32_t</code> holds 2 147 483 647 (its maximum) and your CUDA kernel adds 1 to it. What does the C/CUDA standard say happens?</div>
+  <button class="opt">It becomes −2 147 483 648, guaranteed</button>
+  <button class="opt">The kernel throws an overflow exception</button>
+  <button class="opt" data-c="1">Undefined behavior — the compiler may assume it never happens and optimize accordingly</button>
+  <button class="opt">It saturates at the maximum value</button>
+  <div class="expl">Signed overflow is UB. On most hardware you'll *observe* the wrap to −2 147 483 648, but the compiler is allowed to assume it can't occur — which can delete your bounds checks. Unsigned types wrap by definition; signed types do not promise anything.</div>
+</div>
+
+<h2>Exercises</h2>
+<details><summary>Exercise 1 — Convert 300 to binary and to hex, then explain what happens if you store it in a uint8_t.</summary><div class="body">
+<p>Divide by 2: 300→150 r0, 150→75 r0, 75→37 r1, 37→18 r1, 18→9 r0, 9→4 r1, 4→2 r0, 2→1 r0, 1→0 r1. Reading up: <code>100101100₂</code> (9 bits). Group in nibbles from the right: 1 | 0010 | 1100 → <code>0x12C</code>. Check: 1×256 + 2×16 + 12 = 300 ✓.</p>
+<p>A <code>uint8_t</code> keeps only the low 8 bits: <code>00101100₂</code> = 44. Equivalently 300 mod 256 = 44. No warning, no error — you simply get 44. This is why image code widens to <code>int</code> before arithmetic.</p>
+</div></details>
+<details><summary>Exercise 2 — Your kernel computes <code>int idx = blockIdx.x * blockDim.x + threadIdx.x;</code> for an array of 3 billion floats. Diagnose the bug and fix it.</summary><div class="body">
+<p><strong>Diagnosis:</strong> 3 × 10⁹ > 2 147 483 647, so <code>idx</code> overflows <code>int</code> for the upper half of the array. Worse, the multiply <code>blockIdx.x * blockDim.x</code> overflows <em>before</em> the add, and since these are signed ints, that's undefined behavior. Symptoms in the wild: garbage writes, misaligned-address crashes, or silent corruption that only appears on large inputs — i.e., only in production.</p>
+<p><strong>Fix:</strong> do the index math in 64-bit:</p>
+<pre><code>size_t idx = (size_t)blockIdx.x * blockDim.x + threadIdx.x;
+if (idx < N) out[idx] = f(in[idx]);   // N is size_t too</code></pre>
+<p>The cast on the <em>first</em> operand promotes the whole expression to 64-bit before the multiply. Casting after the multiply (<code>(size_t)(blockIdx.x * blockDim.x)</code>) is still broken — the overflow already happened inside the parentheses. This exact bug ships in real codebases every year; interviewers love it.</p>
+</div></details>
+
+<hr>
+<h1>Go deeper — the complete guide</h1>
+<p>The card above makes you functional. This chapter makes you fluent: general bases, the full conversion toolkit, exact two's-complement mechanics, what overflow really does in each language you'll touch, and the bitwise operations that turn this theory into working GPU code.</p>
+
+<h2>1. Place value, generalized</h2>
+<p>In base b with digits d<sub>k</sub>…d₁d₀, the value is Σ dᵢ·bⁱ. Three bases matter to you: 10 (humans), 2 (hardware), 16 (humans reading hardware). Base 64 appears in data encoding, and base 256 is a useful mental model: every byte of a file is one "digit" of a giant base-256 number.</p>
+<pre><code>base 10:  4 7 3        = 4×100 + 7×10 + 3
+base  2:  1 0 1 1      = 1×8 + 0×4 + 1×2 + 1 = 11
+base 16:  1 F 4        = 1×256 + 15×16 + 4 = 500</code></pre>
+<p>Digits beyond 9 borrow letters: A=10, B=11, C=12, D=13, E=14, F=15. Case doesn't matter (<code>0xad</code> = <code>0xAD</code>), but a stray <code>O</code> instead of <code>0</code> does — hex has no letter O.</p>
+
+<h2>2. The conversion toolkit</h2>
+<p><strong>Decimal → binary</strong> (÷2, remainders up) and <strong>binary → decimal</strong> (sum the weights) you've seen. Two more you need:</p>
+<p><strong>Binary ↔ hex</strong>: group 4 bits from the right; pad the leftmost group with zeros. Never do this via decimal — it's a straight table lookup both ways.</p>
+<pre><code>0x3C7 → 3=0011, C=1100, 7=0111 → 001111000111₂
+110010111₂ → pad → 0001 1001 0111 → 0x197</code></pre>
+<p><strong>Decimal → hex directly</strong>: divide by 16, remainders up. 500 → 500÷16 = 31 r 4; 31÷16 = 1 r 15(F); 1÷16 = 0 r 1 → <code>0x1F4</code>.</p>
+<p>Quick sanity checks that catch most conversion mistakes: an even number always ends in bit 0; a number < 2ⁿ needs at most n bits; k hex digits hold exactly 4k bits.</p>
+
+<h2>3. Two's complement, exactly</h2>
+<p>Formally: an n-bit pattern b<sub>n−1</sub>…b₀ interpreted as signed equals <strong>−b<sub>n−1</sub>·2ⁿ⁻¹ + Σ<sub>i&lt;n−1</sub> bᵢ·2ⁱ</strong>. Consequences worth internalizing:</p>
+<table>
+<tr><th>Fact</th><th>Why it matters</th></tr>
+<tr><td>Range is asymmetric: −2ⁿ⁻¹ … 2ⁿ⁻¹−1</td><td><code>-INT_MIN</code> overflows! Negating −128 in int8 has no answer; <code>abs()</code> of the most negative int is UB.</td></tr>
+<tr><td>There is exactly one zero</td><td>Older "sign-magnitude" had +0 and −0; two's complement won partly because it doesn't. (Floats, you'll see in Lesson 8, do have −0.)</td></tr>
+<tr><td>Addition is sign-blind</td><td>The same circuit adds signed and unsigned; only <em>comparisons</em> and <em>overflow rules</em> differ. This is why mixing signed/unsigned in one expression is dangerous.</td></tr>
+<tr><td>Sign extension</td><td>Widening int8 −5 (11111011) to int32 copies the top bit leftward: 0xFFFFFFFB. Widening unsigned pads zeros. Mix them up and −5 becomes 251 or 4 294 967 291.</td></tr>
+</table>
+<p>The <strong>signed/unsigned comparison trap</strong>, which every C programmer hits once, hard:</p>
+<pre><code>int n = -1;
+unsigned len = 10;
+if (n < len) { ... }   // FALSE! n converts to unsigned → 4294967295 < 10 fails</code></pre>
+<p>The compiler converts the signed operand to unsigned. −1 becomes the largest possible value. Enable <code>-Wall</code> and take the warning seriously; in CUDA code, prefer <code>size_t</code> or <code>int64_t</code> consistently for sizes and indices.</p>
+
+<h2>4. Overflow across your future stack</h2>
+<table>
+<tr><th>Environment</th><th>Integer overflow behavior</th></tr>
+<tr><td>Python <code>int</code></td><td>Never overflows — arbitrary precision, silently slower for huge values.</td></tr>
+<tr><td>NumPy / PyTorch tensors</td><td>Fixed width, wraps silently: <code>np.array([127], dtype=np.int8) + 1 → -128</code> (NumPy 2.x raises on some out-of-range <em>conversions</em>, not on arithmetic wrap).</td></tr>
+<tr><td>C / C++ / CUDA signed</td><td>Undefined behavior. Compilers exploit it: <code>for (int i = 0; i <= N; i++)</code> with N = INT_MAX is an infinite loop the optimizer may "prove" terminates.</td></tr>
+<tr><td>C / C++ / CUDA unsigned</td><td>Defined wrap mod 2ⁿ. Useful on purpose (hashes, ring buffers, RNGs) — silent when accidental.</td></tr>
+</table>
+<p>Rule for GPU work: <strong>thread indices in 32-bit are fine per-block, but any global index or byte offset that can exceed ~2×10⁹ gets 64-bit math</strong>, promoted <em>before</em> the first multiply. Datasets of 3–100 billion elements are routine in 2026; this is not a theoretical concern.</p>
+
+<h2>5. Bitwise operations — the tools this unlocks</h2>
+<pre><code>&   AND    keep bits present in both      x & 0x0F   → low nibble
+|   OR     set bits                       flags | ENABLE_BIT
+^   XOR    flip where different           x ^ x == 0 (self-inverse)
+~   NOT    invert all bits                ~0 == all ones
+<<  shift left   multiply by 2ᵏ           1 << 20 == 2²⁰ (1 MiB)
+>>  shift right  divide by 2ᵏ (floor)     x >> 3  == x / 8</code></pre>
+<p>Patterns you will use constantly in CUDA (warp masks, alignment, packing):</p>
+<pre><code>x & 1                 // odd? (last bit)
+x & (n - 1)           // x mod n, ONLY when n is a power of two
+(x + 63) & ~63        // round x up to a multiple of 64 (alignment!)
+(mask >> lane) & 1    // is warp lane's bit set in a 32-bit ballot mask?
+0x3FF & (v >> 10)     // extract bits 10..19 (unpacking data)</code></pre>
+<p>Why <code>x & (n−1)</code> works: if n = 2ᵏ, then n−1 is k ones (8−1 = 0111), and AND-ing keeps exactly the low k bits — which <em>is</em> the remainder mod 2ᵏ. Division and modulo are among the slowest integer ops on a GPU; shifts and masks are among the fastest. Compilers do this for constants, but you'll write it by hand for runtime power-of-two sizes.</p>
+
+<h2>6. Sizes, addresses, and what a pointer really is</h2>
+<p>Memory is one giant array of bytes; an <em>address</em> is just the index of a byte, and a <em>pointer</em> is a variable holding such an index — typically shown in hex like <code>0x7f8a3c001200</code>. Three facts to pre-load for Modules 3–5:</p>
+<p>1) A <code>float</code> is 4 bytes, so element i of a float array lives at <code>base + 4·i</code> — pointer arithmetic is place-value math. 2) Hardware likes <em>aligned</em> addresses (multiples of 4, 16, 128); the alignment test is a mask: <code>addr & 15 == 0</code> means 16-byte aligned. 3) GPU global memory is served in 32-byte sectors — a warp of 32 threads each reading a 4-byte float consumes exactly four 32-byte sectors <em>if aligned and consecutive</em> (128 B total). That single sentence is ~40% of CUDA performance tuning; we'll spend Lesson 5.7 on it.</p>
+
+<h2>7. Gotchas</h2>
+<div class="gotcha"><strong>Reading hex as decimal.</strong> 0x30 is 48, not 30. Error codes and addresses lie to you until the 0x prefix triggers the mental switch.</div>
+<div class="gotcha"><strong>Casting after the overflow.</strong> <code>(int64_t)(a * b)</code> with int a, b overflows in 32-bit first. The cast must hit an operand: <code>(int64_t)a * b</code>.</div>
+<div class="gotcha"><strong>Signed/unsigned comparison.</strong> <code>if (i < vec.size())</code> with int i negative is false — <code>.size()</code> is unsigned. −1 becomes 4 294 967 295.</div>
+<div class="gotcha"><strong>Assuming KB = 1024.</strong> Storage and marketing use 10³ (KB/GB); memory uses 2¹⁰ (KiB/GiB). A "12 GB" GPU shows ~11.18 GiB. Bandwidth specs use GB = 10⁹ — mixing them makes your roofline math ~7% wrong.</div>
+<div class="gotcha"><strong><code>x & (n−1)</code> with non-power-of-two n.</strong> The trick silently computes garbage for n = 100. Guard it or assert <code>(n & (n−1)) == 0</code> (that expression is the power-of-two test).</div>
+<div class="gotcha"><strong>Trusting Python habits in C.</strong> Python's <code>%</code> returns non-negative for positive divisors; C's <code>%</code> can return negative (−7 % 4 == −3 in C, but 1 in Python). Index math ported naively breaks.</div>
+
+<h2>Scenario — the 3-billion-element bug hunt</h2>
+<p>Your team's embedding pipeline processes a 3.2-billion-row tensor on an H100. The kernel works flawlessly in every test (test data: 100 M rows) but in production, monitoring shows a few thousand corrupted embeddings per run, always in the back half of the tensor. A junior engineer blames "GPU memory errors" and requests ECC audits. You look at the kernel instead: <code>int idx = blockIdx.x * blockDim.x + threadIdx.x</code>. With blockDim 256, any blockIdx above 8 388 607 pushes the multiply past 2³¹ — signed overflow, UB, and in practice a negative index that wraps writes into someone else's rows. The fix is one cast: <code>(size_t)blockIdx.x * blockDim.x + threadIdx.x</code>, plus a repo-wide grep for the pattern (it appears 14 more times) and a lint rule banning 32-bit global index math. Cost of the bug: three weeks of corrupted production data. Cost of the fix: 8 characters. The math in this lesson is cheap; not knowing it is not.</p>
+
+<h2>Practice</h2>
+<details><summary>1. Convert 1000 to binary and hex by hand; verify by summing weights.</summary><div class="body">1000 = 512+256+128+64+32+8 → <code>1111101000₂</code>. Nibbles: 11 1110 1000 → 0x3E8. Check: 3×256 + 14×16 + 8 = 768+224+8 = 1000 ✓.</div></details>
+<details><summary>2. What are the largest and smallest values of int16_t, and what is 32767 + 1 in it?</summary><div class="body">Range −32 768 … 32 767 (−2¹⁵ … 2¹⁵−1). 32767+1 is signed overflow: UB in C/CUDA; the bit pattern you'd typically observe is 0x8000 = −32 768. In NumPy int16 it wraps to −32768 by definition.</div></details>
+<details><summary>3. Why does 0x7f8a3c001200 & 0xFF extract the low byte? What is it here?</summary><div class="body">0xFF is eight 1-bits; AND keeps only those positions. Low byte = 0x00 = 0. (The next byte, <code>(addr >> 8) & 0xFF</code>, is 0x12.)</div></details>
+<details><summary>4. Your buffer needs to start at a 128-byte boundary. Write the expression that rounds an address up, and explain each part.</summary><div class="body"><code>(addr + 127) & ~(size_t)127</code>. Adding 127 pushes any non-aligned address past the next boundary without moving aligned ones past theirs; <code>~127</code> is a mask with the low 7 bits clear; AND-ing floors to a multiple of 128. Works because 128 = 2⁷.</div></details>
+<details><summary>5. A colleague writes <code>if (threadIdx.x - 1 < n)</code> intending "all but thread 0". threadIdx.x is unsigned. What actually happens for thread 0?</summary><div class="body">0 − 1 in unsigned 32-bit wraps to 4 294 967 295, which is not < n, so thread 0 is excluded — it "works," but by accident and unreadably; for thread 0 the test is false for the wrong reason. If n were compared differently or the expression reused, the wrap becomes a live bug. Write <code>if (threadIdx.x >= 1 && threadIdx.x - 1 < n)</code> or restructure.</div></details>
+<details><summary>6. How many bits do you need to index every byte of a 24 GB GPU? Every float?</summary><div class="body">24 GB ≈ 24×2³⁰ = 1.5×2³⁴ bytes? Precisely: 24×2³⁰ = 3×2³³ ≈ 2³⁴·⁵⁸ → needs 35 bits for bytes. Floats: /4 → 33 bits. Both exceed 32 bits — int32 indexing cannot even address one modern GPU's memory. size_t or int64_t, always, for byte offsets.</div></details>
+<details><summary>7. Design: you're packing three values into one uint32 — a 12-bit row, a 12-bit col, an 8-bit flag. Write the pack and unpack expressions and state the maximum row/col this supports.</summary><div class="body"><code>packed = (row << 20) | (col << 8) | flag</code> — row in bits 20–31, col in bits 8–19, flag in 0–7. Unpack: <code>row = packed >> 20;</code> <code>col = (packed >> 8) & 0xFFF;</code> <code>flag = packed & 0xFF;</code>. Max row/col = 2¹² − 1 = 4095; storing 4096 silently corrupts its neighbor field — assert before packing. This exact pattern (bit-packed keys) shows up in GPU sorting and hashing pipelines.</div></details>
+
+<div class="pager">
+  <a href="../curriculum.html">← Curriculum</a>
+  <a href="lesson-02.html">Next: Algebra as computation →</a>
+</div>
+<div class="footer">GPU Mastery · Module 1 · Lesson 1 — works offline · progress saved in your browser</div>
+</div>
+<script src="../assets/diagrams.js"></script>
+<script src="../assets/app.js"></script>
+</body>
+</html>

@@ -1,0 +1,174 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>4.6 The Host–Device Bridge — GPU Mastery</title>
+<link rel="stylesheet" href="../assets/style.css">
+</head>
+<body data-lesson="m4l6">
+<nav><div class="inner">
+  <a class="logo" href="../index.html">GPU<span>Mastery</span></a>
+  <a class="item" href="../index.html">Home</a>
+  <a class="item on" href="../curriculum.html">Curriculum</a>
+  <a class="item" href="../labs.html">Labs</a>
+  <a class="item" href="../setup.html">Lab setup</a>
+  <a class="item" href="../prompt.html">Generator prompt</a>
+</div></nav>
+<div class="wrap">
+
+<div class="lesson-top">
+  <div><span class="badge">Module 4 · Lesson 6</span><span class="badge dim">≈ 2–3 h</span></div>
+  <button id="donebtn" class="donebtn">Mark lesson complete</button>
+</div>
+<h1>The Host–Device Bridge — transfer economics & the art of not transferring</h1>
+<p class="lead">The fastest GPU code is worthless if the data spends its life on a 64 GB/s bridge between two multi-terabyte islands. This lesson prices the bridge, teaches the three tolls (latency, pinning, direction), and installs the discipline that shapes every production GPU system: <em>data goes up once, stays, and only answers come down.</em></p>
+
+<h2>Concept</h2>
+
+<h3>The topology: read the widths</h3>
+<div class="diagram" data-diagram="m4l6-topology" data-caption="8 TB/s at home, 64 GB/s to visit — a 125× cliff. NVLink (1.8 TB/s) is the GPUs' private ferry."></div>
+<p>PCIe gen5 x16 moves ~64 GB/s each way (gen6 doubles it on Rubin-era platforms; still a cliff). The number to internalize as a <em>ratio</em>: HBM is <strong>~125× wider</strong> than the bridge. Anything computed per-byte-shipped must clear that bar or the GPU idles — which is M1 L3's arithmetic-intensity logic with PCIe as the denominator:</p>
+<pre><code>PCIe balance ≈ peak FLOP/s ÷ 64 GB/s:
+  RTX 5090 fp32: 104.8 TF / 64 GB/s ≈ 1,640 FLOPs per shipped byte (!)
+  read as: a byte crossing the bridge must be USED ~1,600 times (or enable
+  work that is) before the trip breaks even against just computing on CPU</code></pre>
+
+<h3>Transfer economics: the three regimes</h3>
+<div class="diagram" data-diagram="m4l6-breakeven" data-caption="saxpy: never ship. matmul 4096: borderline. matmul 16384: the trip pays. Reuse decides."></div>
+<pre><code>T_total = T_up + T_kernel + T_down          — naive, serial (the 5.3 starter shape)
+ship-it test:  FLOPs/byte-shipped  vs  PCIe balance (~1,600 fp32)
+  saxpy:    0.17 FLOP/B   → 10,000× short: NEVER ship for one saxpy
+  matmul n: n/6 FLOP/B    → breaks even near n ≈ 10,000 for ONE multiply…
+  …but the REAL answer is the third column: keep operands RESIDENT and the
+  question dissolves — ship weights once, run 10,000 kernels against them.</code></pre>
+<p>That last line is the production answer hiding behind the arithmetic: <strong>residency beats optimization</strong>. Training loops upload the dataset in shards and the model once; inference servers upload weights at boot and stream only tokens. The bridge audit of any real system is one question: <em>what crosses per iteration?</em> If the answer is "activations and gradients: nothing," you're architected correctly (and Track A's whole serving economics follow).</p>
+
+<h3>Latency: the bridge has a toll booth, not just a width</h3>
+<pre><code>each transfer ≈ ~5–10 µs of setup (driver, DMA programming) + bytes/64 GB/s
+1 × 64 MB   = 10 µs + 1000 µs  ≈ 1.01 ms      — width-dominated ✓
+1000 × 64 KB = 1000×(10 + 1) µs ≈ 11 ms       — 11× worse, SAME BYTES ✗
+kernel launches: ~5–10 µs each — the same toll, compute edition</code></pre>
+<p>The M1 L3 latency ladder's lesson, at system scale: <strong>batch the bridge</strong>. Many small copies (or launches) drown in fixed costs — pack small tensors into one buffer, fuse small kernels (Track A9's compiler does this for a living), and never put a per-item copy inside a hot loop (the M2/3.5 allocation-hoisting rule, now with a 10 µs price tag per violation).</p>
+
+<h3>Pinned memory and overlap: making the bridge work in parallel</h3>
+<div class="diagram" data-diagram="m4l6-overlap" data-caption="Chunk + streams: copies hide behind compute. Requires pinned pages and independent chunks."></div>
+<pre><code>pageable host memory: the OS may move it (3.8's pages) → DMA can't target it →
+  the driver secretly copies through a pinned staging buffer: ~half bandwidth
+cudaMallocHost / cudaHostAlloc: PINNED pages — full-speed DMA, and the KEY
+  that unlocks ASYNC: cudaMemcpyAsync + streams = the pipelined timeline above
+the price: pinned pages are stolen from the OS's flexibility — allocate
+  deliberately, reuse (a pinned staging pool), never pin casually at scale</code></pre>
+
+<h2>Worked example</h2>
+<div class="card">
+<p><strong>Task:</strong> Architect the bridge plan for M2 L8's pixelforge running as a GPU service (5.11's real-world frame): 4K frames in, processed frames out, 60 fps target. Numbers first, design second.</p>
+<pre><code>per frame: 3840×2160×3 B ≈ 24.9 MB in + 24.9 MB out ≈ 50 MB crossing
+at 60 fps: 3.0 GB/s of bridge traffic — 4.7% of PCIe gen5. Bridge: NOT the wall ✓
+per-frame budget: 16.7 ms. transfers: 2×(24.9/64000) ≈ 0.8 ms. kernels (4.5
+  floors): ~0.5 ms. Naive serial total: 1.3 ms — fits 12× over. So why do naive
+  ports of exactly this pipeline miss 60 fps in practice? THE TOLLS:
+  · per-op copies (6 stages × up/down = 12 crossings): 12×(10µs + …) and 6×
+    the payload if intermediates bounce — the 4.5 fusion argument, bridge edition
+  · pageable buffers from the framework: halve the 64 → staging jitter
+  · sync copies serializing with kernels: latency stacks instead of hiding
+the design (each fix = one lesson):
+  1. frames STAY on device through all 6 stages (residency §2) — 2 crossings, not 12
+  2. pinned ring buffer of 4 frames each direction (§4) — full-width DMA, zero alloc churn
+  3. three streams: upload N+1 ∥ compute N ∥ download N−1 (the diagram) —
+     bridge time vanishes behind kernels: effective budget = max(0.5, 0.4, 0.4) ms
+  4. batch the tiny per-frame metadata into the frame buffer (§3's toll rule)</code></pre>
+<p><strong>The meta-lesson:</strong> the naive plan already "fit" on paper — the tolls, not the width, are what kill real pipelines, and every fix was arithmetic-first (audit crossings, count tolls, then architect). <strong>Decision made:</strong> we sized the ring buffer at 4 frames from the overlap depth (3 in flight + 1 margin), not a guess — Little's law shopping (4.2 P4) applied to the bridge. This four-point design IS the standard video/inference pipeline architecture; you'll implement it as 5.9's capstone exercise.</p>
+</div>
+
+<h2>Key points</h2>
+<ul class="keypoints">
+<li>PCIe gen5 ≈ 64 GB/s/dir vs HBM's 8 TB/s: a 125× cliff — and a PCIe balance of ~1,600 fp32 FLOPs per shipped byte prices every trip.</li>
+<li>The ship-it test is arithmetic (FLOPs per crossed byte vs balance), but the production answer is residency: upload once, run many, download answers.</li>
+<li>Every transfer and launch carries a ~5–10 µs toll: batch small copies, fuse small kernels, and never toll-pay inside hot loops.</li>
+<li>Pageable memory halves bandwidth via hidden staging; pinned (cudaMallocHost) unlocks full-width DMA AND async overlap — allocate pools deliberately.</li>
+<li>Streams pipeline copy∥compute∥copy: bridge time hides behind kernels exactly as warps hide HBM latency (4.4's trick at system scale).</li>
+<li>Audit any GPU system with one question: what crosses the bridge per iteration? The best answer is "almost nothing."</li>
+</ul>
+
+<h2>Quiz</h2>
+<div class="quiz">
+  <div class="q">1. A data-science teammate benchmarks "GPU vs CPU" for standardizing a 2 GB dataframe (subtract mean, divide std — 2 passes, ~4 FLOPs/byte) INCLUDING transfer both ways, gets "GPU is 1.4× slower," and files a ticket titled 'GPU overrated'. Adjudicate with numbers.</div>
+  <button class="opt">The ticket stands — GPUs lose on real workloads</button>
+  <button class="opt" data-c="1">4 FLOP/B ≪ the ~1,600 PCIe balance: this single-use trip could never pay (transfers ≈ 63 ms round trip vs ~30 ms of CPU compute). The honest benchmark asks the RESIDENT question: if the dataframe lives on-GPU across the whole pipeline (load once → standardize → train), the standardize step costs ~0.5 ms. Both measurements are true; only one matches production</button>
+  <button class="opt">Use pinned memory — that fixes the 1.4×</button>
+  <button class="opt">The GPU needs a bigger batch size</button>
+  <div class="expl">Transfer: 4 GB / 64 GB/s ≈ 63 ms. Kernel at HBM floor: 4 GB/8 TB/s ≈ 0.5 ms. CPU: ~2 GB×2 passes/65 GB/s ≈ 60 ms compute-ish... the bridge trip alone matches the CPU's whole job. Pinning (~2×) can't fix a 400× intensity shortfall — only residency can (§2). The ticket's real title is 'we benchmarked the bridge': the single most common GPU-evaluation error in industry, and you can now dissolve it with three divisions.</div>
+</div>
+<div class="quiz">
+  <div class="q">2. Your inference server uploads each request's 4 KB prompt with a blocking cudaMemcpy, then launches, then downloads 4 KB. Throughput plateaus at ~30k req/s regardless of batch size, GPUs at 20% util. The bridge is at 0.4% width. What's saturated?</div>
+  <button class="opt">PCIe bandwidth — upgrade to gen6</button>
+  <button class="opt" data-c="1">The TOLL BOOTH, not the road: 3 blocking bridge operations × ~10 µs ≈ 30 µs of serialized fixed cost per request ⇒ ~33k req/s ceiling from latency alone. Fixes: batch requests into one copy/launch/copy (amortize the toll), async streams (hide it), or persistent kernels (abolish it)</button>
+  <button class="opt">The GPU is too slow — add a second one</button>
+  <button class="opt">4 KB payloads corrupt DMA alignment</button>
+  <div class="expl">1/(30 µs) ≈ 33k/s — the measured plateau derived from the toll arithmetic (§3), with width irrelevant at these sizes. The three fixes are the standard escalation ladder, and 'batch the bridge' is why every serving framework's first knob is batch size. Diagnosing latency-vs-bandwidth saturation from a throughput plateau + a utilization number is a genuine SRE-of-ML interview question — answered here with M1 L3's ladder and one division.</div>
+</div>
+
+<h2>Exercises</h2>
+<details><summary>Exercise 1 — Bridge audit on paper: for each system, state what crosses per iteration, the regime (width/toll/resident-clean), and the one-line fix if dirty. (a) training: dataset shards prefetched, model resident, but the metrics callback does loss.item() every step; (b) a game engine uploading the full 200 MB scene every frame "to be safe"; (c) batch OCR shipping 10M separate 50 KB images via individual copies; (d) an HPC solver, fields resident, that downloads a 3-scalar residual each of 10⁵ iterations to decide convergence on CPU.</summary><div class="body">
+<p>(a) 4-ish bytes/step — but loss.item() is a SYNC point: it stalls the pipeline (toll + serialization, quiz 2's cousin); fix: accumulate loss on-device, sync every N steps (the 4.5 P6 storm's polite sibling — and PyTorch's async logging idiom exists for exactly this). (b) 12 GB/s of width for data that didn't change: resident-dirty; fix: upload once + delta updates (dirty-region tracking — the M2 L8 provenance mindset applied to buffers). (c) 500 GB total is width-heavy AND 10M tolls ≈ 100+ s of pure setup: double-dirty; fix: pack into ~64 MB batches (toll ÷1000) + pinned ring + overlap → bridge time hides entirely. (d) 10⁵ tolls for 12 bytes each ≈ 1+ s of stalls in a solver that runs milliseconds per iteration; fix: convergence test ON-device, download a flag every 100 iterations (Track B's standard pattern). Four systems, one question — 'what crosses?' — and every fix was batch/reside/overlap. The audit takes five minutes and routinely finds 10× in real codebases.</p>
+</div></details>
+<details><summary>Exercise 2 — Overlap arithmetic: a pipeline processes 1 GB in chunks — upload U=16 ms total, kernels K=24 ms total, download D=16 ms total. Compute wall time for: (a) serial; (b) perfectly pipelined with N=8 chunks, 3 streams; (c) the same but kernels are only K=8 ms (memory-light kernel). Derive the general rule for when overlap stops helping, and connect it to a 4.4 concept by name.</summary><div class="body">
+<p>(a) 16+24+16 = 56 ms. (b) steady state is governed by the SLOWEST stage: wall ≈ max-stage + (other stages' first/last chunks) = 24 + 16/8 + 16/8 = 28 ms — the copies vanish under compute except one chunk's worth of fill/drain (the diagram's T + 2·T/N shape, generalized to unequal stages: max + fill + drain). (c) slowest stage is now the 16 ms uploads: wall ≈ 16 + 8/8 + 16/8 = 19 ms — compute hides under COPIES now; the bridge is the bottleneck and further kernel optimization is worthless until the traffic shrinks (fusion/residency, not faster math). General rule: pipelining reduces wall time to ≈ the max stage; optimizing any NON-max stage buys nothing (a pipeline-shaped Amdahl — 4.3's law wearing stream clothes). The 4.4 concept by name: LATENCY HIDING — same trick, warp-scale wait→other warps' work becomes chunk-scale copy→other chunks' kernels. One idea, three scales (warps, streams, and — in Track A7 — nodes overlapping gradient communication with backprop).</p>
+</div></details>
+
+<hr>
+<h1>Go deeper — the complete guide</h1>
+<p>NVLink and the multi-GPU fabric, GPUDirect's family, unified memory's bridge behavior, batch-size economics as a bridge phenomenon, and the audit checklist that becomes 5.9/5.10 practice.</p>
+
+<h2>1. NVLink: the ferry between islands</h2>
+<p>GPU↔GPU NVLink 5 moves 1.8 TB/s per GPU (28× the PCIe bridge) — and NVSwitch fabrics wire 8–72 GPUs into an all-to-all island where "another GPU's HBM" is closer than the host by an order of magnitude. Consequences that define Track A7/B5: tensor-parallel layers exchange activations per-layer (only viable over NVLink-class links), data-parallel all-reduce of gradients rides ring/tree algorithms (M1 L3's staircase, again) whose bandwidth terms you can now price, and topology-awareness (which pairs share a switch) becomes a scheduling input. The consumer note: RTX-class cards dropped NVLink — multi-GPU there means PCIe peer-to-peer, and the economics you just learned say: keep workloads independent per card (data parallel), never chatty.</p>
+
+<h2>2. The GPUDirect family: deleting the middleman</h2>
+<table>
+<tr><th>Variant</th><th>Deletes</th><th>Who cares</th></tr>
+<tr><td>P2P</td><td>host bounce for GPU↔GPU on one root</td><td>multi-GPU single-node (cudaMemcpyPeer)</td></tr>
+<tr><td>RDMA</td><td>host memory from the NIC→GPU path</td><td>multi-node training: NIC DMA's straight into HBM (A7)</td></tr>
+<tr><td>Storage</td><td>the CPU bounce for NVMe→GPU</td><td>data loading at 10s of GB/s (datasets, checkpoints — B7/A10)</td></tr>
+</table>
+<p>One mental model covers all three: DMA engines can target any pinned, mapped memory — GPUDirect is the driver work that lets <em>other devices'</em> DMA target HBM. The staging-buffer tax you learned in §4 (pageable→pinned bounce) is the same tax these delete at datacenter scale.</p>
+
+<h2>3. Unified memory ON the bridge (closing 4.5 §4's loop)</h2>
+<p>Managed memory's page migrations ride this same PCIe: each fault moves a 4 KB–2 MB page at toll+width cost. Now you can price the 4.5 P6 storm exactly: two scalars read per step → two page faults → ~2×(10 µs + 64 KB-ish migration) per step, thousands of steps — seconds of bridge stalls for 16 bytes of information. The general law: <strong>unified memory converts forgotten transfers into silent tolls</strong>; profilers (5.10) show them as "Unified Memory" rows that surprise everyone once. Prefetch hints (cudaMemPrefetchAsync) turn the silent tolls back into planned, overlappable copies — managed memory used WELL is just explicit transfers with better ergonomics.</p>
+
+<h2>4. Batch size: a bridge story wearing an ML costume</h2>
+<pre><code>per-batch cost ≈ toll (copies+launches, ~fixed) + width (bytes) + compute
+throughput(B) ≈ B / (fixed + B·per_item)  → rises, then flattens at the wall
+                                            that binds: bridge width, HBM, or FLOPs
+latency(B)    ≈ the whole batch's time    → grows ~linearly past the knee</code></pre>
+<p>The serving trade-off (Track A8's daily bread) is this curve pair: batch until the binding wall, then stop — more batching past saturation buys latency for zero throughput. Your 4.4 §5 wave arithmetic gives the OTHER reason small batches underuse GPUs (partial waves), and quiz 2 gave the toll reason — three mechanisms, one knob, and you can now attribute which is active from utilization + plateau shape. That attribution skill is literally a job.</p>
+
+<h2>5. Gotchas</h2>
+<div class="gotcha"><strong>Benchmarking the bridge and blaming the GPU.</strong> Quiz 1's ticket. Any "GPU vs CPU" number must state what was resident — demand the residency column in every comparison you read (and publish).</div>
+<div class="gotcha"><strong>Hidden syncs.</strong> .item(), printing a device tensor, cudaMemcpy (non-async), cudaDeviceSynchronize in a helper — each drains the pipeline (Ex.1a). Grep for them in hot loops the way 3.4 grepped for strcpy.</div>
+<div class="gotcha"><strong>Casual pinning at scale.</strong> Pinned pages are unswappable: a 100 GB pinned "cache" can wedge a host. Pools, sized deliberately, monitored (the 3.5 arena discipline, host-memory edition).</div>
+<div class="gotcha"><strong>Per-item copies in a loop.</strong> The 10 µs toll × N — Ex.1c's 100 seconds. If a copy sits inside a for-loop, the design review writes itself (M2 L3 hoisting, bridge edition).</div>
+<div class="gotcha"><strong>Overlap that never overlaps.</strong> Streams + pageable memory = the driver serializes through staging silently; streams + one stream = a queue. Verify overlap in the profiler TIMELINE (5.10), never by assumption — the API accepting your calls promises nothing (the 4.5 'measure the distribution' ethic).</div>
+<div class="gotcha"><strong>Optimizing a non-max pipeline stage.</strong> Ex.2c's rule: post-overlap, only the longest stage matters. Kernel-golfing while uploads bind is effort spent below the waterline — profile the timeline FIRST, then aim.</div>
+
+<h2>Scenario — the migration that paid for itself in an afternoon</h2>
+<p>Your team inherits a genomics pipeline: CPU preprocessing → GPU alignment kernel (someone's proud CUDA port, 40× faster than CPU!) → CPU postprocessing, net speedup over all-CPU: a humiliating 1.7×, and the GPU shows 8% utilization. Management's proposal: "buy four more GPUs." Your counter-proposal costs zero dollars and is this lesson executed in order. <strong>Audit (one question):</strong> per-batch crossings = raw reads up (2 GB), aligned records down (1.8 GB), plus — the flame graph's shame — 14 small metadata syncs per batch (Ex.1's hidden-sync grep finds .item()-equivalents in the wrapper). <strong>Arithmetic:</strong> bridge 3.8 GB ≈ 60 ms + 14 tolls ≈ serialized against a 45 ms kernel: Amdahl-of-the-pipeline says 1.7× is exactly right (the model EXPLAINS the humiliation — always the first deliverable). <strong>Fixes, in lesson order:</strong> preprocessing's filter step moves on-device (it was 6 FLOP/byte of trivial masking — M2 L5 code ports in an hour), halving uploads; postprocessing's dedup moves on-device (5.8-shaped), downloads shrink to 200 MB of survivors; pinned double-buffer + 3 streams overlaps the remainder (Ex.2's max-stage math predicts 47 ms/batch); the 14 syncs become one batched flag. <strong>Measured:</strong> 11.3× end-to-end, GPU at 71%, zero new hardware — and the four-GPU purchase order is quietly replaced by your one-page audit, which ends with the sentence this lesson exists to install: <em>"The kernel was never slow; the data was homesick."</em></p>
+
+<h2>Practice</h2>
+<details><summary>1. Toll-vs-width drills: compute effective bandwidth for (a) one 256 MB copy; (b) 4096 × 64 KB copies; (c) 4096 × 64 KB packed into one copy + one 10 µs pack kernel. (10 µs toll, 64 GB/s width.)</summary><div class="body">(a) 10 µs + 4000 µs → 63.8 GB/s (99.7%). (b) 4096×(10+1) µs = 45 ms → 5.8 GB/s (9%!). (c) 10 + 10 + 4000 µs → 63.7 GB/s. The pack kernel's 10 µs bought back 41 ms — a 4000:1 return, and the reason 'gather-then-copy' beats 'copy-per-item' in every data loader ever written (M2 L7's batching, priced).</div></details>
+<details><summary>2. Your training step: forward+backward 38 ms on-device; the data loader delivers batches via pageable copies taking 21 ms. Compute step time serial vs overlapped (pinned+prefetch stream), and the utilization ceiling both ways. What loader change does every framework's docs recommend, and which two words of this lesson explain WHY it works?</summary><div class="body">Serial: 59 ms/step, GPU busy 38/59 = 64%. Overlapped: batch N+1 uploads under batch N's compute → step ≈ max(38, 21) = 38 ms, utilization → ~100% (fill/drain amortized over an epoch). The docs' change: pin_memory=True + prefetch (num_workers>0) — the two words: PINNED (full-width, async-capable DMA — §4) and OVERLAP (Ex.2's max-stage law). You've derived why a PyTorch flag exists from silicon up — the course's definition of understanding.</div></details>
+<details><summary>3. Price gen6: the worked example's 4K service on PCIe gen6 (128 GB/s) — which of its four fixes become unnecessary, which stay? Generalize: which class of bridge problems does MORE WIDTH solve, and which class is immune?</summary><div class="body">Width doubles: the 0.8 ms transfer halves — but fixes 1 (residency), 3 (overlap), 4 (batching tolls) all address TOLLS and CROSSING COUNT, which gen6 doesn't touch (tolls are latency; residency is architecture). Only fix 2's urgency (pinning for width) softens slightly. Immune class: toll-bound (quiz 2), sync-bound (Ex.1a), crossing-count-bound (Ex.1b) — i.e., most real problems. Width solves exactly one thing: width-bound bulk streams. 'Faster interconnect' is the most-purchased non-solution in GPU computing; you now audit before buying.</div></details>
+<details><summary>4. NVLink pricing: an 8-GPU node all-reduces 14 GB of gradients per step (7B model, bf16 — M1 L8/M2 economics). Ring all-reduce moves ~2×(N−1)/N × bytes per GPU. Time it over NVLink 5 (1.8 TB/s) vs PCIe P2P (64 GB/s), and state at what compute-per-step the PCIe version stops hiding under backprop (Ex.2's law).</summary><div class="body">Per-GPU traffic: 2×7/8×14 GB ≈ 24.5 GB. NVLink: 24.5/1800 ≈ 14 ms. PCIe: 24.5/64 ≈ 380 ms. Overlap law: communication hides if ≤ backprop time — NVLink needs ≥14 ms of backward (any real model ✓); PCIe needs ≥380 ms (only huge models/batches, and even then fill/drain bites). This one division is why NVLink-less multi-GPU training is data-parallel-with-gritted-teeth, why DGX boxes exist, and why A7 spends a lesson on overlap-aware bucketing. (Rubin-era NVLink scales further; the RATIO logic is what you keep.)</div></details>
+<details><summary>5. Hidden-sync hunt: list five innocuous-looking lines (framework or CUDA) that force a pipeline drain, and the async-respecting replacement for each. (Ex.1a started the list.)</summary><div class="body">(1) loss.item() / any .cpu() on a hot tensor → accumulate on-device, sync every N steps. (2) print(tensor) → print a detached copy fetched asynchronously at epoch end. (3) cudaMemcpy (sync flavor) → cudaMemcpyAsync + stream + event. (4) cudaDeviceSynchronize() 'just to be safe' in a utility → events (cudaEventSynchronize on the one thing you need) — sync the DEPENDENCY, not the world. (5) allocating in the loop (cudaMalloc syncs!) → pools/arenas (3.5 §4's pattern, now with a sync-cost justification). The grep list goes in CONVENTIONS.md next to strcpy — same energy, new layer.</div></details>
+<details><summary>6. The residency ledger: for 5.11's planned matmul-service capstone (weights 2 GB, inputs 8 MB/req, outputs 2 MB/req, 200 req/s), write the ledger — what ships once, what ships per-request, bridge utilization, and the toll budget at 3 crossings/request. Verdict: which of this lesson's tools does it actually need?</summary><div class="body">Once: 2 GB weights (31 ms, amortized to zero). Per-second: 200×10 MB = 2 GB/s = 3% of width ✓. Tolls: 600 crossings/s × 10 µs = 6 ms/s = 0.6% ✗ negligible. Verdict: residency (already in the design) + pinned buffers suffice; streams/overlap are OPTIONAL polish (transfers are 3% — Ex.2's law says optimizing them buys ~nothing until kernels get 30× faster). The discipline demonstrated: the audit can conclude 'do less' — knowing when the bridge ISN'T the problem is the same skill as knowing when it is (4.2 P3's optimization-domain rule, final form).</div></details>
+<details><summary>7. Design: the "Bridge Review" section for the course's Scaling Report template (4.3 P7) — required rows: crossings-per-iteration table (what/bytes/direction/sync?), toll count & budget, width utilization, overlap timeline evidence (profiler screenshot slot), residency justification for every recurring upload, and the two red-flag greps (hidden syncs, in-loop copies). State which failure from this lesson each row was written to catch, and why this section comes BEFORE kernel optimization in the report order.</summary><div class="body">Rows→failures: crossings table → quiz-1 bridge-benchmarks and Ex.1b's redundant uploads; toll budget → quiz-2 plateaus; width row → the rare genuine width-bound case (and P3's 'don't buy gen6' evidence); timeline slot → the overlap-that-never-overlapped gotcha (claims need pictures); residency justification → 'what crosses and WHY' as a standing challenge (the audit's one question, institutionalized); greps → Ex.1a/P5's silent drains. Ordered first because Ex.2c's law makes it a gate: until the bridge stages stop being the max (or are hidden), kernel numbers are unactionable — the report structure enforces looking at the system before the silicon, which is this lesson's entire thesis and, not coincidentally, the difference between the two engineers in this lesson's scenario.</div></details>
+
+<div class="pager">
+  <a href="lesson-05.html">← The GPU memory system</a>
+  <a href="lesson-07.html">Next: Spec sheets & the roofline →</a>
+</div>
+<div class="footer">GPU Mastery · Module 4 · Lesson 6 — works offline · progress saved in your browser</div>
+</div>
+<script src="../assets/diagrams4.js"></script>
+<script src="../assets/app.js"></script>
+</body>
+</html>

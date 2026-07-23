@@ -1,0 +1,220 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>3.9 Capstone: CPU Matmul & the Honest Ladder — GPU Mastery</title>
+<link rel="stylesheet" href="../assets/style.css">
+</head>
+<body data-lesson="m3l9">
+<nav><div class="inner">
+  <a class="logo" href="../index.html">GPU<span>Mastery</span></a>
+  <a class="item" href="../index.html">Home</a>
+  <a class="item on" href="../curriculum.html">Curriculum</a>
+  <a class="item" href="../labs.html">Labs</a>
+  <a class="item" href="../setup.html">Lab setup</a>
+  <a class="item" href="../prompt.html">Generator prompt</a>
+</div></nav>
+<div class="wrap">
+
+<div class="lesson-top">
+  <div><span class="badge">Module 3 · Lesson 9</span><span class="badge dim">≈ 5–8 h · capstone project</span></div>
+  <button id="donebtn" class="donebtn">Mark lesson complete</button>
+</div>
+<h1>Capstone — CPU Matmul & the Honest Ladder</h1>
+<p class="lead">Everything in this module converges: build matmul in C, prove it correct against your own oracle chain (hand → Python → NumPy → C), then climb the performance ladder — loop order, blocking, all cores — measuring honestly at every rung. The number you end with is <em>the baseline the GPU must beat</em> in 5.11, and the method you use is the method for the rest of your career.</p>
+
+<h2>The project brief</h2>
+<div class="card">
+<p><strong>Build <code>cpu-matmul</code>:</strong> the 3.6 P7 design, realized — matmul.h with swappable implementations (naive, ikj, blocked, omp), a fixture-driven test suite, a statistics-honest bench harness, and a README whose numbers you can defend line by line. Acceptance = the stranger test (M2 L7): clone → <code>make test</code> green → <code>make bench</code> → a GFLOP/s table appears with medians and spreads.</p>
+<p><strong>The chain of trust:</strong> M1 L6 hand-computed [[50,32],[122,77]] → M2 L4's Python oracle verified it → M2 L5's <code>A @ B</code> verified against that → tonight, NumPy generates binary fixtures → your C verifies against them within a budgeted tolerance. Four independent implementations agreeing is how numerical software earns trust — no single link is taken on faith.</p>
+</div>
+
+<h3>Stage 0 — repo + fixtures (the bridge from Module 2)</h3>
+<pre><code>cpu-matmul/
+├── Makefile                 # 3.6 §4's industrial 20-liner: all/test/bench/asan/clean
+├── types.h                  # 3.2 P7's foundation
+├── timer.h/.c               # CLOCK_MONOTONIC now_ms (3.6)
+├── matmul.h                 # ONE contract, four deliveries:
+│                            #   void matmul_naive/ikj/blocked/omp(
+│                            #     const float *A, const float *B, float *C,
+│                            #     size_t M, size_t N, size_t K);
+├── matmul_*.c  bench.c  test.c
+└── tools/make_fixtures.py   # NumPy writes A.npy-style raw f32 + C_expected
+
+# make_fixtures.py (M2 skills, 12 lines): seeded rng (M1 L7!), sizes
+# {2×3·3×2 (the M1 fixture!), 64³, 513×257×129 (RAGGED — non-multiples
+# catch tiling bugs), 1024³}; writes raw float32 + a sizes.txt manifest.</code></pre>
+<div class="note"><strong>Why ragged sizes are in the fixtures:</strong> every tiling/blocking bug in history lives at the edges where dimensions don't divide evenly (M1 L2's ceiling division exists BECAUSE of this). A test suite of round powers of two certifies nothing — 513×257×129 is deliberately hostile. This one habit separates real numerical test suites from demos.</div>
+
+<h3>Stage 1 — naive, correct, measured</h3>
+<pre><code>void matmul_naive(const float *A, const float *B, float *C,
+                  size_t M, size_t N, size_t K) {
+    for (size_t i = 0; i &lt; M; i++)
+        for (size_t j = 0; j &lt; N; j++) {
+            float s = 0.0f;
+            for (size_t k = 0; k &lt; K; k++)
+                s += A[i*K + k] * B[k*N + j];      /* IDX inline: i,k and k,j     */
+            C[i*N + j] = s;
+        }
+}
+/* test.c: exact match on the 2×3 fixture (integer values ≤ 2²⁴: fp32 exact —     */
+/* M1 L8); random fixtures: |diff| ≤ rtol·|ref| + atol with rtol = K·ε·8 headroom  */
+/* (sequential sum error grows ~K·ε — M1 L8 §3; K=1024 → rtol ≈ 1e-3... compute   */
+/* YOURS in a comment — the M2 L6 budget discipline, not copy-paste)              */</code></pre>
+
+<h3>Stage 2 — the harness (M1 L7, compiled once and for all)</h3>
+<pre><code>/* bench.c core loop — every rule has a lesson behind it:                          */
+for (int w = 0; w &lt; 3; w++) fn(A, B, C, M, N, K);        /* warmup (M1 L7)        */
+for (int r = 0; r &lt; reps; r++) {
+    double t0 = now_ms();
+    fn(A, B, C, M, N, K);
+    times[r] = now_ms() - t0;
+    sink += C[(size_t)r % (M*N)];                        /* CONSUME the output!    */
+}                                                        /* (3.1 P6: unused =      */
+qsort(times, reps, sizeof *times, cmp_d);                /*  deleted benchmark)    */
+double med = times[reps/2], iqr = times[3*reps/4] - times[reps/4];
+double gflops = 2.0 * M * N * K / (med * 1e-3) / 1e9;    /* 2mnk (M1 L6) — the     */
+printf("%-10s %7.2f ms  ±%5.2f  %7.2f GFLOP/s\n", ...);  /* honest currency        */</code></pre>
+
+<h3>Stage 3 — the ladder (each rung is a lesson cashing out)</h3>
+<div class="diagram" data-diagram="m3l9-loops" data-caption="Rung 1: reorder loops. Same FLOPs, stride-1 walks, 2–10×. The compiler could not do this for you (M1 L8 forbids reassociation)."></div>
+<pre><code>/* ikj: hoist A[i][k], stream B and C rows — every access stride-1                */
+for (size_t i = 0; i &lt; M; i++) {
+    for (size_t k = 0; k &lt; K; k++) {
+        const float a = A[i*K + k];               /* one load, N reuses           */
+        for (size_t j = 0; j &lt; N; j++)
+            C[i*N + j] += a * B[k*N + j];         /* two streams, both forward    */
+    }
+}   /* note: C must be zeroed first — a CONTRACT change; document it or memset    */</code></pre>
+<div class="diagram" data-diagram="m3l9-blocked" data-caption="Rung 2: tile so the working set lives in cache — arithmetic intensity engineered upward (M1 L3 §4)."></div>
+<pre><code>/* blocked: 64×64×64 tiles (three ceil-divided loops outside — M1 L2 — with       */
+/* min() edges for ragged sizes), ikj inside each tile. Tune T ∈ {32,64,128}      */
+/* and MEASURE — the best T is a fact about YOUR cache, not a constant to copy.    */
+
+/* omp: one line on the blocked version's outer tile-row loop:                     */
+#pragma omp parallel for schedule(static)
+/* build: -fopenmp · run: OMP_NUM_THREADS=8 ./bench · threads collaborate on       */
+/* DISJOINT C tiles — no shared writes, no races (M2 L3's purity dividend,         */
+/* and the exact shape of 5.5's block-per-tile kernel)                             */</code></pre>
+<div class="diagram" data-diagram="m3l9-ladder" data-caption="The destination: an honest table like this, with YOUR numbers, spreads included."></div>
+
+<h2>Worked example — the report that makes it real</h2>
+<div class="card">
+<p><strong>Task:</strong> the README's results section — the artifact a reviewer (or interviewer) actually reads. Representative laptop numbers (8-core, ~2021-class; <em>yours will differ — that's the point</em>):</p>
+<pre><code>## Results — 1024×1024×1024 fp32, median of 15 (IQR), gcc 13 -O3 -march=native
+
+| kernel    | time (ms)      | GFLOP/s | speedup | notes                          |
+|-----------|----------------|---------|---------|--------------------------------|
+| naive ijk | 2340   (±25)   |   0.9   |  1.0×   | B column-walk: cache-hostile   |
+| ikj       |  310   (±6)    |   6.9   |  7.5×   | all stride-1 (3.9 §3)          |
+| blocked64 |  148   (±4)    |  14.5   | 15.8×   | tile sweep: 32→13.1, 128→13.8  |
+| + omp (8) |   26.5 (±1.5)  |  81.0   | 88×     | scaling 5.6×/8 threads (see §) |
+| OpenBLAS  |    9.8 (±0.3)  |  219    | 239×    | the pros' microkernels         |
+
+Peak-fraction audit (M1 L3 method): laptop ≈ 8c × 3.2 GHz × 2 FMA × 8 lanes
+≈ 410 GFLOP/s theoretical → we reach 20%, OpenBLAS 53%. The remaining 3–10×
+is SIMD microkernel territory (out of scope, honestly labeled — see LIMITS.md).
+Scaling note: 5.6× on 8 threads = memory bandwidth saturating before cores do
+(M1 L3's ladder: cores multiplied, DRAM didn't) — Amdahl meets bandwidth (M4).</code></pre>
+<p><strong>Why this table is the deliverable:</strong> every column is defensible — medians with spread (M1 L7), speedups against a named baseline, the tile-sweep evidence for the 64 choice, the peak-fraction honesty (20% stated, not hidden), and the ceiling named (SIMD, out of scope) rather than hand-waved. <strong>Decision made:</strong> OpenBLAS is IN the table on purpose — showing a 3–10× gap to the pros is not weakness, it's calibration (and motivation: 5.11 runs this exact play against cuBLAS, where your blocked kernel's ideas — tiling, reuse — are the SAME ideas, at 100× the parallelism). The final row of your career-long ladder is always someone's tuned library; knowing your distance to it is the skill.</p>
+</div>
+
+<h2>Key points</h2>
+<ul class="keypoints">
+<li>The chain of trust — hand → Python oracle → NumPy → C fixtures — plus ragged sizes and budgeted tolerances is what "verified" means for numerical code.</li>
+<li>Benchmarks: warmup, ≥15 reps, median±IQR, consume every output, one flag-set per table — or the numbers are fiction (M1 L7 + 3.1 P6, forever).</li>
+<li>Loop order is YOUR job — float non-associativity (M1 L8) forbids the compiler from reordering; ikj's stride-1 walks buy 2–10× for identical FLOPs.</li>
+<li>Blocking engineers arithmetic intensity (M1 L3 §4): tiles that fit cache get reused K/T times — the same idea shared memory hand-implements in 5.5.</li>
+<li>OpenMP on disjoint tiles parallelizes without races (purity's dividend — M2 L3); sub-linear scaling is usually bandwidth saturation, not a bug.</li>
+<li>Report peak-fraction and the distance to a tuned library honestly; naming your ceiling (SIMD microkernels) beats pretending it isn't there.</li>
+</ul>
+
+<h2>Quiz</h2>
+<div class="quiz">
+  <div class="q">1. You test three builds against plain-naive: (a) ikj at -O2, (b) naive at -O3 -ffast-math -march=native, (c) a pairwise tree-sum version (5.8's shape). Which may legally differ from the reference, and which must match bitwise?</div>
+  <button class="opt">All three differ — any code change changes float results</button>
+  <button class="opt">All three match — same math, same answer</button>
+  <button class="opt" data-c="1">(a) matches BITWISE: ikj reorders the loops but each C cell still accumulates its K products in ascending-k order — same sums, same rounding. (b) and (c) may differ within budget: fast-math licenses SIMD reassociation, and the tree changes the addition ORDER structurally (M1 L8 non-associativity)</button>
+  <button class="opt">(a) and (c) differ; (b) matches because flags don't affect math</button>
+  <div class="expl">The subtle one — verified by measurement in this course's own QA: naive/ikj/blocked all sum each cell in ascending k, so they agree to the BIT under default flags (loop order ≠ addition order!). What changes addition order: -ffast-math's vectorized partial sums, explicit tree reductions, and atomics-based parallel sums — those need the K·ε budget (and trees are usually MORE accurate: seq_sum of {1e8, 1.0×8} loses all eight 1.0s to absorption; tree_sum returns 100000008 — M1 L8 §3, demonstrable in 10 lines of C). Knowing WHICH transformations preserve order is what lets you demand bitwise tests where they're valid and budgets where they aren't.</div>
+</div>
+<div class="quiz">
+  <div class="q">2. Adding <code>#pragma omp parallel for</code> to the naive ijk's OUTER loop works fine, but a teammate put it on the INNER k-loop and gets wrong results AND 10× slowdown. Both effects, explained?</div>
+  <button class="opt">Inner loops can't be parallelized in OpenMP</button>
+  <button class="opt" data-c="1">Correctness: all k-iterations write the SAME s/C cell — a data race (M2 L3's hidden-state disaster, live). Speed: a fork/join barrier per (i,j) pair = millions of synchronizations for microseconds of work each</button>
+  <button class="opt">The pragma needs schedule(dynamic)</button>
+  <button class="opt">k loops have loop-carried FMA dependencies that OpenMP serializes automatically</button>
+  <div class="expl">Parallelize where iterations are INDEPENDENT (i or j: different C cells — purity!) and where the work-per-fork amortizes the ~microsecond fork/join cost (M1 L3 estimation: 1M forks × 1µs = seconds of pure overhead). The k-loop is a REDUCTION — parallelizing it correctly needs reduction machinery (omp reduction clause, or 5.8's tree), not a bare pragma. 'Which loop gets the pragma' is the CPU rehearsal of 'which loop becomes the grid' (3.4 Ex.1) — the same design instinct, third appearance.</div>
+</div>
+
+<h2>Exercises</h2>
+<details><summary>Exercise 1 — The tile sweep with evidence: run blocked with T ∈ {16, 32, 64, 128, 256} on 1024³, produce the table (median±IQR each), and ANNOTATE it with cache arithmetic: working set per tile-step = 3·T²·4 bytes vs your L1 (~48 KB) and L2 (~1.25 MB per core — check yours: lscpu / sysctl). Where does the math predict the knee, and where IS it?</summary><div class="body">
+<pre><code>T     working set   vs cache        typical result (yours WILL differ)
+16    3 KB          « L1            12.1 GFLOP/s  (loop overhead dominates)
+32    12 KB         fits L1         13.9
+64    48 KB         ≈ L1 boundary   14.5   ← knee usually here-ish
+128   196 KB        L2 territory    13.8
+256   786 KB        deep L2         11.2   (spill + TLB pressure)</code></pre>
+<p>Prediction: best T where 3T²·4 ≈ L1-ish (T≈64 for 48 KB) — and the measured knee usually agrees within one step, but NOT exactly (prefetchers, associativity, TLBs — M4's territory peeking through). The deliverable habit: the table carries BOTH the prediction arithmetic and the measurement, and the discrepancy gets a sentence, not silence (M2 L5 Ex.2's rule: the gap is where the learning lives). In 5.5 you'll rerun this sweep with shared-memory tile sizes against occupancy limits — same experiment, same discipline, new hardware.</p>
+</div></details>
+<details><summary>Exercise 2 — Falsify your own harness (the paranoia pass): three sabotage tests — (a) benchmark an empty function: what SHOULD the harness report, and what does yours do? (b) remove the sink consumption at -O3: how far does the "speedup" inflate? (c) run the full bench twice back-to-back and compare medians: what drift is acceptable before you blame thermals/turbo (and what's the fix for benchmarking on laptops)?</summary><div class="body">
+<p>(a) Empty function: should report ~timer-resolution noise (µs-scale medians with IQR ≈ median — i.e., "this measurement is floor"); a harness printing a confident 0.00 ms ±0.00 is LYING about its resolution — add a resolution self-check that warns when median &lt; 50× clock granularity (clock_getres tells you). (b) Without the sink, -O3 may delete the whole call (3.1 P6): "matmul" at 0.001 ms = infinite GFLOP/s — if your speedup column ever shows this, the harness caught itself; keep (b) as a PERMANENT negative test (make test includes a "sink-removal canary" that asserts the empty-vs-real ratio is huge). (c) Back-to-back drift of 2–5% is normal (turbo states, thermals — M1 L7's variance made of silicon); &gt;10% on a laptop means throttling — fixes: performance governor, cooldown sleeps between kernels, longer warmup, and REPORTING the environment (the M2 L7 provenance dict grows cpu-governor and temperature fields). A harness you've actively tried to fool is the only kind whose numbers you may put in a README — this exercise IS the difference between benchmarking and wishful timing.</p>
+</div></details>
+
+<hr>
+<h1>Go deeper — finishing touches and the bridge to Module 4/5</h1>
+
+<h2>1. restrict, -march=native, and the last legal hints</h2>
+<pre><code>void saxpy(size_t n, float a, const float *restrict x, float *restrict y);
+/* restrict: "these don't alias" — YOUR promise (3.3 §4's aliasing, inverted:      */
+/* you grant the license). Compiler can now vectorize without runtime overlap      */
+/* checks. LIE and it's UB — the 3.2 contract logic, with you as the author.       */
+-march=native      /* use THIS cpu's full SIMD (AVX2/AVX-512) — table footnote     */
+                   /* required: binaries stop being portable (3.6's flags-are-     */
+                   /* part-of-the-build law; bench tables must name their flags)   */
+-O3 vs -O2         /* measure, don't assume: on matmul usually +10-30% via          */
+                   /* vectorization; occasionally a regression — one more row       */</code></pre>
+
+<h2>2. Reading perf's verdict (the profiler preview)</h2>
+<pre><code>$ perf stat -e cache-misses,instructions ./bench naive
+naive:   IPC 0.4,  cache-miss rate high     ← memory-bound: the B column-walk
+$ perf stat ... ./bench blocked
+blocked: IPC 2.1,  misses ↓ 20×             ← compute-ish: blocking WORKED — the
+                                               diagram's claim, instrumented</code></pre>
+<p>One command, and the ladder's WHY becomes measured fact instead of narrative: naive stalls on memory (low instructions-per-cycle), blocked computes (high IPC, misses collapsed). This is the profiling loop — <em>measure, hypothesize structurally, change one thing, re-measure</em> — that 5.10 runs with Nsight on GPUs, identical epistemology, fancier dashboards. If perf is available (Linux), spend the twenty minutes; the habit transfers whole.</p>
+
+<h2>3. What OpenBLAS knows that you now almost do</h2>
+<p>The remaining 3–10×: <strong>SIMD microkernels</strong> — the innermost tile computed in hand-scheduled AVX registers (8–16 FMAs in flight, register-blocked 6×16 sub-tiles), <strong>packing</strong> — copying tiles into contiguous scratch first so the microkernel reads perfectly-strided data (a deliberate extra copy that PAYS — the same counterintuitive trade as GPU shared-memory staging in 5.5), and <strong>per-CPU dispatch</strong> — selecting kernels per microarchitecture at runtime. None of it is magic; all of it is this lesson's ideas pushed to the register level. You could learn it (BLIS's papers are readable with your current tools); the course routes that energy to the GPU instead, where the same three ideas — vector width, staging, occupancy — are 5.5–5.11's entire arc. LIMITS.md says exactly this, in three sentences, which is what "honestly labeled" means.</p>
+
+<h2>4. Gotchas</h2>
+<div class="gotcha"><strong>Benchmarking the wrong build.</strong> The asan objects linked into bench (3.6 P6's collision) → all numbers 2× slow, conclusions inverted. The bench target depends on a clean non-sanitized build BY MAKEFILE RULE, and the table names its flags.</div>
+<div class="gotcha"><strong>Un-zeroed C in += kernels.</strong> ikj/blocked accumulate into C — garbage in, garbage summed (3.2's uninitialized locals at heap scale). memset in the kernel or document the precondition; the fixtures catch it (integer fixture explodes) IF you run them per-variant — test every implementation, not just naive.</div>
+<div class="gotcha"><strong>Tuning on one size.</strong> T=64 wins at 1024³, loses at 4096³ (L2/L3 dynamics shift). The bench sweeps sizes; conclusions state their domain. "Best" without "at what size" is marketing.</div>
+<div class="gotcha"><strong>Threads × threads.</strong> OpenMP over OpenBLAS-linked code can nest thread pools (8×8 threads thrashing). OMP_NUM_THREADS and OPENBLAS_NUM_THREADS are separate dials; the harness pins both and records them (provenance).</div>
+<div class="gotcha"><strong>First-touch NUMA surprises (big machines).</strong> On multi-socket boxes, memory belongs to the socket that FIRST touches it — init arrays in parallel with the same schedule as compute, or cores starve across the interconnect. Laptop-invisible, server-decisive (M4 will name it).</div>
+<div class="gotcha"><strong>Comparing your fp32 to NumPy's fp64 default.</strong> np.random.rand gives float64; forgetting .astype(np.float32) in make_fixtures makes tolerances mysteriously fail (dtype mismatch — M2 L5's creep, striking the test data itself). Fixtures declare dtype explicitly, always.</div>
+
+<h2>Scenario — the interview that was this module</h2>
+<p>Six months from now, a systems-role interview: "Walk me through making matrix multiply fast on a CPU." You have lived every beat. You start with the contract and the fixtures ("correctness gates performance — I test against a slow oracle with budgeted float tolerances, plus ragged sizes for the tiling edges"), sketch the ijk column-walk on the whiteboard (the m3l9-loops diagram from memory — stride-1 or die), reorder to ikj with the one-load-N-reuses argument, then block it and DERIVE the tile size from their stated L1 (3T²·4 ≤ 48 KB → T≈64, "then I'd sweep and expect the knee within a step"). Asked about parallelism: disjoint output tiles, static schedule, and — unprompted — "scaling will go sub-linear when DRAM saturates; I'd confirm with perf's IPC and miss counters before blaming the scheduler." The interviewer pushes: "Your numbers vs MKL?" — and you give the calibrated answer: "20% of peak for my blocked+OMP; tuned BLAS hits 50–60% via register-blocked SIMD microkernels and tile packing — I know the gap and what buys it." Final question, the trap: "Would results match run-to-run?" — "Bitwise, yes, per build, since my summation order is fixed; across implementations, no — float addition isn't associative, so acceptance is toleranced, budgeted from K·ε." Silence, then: "Most candidates with GPU resumes can't explain the CPU baseline." That's the sentence this capstone purchases. The GPU resume comes next module.</p>
+
+<h2>Practice — extensions</h2>
+<details><summary>1. Transpose-B variant: pack Bᵀ once (one O(N·K) pass), then the naive loop reads BOTH operands stride-1 without full blocking. Measure vs ikj; account for the packing cost at K=64 vs K=4096 (amortization — M1 L2's series thinking); relate to §3's "packing" and to cuBLAS's op(B) transpose flags (M1 L6!).</summary><div class="body">Bᵀ makes the naive dot-product loop read B's "column" as a contiguous row: often lands within ~1.5× of ikj with simpler code. Packing cost O(NK) amortizes over M uses — negligible at 1024³ (one pass vs K reuses; the geometric-amortization argument), meaningful for skinny matrices (M small). This IS §3's packing idea in miniature, and it's WHY BLAS exposes transpose flags: op(B)=T often means "the layout that makes MY kernel stream" — M1 L6's row/col-major schism as a performance lever. GPU echo in 5.5: staging tiles into shared memory transposed to dodge bank conflicts — same trick, third costume.</div></details>
+<details><summary>2. aligned_alloc(64, ...) all three matrices + report alignment in provenance: measure the delta (often 0–5% on CPU with -march=native, occasionally more). Why is the same change worth up to 2× on GPU (5.7 preview), and what does the contrast teach about porting intuitions?</summary><div class="body">CPU: caches + hardware prefetch mostly forgive misalignment (unaligned AVX loads are near-free on modern cores) — small, real, occasionally-zero win; measure, report, don't oversell. GPU: memory transactions are 32-byte sectors served to 32-thread warps in lockstep — misalignment splits every warp load into two transactions: up to 2× traffic, mechanically (M1 L1's masks become throughput). The porting lesson: intuitions don't transfer, MODELS do — "what does one memory transaction serve, and what breaks its efficiency" is the portable question; its ANSWER is hardware-specific. You'll re-derive it per-platform forever (Track D8 makes a living from exactly this).</div></details>
+<details><summary>3. The fp64 ladder: rerun everything in double (the template from 3.7 Ex.2 pays off — one recompile). Predict first: which rungs lose ~2× (bandwidth-bound ones — bytes doubled) vs less (compute-bound ones — CPU fp64 FMA is half-rate, but...). Compare tables; write the three-sentence dtype-policy paragraph for LIMITS.md.</summary><div class="body">Typical: naive/ikj lose ~1.7–2× (streaming rungs: bytes doubled, bandwidth fixed — M1 L3's budget); blocked+omp lose ~2× too on most consumer CPUs (fp64 SIMD lanes halve: 8→4 per register — both walls move together, conveniently). The policy paragraph: "This project benchmarks fp32 as the GPU-relevant dtype; fp64 costs ~2× on CPU (bytes + lanes) and 8–32× on consumer GPUs (unit ratios — 3.2 Ex.2), so dtype is a first-class axis in every table, never a footnote. Fixtures pin dtype explicitly; tolerances are budgeted per-dtype (ε₃₂ vs ε₆₄ — M1 L8)." Three sentences, four lessons compressed — and Track A6's mixed-precision work will quote it back.</div></details>
+<details><summary>4. Strassen, discussed and declined: the recursion multiplies 2×2 blocks with 7 multiplies instead of 8 → O(n^2.807) (M1 L3's exponent lever!). Estimate the crossover vs your blocked kernel given Strassen's ~3× extra additions and worse locality; then justify, in numbers, why production BLAS mostly declines too (numerical stability footnote included — M1 L8).</summary><div class="body">Crossover arithmetic: saving per level = 12.5% of multiplies, cost = extra passes over data (bandwidth! the additions are memory-bound) + lost blocking locality; with your measured GFLOP/s for adds-vs-FMAs, the break-even lands at n ≈ several thousand at BEST for one recursion level — and each level's temporaries eat cache (Ex.1's knee math working against you). Stability: Strassen's error bounds are ~n^log7-ish worse-conditioned (subtractions of products — M1 L8 §2's cancellation surface grows); fp32 at n=4096 can visibly degrade. Verdict for LIMITS.md: "asymptotics win asymptotically; at practical n, constants, locality, and conditioning keep classical blocked GEMM king — we measured, we declined, we documented." The exponent lever (M1 L3) is real; knowing when the constant term vetoes it is the engineering.</div></details>
+<details><summary>5. Ship it as the stranger test demands: fresh clone on a machine you've never used (Colab counts: !git clone + !make test bench), collect every friction point (missing -lm? gcc version? OMP absent on macOS clang?), fix or document each in README's "tested on" matrix. What M2 L7 scenario did you just re-run, and which NEW C-specific frictions did it grow?</summary><div class="body">The "works on my machine" dissection (M2 L7's four acts), C edition — new acts: toolchain versions (gcc 11 vs 14 warning sets — -Werror breaking on NEWER compilers is a classic; pin -std and consider -Werror only in CI), -march=native producing SIGILL binaries if copied between machines (document: rebuild per host), OpenMP needing libomp on clang/macOS (Makefile detects: uname/CC checks or a FEATURES section in README), and CPU-count/governor variance making numbers differ legitimately (provenance fields absorb it). The deliverable: a "Tested on" table (OS/compiler/CPU → status) in the README. Portability isn't a property, it's a maintained CLAIM with evidence — and this project is now the strongest repo on your GitHub until 5.11 replaces it.</div></details>
+<details><summary>6. Wire the CI (M2 L6 P7's design, now real): GitHub Actions or a local script — on push: build (with -Werror), make test (fixtures + ASan objects), the sink-canary (Ex.2b), and a SMALL bench (256³, 5 reps) whose medians are archived but NOT gated (why not? — cite the exact M2 L6 P7 argument). Nightly: full bench with trend comparison at 5 standard errors. Write the 6-line workflow sketch + the two-sentence gating policy.</summary><div class="body">Sketch: <code>on: push → jobs: [gcc -Werror build] → [make asan-test] → [make test] → [bench-small, upload artifact times.json]</code>; nightly cron → full bench → compare vs 7-day median: alert if |Δ| &gt; 5·SE (M1 L7 Ex.2's arithmetic, institutionalized). Policy sentences: "Per-push perf is recorded, never gated — shared runners' variance (M1 L7) makes single-run gates fire on noise, training humans to ignore alarms (M2 L6's flaky-test ethics). Nightly medians with standard-error thresholds gate; any tolerance or threshold change requires its budget recomputation in the PR body." You have now built, for a course project, the exact quality infrastructure most professional GPU teams run — which was the covert syllabus all along.</div></details>
+<details><summary>7. Design the handoff: MODULE4.md — one page telling your future self what questions this capstone COULDN'T answer and where Module 4 picks up: the five measured mysteries (why 5.6× not 8× scaling; why the knee wasn't exactly at L1; why IPC 0.4 for naive; why alignment barely mattered; why -O3 helped ikj more than blocked) each mapped to its M4 lesson (bandwidth/Amdahl 4.3, cache hierarchy 4.2, pipelines 4.1, DRAM sectors 4.5, vectorization 4.1/4.7). Close with the one-sentence thesis of the whole module.</summary><div class="body">The page writes itself from your own tables — which is the point: you now generate QUESTIONS with instruments, not just answers with folklore. Mystery→lesson mapping as listed (each with your measured number pasted in — "5.6×/8 threads" is YOUR datum, M4 L3 explains it with the bandwidth roof; "knee at T=64±1 step" → M4 L2's associativity/TLB caveats; "IPC 0.4" → M4 L1's stall anatomy; "alignment ±3%" → M4 L5's sectors vs cache-line forgiveness; "-O3 asymmetry" → vectorizability differs per loop shape, M4 L1/L7). Closing thesis, candidate: <em>"C removed the safety so I could see the machine; measurement replaced folklore; every mystery I can now state precisely is Module 4's syllabus — and every technique that worked (stride-1, tiling, disjoint parallelism) is Module 5's, at 100× the lanes."</em> When the handoff note to your future self is one page of precise, measured, cited questions — the module did its job. Generate Module 4 with the prompt when ready.</div></details>
+
+<div class="note"><strong>Module 3 complete.</strong> You can now read a segfault like a traceback, argue with a compiler about undefined behavior, allocate and own memory across three languages' conventions, build multi-file projects that rebuild in seconds, and produce performance numbers that survive hostile review. The machine has no more padding between you and it. <strong>Module 4 (How Computers & GPUs Work)</strong> explains every mystery your capstone measured — generate it with the <a href="../prompt.html">prompt</a>.</div>
+
+<div class="pager">
+  <a href="lesson-08.html">← Segfaults, gdb & sanitizers</a>
+  <a href="../curriculum.html">Module 3 complete → Curriculum</a>
+</div>
+<div class="footer">GPU Mastery · Module 3 · Lesson 9 — works offline · progress saved in your browser</div>
+</div>
+<script src="../assets/diagrams3.js"></script>
+<script src="../assets/app.js"></script>
+</body>
+</html>

@@ -1,0 +1,188 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>5.7 Coalescing in Code — GPU Mastery</title>
+<link rel="stylesheet" href="../assets/style.css">
+</head>
+<body data-lesson="m5l7">
+<nav><div class="inner">
+  <a class="logo" href="../index.html">GPU<span>Mastery</span></a>
+  <a class="item" href="../index.html">Home</a>
+  <a class="item on" href="../curriculum.html">Curriculum</a>
+  <a class="item" href="../labs.html">Labs</a>
+  <a class="item" href="../setup.html">Lab setup</a>
+  <a class="item" href="../prompt.html">Generator prompt</a>
+</div></nav>
+<div class="wrap">
+
+<div class="lesson-top">
+  <div><span class="badge">Module 5 · Lesson 7</span><span class="badge dim">≈ 3 h</span></div>
+  <button id="donebtn" class="donebtn">Mark lesson complete</button>
+</div>
+<h1>Coalescing in Code — the index formula IS the memory system</h1>
+<p class="lead">4.5 gave you the physics: a warp's 32 addresses become memory transactions, and scattered addresses buy wasted sectors. Today the physics moves into your index arithmetic — you'll learn to read a subscript and see the bus traffic it orders, then fix the three classic crimes: strides, AoS, and the transpose.</p>
+
+<h2>Concept</h2>
+
+<h3>Read the subscript, see the transactions</h3>
+<div class="diagram" data-diagram="m5l7-code" data-caption="Same loop body, three index formulas, three bus bills. The warp's 32 addresses at ONE instant decide — not the loop's direction over time."></div>
+<pre><code>int i = blockIdx.x*blockDim.x + threadIdx.x;      // the 5.2 identity
+x[i]           // lanes 0..31 → 4·i consecutive bytes: 128 B = 4 sectors, 0 waste ✓
+x[i + 7]       // shifted but still consecutive: coalesced (maybe +1 sector) ✓
+x[2*i]         // stride-2: warp spans 256 B → 8 sectors for 128 useful B: 2× tax
+x[32*i]        // stride-32: EVERY lane its own sector → 32 B fetched per 4 B used
+               //   = 8× tax — the FLOOR for floats (sector 32 B / element 4 B)
+p[i].mass      // AoS with 32-B structs: same as stride-8 floats → 8× tax (M2 L7!)
+x[perm[i]]     // gather: the bill depends on perm's contents at runtime —
+               //   best case coalesced, worst case the 8× floor (sorting perm
+               //   is sometimes a kernel's cheapest optimization)</code></pre>
+<p>Two rules carry the whole lesson. <strong>Rule 1 — the instant rule:</strong> coalescing is judged across LANES at one instruction, never across a thread's loop iterations. A grid-stride loop's <code>x[i + k*stride]</code> looks "strided" to a human reading the loop, but at each k the 32 lanes are consecutive — perfectly coalesced every step (5.5 practice 3's misconception, now formalized). <strong>Rule 2 — the sector floor:</strong> the memory system moves 32-byte sectors (4.5), so scattered 4-byte floats waste at most 8× (32/4), scattered doubles at most 4× (32/8). The cliff you'll measure flattens exactly there.</p>
+
+<h3>The stride cliff, priced in advance</h3>
+<pre><code>predicted effective bandwidth vs stride (T4, ~220 GB/s achievable):
+stride 1: ~220    stride 2: ~110    stride 4: ~55    stride 8+: ~27  (the 8× floor)
+// Ex.1 measures this. Your numbers will wobble ±15% (caches, TLBs), but the
+// STAIRCASE and the FLOOR are physics — if your measured floor isn't ~1/8,
+// your model of your machine is wrong somewhere. Find out where (M1 L7).</code></pre>
+
+<h3>AoS → SoA: the fix that lives outside the kernel</h3>
+<pre><code>struct Particle { float3 pos, vel; float mass, age; };   // 32 B — M2 L7's AoS
+Particle p[N];              kernel reads p[i].mass       → 8× traffic tax
+// SoA: seven arrays (or grouped by ACCESS pattern, not by object nostalgia):
+float *mass, *age; float3 *pos, *vel;                    // mass[i] → coalesced ✓
+// The kernel's subscript didn't change — the LAYOUT did. Fastest kernel fix
+// is often a data-structure PR two files away (5.5's scenario, generalized).
+// Group fields TOUCHED TOGETHER: integrator reads pos+vel → keep those
+// adjacent (or float4-pack them); the renderer reads pos only → pos separate.</code></pre>
+
+<h3>float4: four elements, one instruction</h3>
+<div class="diagram" data-diagram="m5l7-float4" data-caption="One 16-byte load per lane: a warp pulls 512 B in one instruction — fewer instructions, more bytes in flight (5.6 P6's lever), same coalescing rules at 4× the granularity."></div>
+<pre><code>const float4 *x4 = reinterpret_cast&lt;const float4*&gt;(x);
+float4 v = x4[i];                    // lanes consecutive in float4s = 512 B/warp
+y4[i] = make_float4(a*v.x + ..., a*v.y + ..., a*v.z + ..., a*v.w + ...);
+// LAW: 16-byte alignment required. cudaMalloc guarantees 256-B alignment (5.3)
+// so x4 is safe from the base — but x+1 reinterpreted is NOT (misaligned →
+// cudaErrorMisalignedAddress, STICKY — 5.4's taxonomy, now with a cause).
+// Tail: n%4 leftovers get a scalar cleanup loop (5.2's tail discipline, again).
+// Payoff mechanism is 5.6 P6, not magic: 4× bytes-in-flight per thread, so
+// the bus saturates at 1/4 the occupancy — the Volkov lever in one cast.</code></pre>
+
+<h2>Worked example</h2>
+<div class="card">
+<p><strong>Task:</strong> The transpose ladder — the canonical coalescing kata (every ML framework transposes constantly: M2 L5's .T was free ONLY as a view; materializing it costs this kernel). N=4096, T4, copy-kernel baseline first.</p>
+<div class="diagram" data-diagram="m5l7-transpose" data-caption="Transpose's law: reading rows and writing columns can't both be lane-consecutive in global memory — unless a shared tile turns the data on-chip between two coalesced global phases."></div>
+<pre><code>v0 copy (both sides coalesced):            ~180 GB/s   ← the ceiling to chase
+v1 naive:  out[x*N + y] = in[y*N + x];
+   read in[y*N+x]: lanes vary x → consecutive ✓ coalesced
+   write out[x*N+y]: lanes vary x → stride-N apart ✗ 8× write tax
+   measured: ~40 GB/s — the one-bad-side kernel loses ~4.5× (write sectors
+   dominate; reads still fine — HALF-coalesced is still broke)
+v2 shared tile (5.5's tool, new job — STAGE the turn on-chip):
+   __shared__ float t[32][32];
+   t[ty][tx] = in[(by+ty)*N + bx+tx];      // read coalesced ✓
+   __syncthreads();
+   out[(bx+ty)*N + by+tx] = t[tx][ty];     // write coalesced ✓ (note swapped
+   measured: ~120 GB/s                      //  block offsets + transposed t read)
+v3 = v2 with t[32][33]:                     // 5.5 Ex.2's padding — the t[tx][ty]
+   measured: ~165 GB/s ≈ 92% of copy        //  column read was a 32-way bank
+                                            //  conflict; +1 rotates it away</code></pre>
+<p><strong>The design move to internalize:</strong> when BOTH global patterns can't be coalesced simultaneously (transpose's essence — one side must turn), you buy a shared-memory way-station: coalesced in, reorder on-chip where "scattered" costs banks-not-sectors, coalesced out. That's not a transpose trick; it's THE general template for any index permutation (sorting networks, FFT bit-reversal, im2col — Track A meets it weekly). And the v2→v3 step is why 5.5 taught banks before this lesson: shared memory solved the sector problem and then billed you in its own currency.</p>
+</div>
+
+<h2>Key points</h2>
+<ul class="keypoints">
+<li>Judge coalescing across lanes at one instruction (the instant rule) — never across loop iterations; grid-stride loops are coalesced at every step.</li>
+<li>The sector floor caps the damage: 32-B sectors mean ≤8× waste for floats, ≤4× for doubles — and your measured stride cliff must flatten there or your model is wrong.</li>
+<li>AoS field access is a stride in disguise (struct size ÷ element size); SoA — grouped by access pattern — is the fix, and it lives in the data layout, not the kernel.</li>
+<li>Transpose's law: one side must be uncoalesced in global memory — unless you stage through a shared tile (coalesced in, turn on-chip, coalesced out) with [33] padding for the bank bill.</li>
+<li>float4 loads quadruple bytes-in-flight per instruction (5.6 P6's lever): 16-B alignment is a hard law (misaligned = sticky error), tails get scalar cleanup.</li>
+<li>The audit metric is sectors-per-request (ncu, 5.10): ~4 for perfect float coalescing, ~32 at the scatter floor — one number that converts "feels slow" into a named crime.</li>
+</ul>
+
+<h2>Quiz</h2>
+<div class="quiz">
+  <div class="q">1. An image kernel assigns thread i to process ROW i of a row-major float image (each thread loops x across its row). Bandwidth is terrible. The loop inside each thread walks CONSECUTIVE addresses — a teammate insists "each thread reads sequentially, it must be coalesced." Locate the error and give the fix.</div>
+  <button class="opt">Teammate is right — the kernel is memory-optimal</button>
+  <button class="opt" data-c="1">The instant rule is being violated by the ANALYSIS: coalescing is judged across LANES at one instruction. At any instant, lane 0 reads row 0 col k, lane 1 reads row 1 col k — addresses N·4 bytes apart: stride-N, sector floor, 8× tax at EVERY step of those "sequential" loops. Fix: invert the mapping — threads span x (columns) within a row-block, loop over y; adjacent lanes then read adjacent pixels. Per-thread sequentiality is irrelevant; per-WARP adjacency is everything</button>
+  <button class="opt">Rows are too long for the cache</button>
+  <button class="opt">Use float4 to fix it</button>
+  <div class="expl">The seductive wrongness of "each thread reads sequentially" makes this THE canonical coalescing interview question. float4 on the broken mapping just fetches 16-B islands N apart — still scattered (option 4 optimizes within a broken pattern). The one-line index swap is the scenario section's 11× — cheapest big win in GPU practice. CPU intuition ("sequential = fast", 4.5) actively sabotages here: on CPU, per-THREAD sequential was exactly right; on GPU the warp is the actor, not the thread.</div>
+</div>
+<div class="quiz">
+  <div class="q">2. Profiling shows kernel A at 31.8 sectors/request (floats), kernel B at 4.2. Yet A and B run the SAME wall time, and both are "memory-bound" per the roofline. A teammate concludes sectors/request is a useless metric. Rescue the metric and explain the tie.</div>
+  <button class="opt">The metric is indeed noise — trust wall time only</button>
+  <button class="opt" data-c="1">The metric is telling you A moves ~8× the BYTES for the same useful data (scatter floor). Equal wall time with 8× traffic means A is being SAVED by something — likely L2: its scattered reads have reuse that hits cache (sectors/request counts L1→L2 requests, not HBM), or A simply has 8× less useful data to move. The metric isn't a verdict; it's a traffic multiplier that must be joined to TOTAL bytes and the roofline (4.7) before sentencing. Diagnosis: read A's L2 hit rate and HBM-level bytes next (5.10's two-table habit)</button>
+  <button class="opt">B must be compute-bound</button>
+  <button class="opt">A uses doubles, hiding the waste</button>
+  <div class="expl">Metrics are witnesses, not judges (M1 L7's rule, profiler edition). The classic real-world instance: gather kernels with power-law reuse (embeddings!) show terrible sectors/request yet fine throughput because L2 absorbs the repeats — Track A's embedding-table lesson in embryo. A metric that "contradicts" wall time is never useless; it's naming a compensating mechanism you haven't found yet — the gap IS the to-do list (4.7's law).</div>
+</div>
+
+<h2>Exercises</h2>
+<details><summary>Exercise 1 — Measure the stride cliff: copy kernel reading x[stride*i] for stride ∈ {1,2,4,8,16,32}, fixed total elements (so the useful-bytes numerator is constant). Table: stride → GB/s → waste factor vs stride-1. Mark where it flattens, and reconcile the floor with YOUR GPU's sector size. Then repeat with double — predict the new floor BEFORE running.</summary><div class="body">
+<p>Expected: floats flatten at ~1/8 of stride-1 bandwidth from stride 8 onward (32-B sector ÷ 4 B); doubles flatten at ~1/4 from stride 4 (32÷8). If your float floor lands nearer 1/6 than 1/8, L2 is absorbing part of the waste (quiz 2's mechanism — smaller working sets fit; enlarge N until the floor purifies: M1 L7's "measure the regime you claim"). Deliverable: the two-line summary for your machine-model file — "sector 32 B confirmed; float scatter floor 27 GB/s; double 55 GB/s" — numbers you'll now recognize INSTANTLY in any future profile (the whole point: the cliff becomes a fingerprint).</p>
+</div></details>
+<details><summary>Exercise 2 — Build the transpose ladder v0→v3 yourself: copy baseline, naive, shared-tile, padded tile. Measure all four; racecheck v2/v3 (both barriers earned their keep?); report each as % of v0. Then the twist: run v3 at N=4095 (not divisible by 32) and fix what breaks — cite the 5.5 gotcha you're deploying.</summary><div class="body">
+<pre><code>expected T4 shape:  v0 100% | v1 ~22% | v2 ~65% | v3 ~90%+
+N=4095: edge blocks read/write out of range → the 5.5 "ragged edges" gotcha:
+guard LOADS (clamp + zero-fill tile slots) and guard STORES (if in-range) —
+but keep __syncthreads() UNCONDITIONAL (5.6 P5's law: barriers outside guards).</code></pre>
+<p>The ladder is the lesson in miniature: each rung fixes exactly one named cost (v1→v2: write sectors; v2→v3: bank conflicts) and the measurement confirms each fix's size — the fix-one-thing-and-measure discipline (M1 L7) that separates engineering from folklore. Keep the file: transpose-with-padding is a snippet you will paste, lightly disguised, for years (attention kernels transpose K constantly). Bonus rung for the ambitious: float4 the v3 loads/stores (tile becomes float4 t[32][8]... think through the bank geometry before believing it helps — banks are 4-byte-wide, a float4 spans 4 banks: predict, then measure).</p>
+</div></details>
+
+<hr>
+<h1>Go deeper — the memory-pattern craft sheet</h1>
+
+<h2>1. Sectors, requests, and the metric that names the crime</h2>
+<pre><code>warp executes LD.E.32 → 1 REQUEST → hardware coalescer merges the 32 lane
+addresses into SECTORS (32 B each):
+  perfect float access:  4 sectors/request   (128 B exactly)
+  perfect float4 access: 16 sectors/request  (512 B — more sectors, all USEFUL:
+                         the metric must be read against bytes-USED, not "low = good")
+  scatter floor:        32 sectors/request   (one per lane)
+ncu: l1tex__average_t_sectors_per_request ≈ these landmarks (5.10 makes it
+routine). Between landmarks = mixed patterns: 12 s/r on floats reads as
+"~3× waste — some strided or misaligned component" — a NAMED, sized crime.</code></pre>
+
+<h2>2. When gathers are legal: caches as coalescing insurance</h2>
+<pre><code>x[perm[i]]   // embeddings, graph neighbors, BVH hops — gathers are LIFE for
+             // half of real workloads. The physics still bills sectors, BUT:
+             // L2 (tens of MB on modern parts) absorbs REUSED scatter — a
+             // power-law gather (few hot rows) can run near full speed
+             // (quiz 2's rescue). Uniform-random gathers over a huge table
+             // get no such mercy: the floor is the floor.
+// Levers, in order: sort/cluster indices when upstream allows (locality is
+// manufactured, not found); __ldg/const __restrict__ hints (mostly automatic
+// now); shared-memory staging when a block's gathers overlap (5.5's second
+// use-case); accept + budget it on the roofline when the algorithm IS a gather.</code></pre>
+
+<h2>3. Gotchas</h2>
+<div class="gotcha"><strong>"Each thread reads sequentially" (quiz 1).</strong> The most natural analysis a CPU-trained mind produces, and wrong every time. Lanes, one instant. Tattoo it.</div>
+<div class="gotcha"><strong>Offset-by-a-few misalignment.</strong> x+1 base on float4, or a 4092-byte header before your data: every warp straddles one extra sector (~25% tax, or a sticky error for vector types). cudaMalloc's 256-B base alignment protects allocation starts — YOUR offsets un-protect them.</div>
+<div class="gotcha"><strong>Fixing reads, shipping broken writes.</strong> v1's lesson: coalescing audits must cover BOTH sides — writes are easier to forget because reads dominate mental models. Sectors bill both directions.</div>
+<div class="gotcha"><strong>SoA zealotry.</strong> Fields ALWAYS touched together (pos.xyz in an integrator) belong packed (float4), not scattered across three arrays (three base pointers, three cache streams, worse TLB behavior). The rule is group-by-ACCESS, not "SoA always" — AoSoA exists because reality is mixed.</div>
+<div class="gotcha"><strong>float4-ing a broken pattern.</strong> Vector loads amplify a GOOD pattern's in-flight bytes; on a strided pattern they just fetch bigger scattered islands (quiz 1 option 4). Order of operations: coalesce first, vectorize second.</div>
+<div class="gotcha"><strong>Trusting one N.</strong> Coalescing effects interact with cache sizes: a pattern "fine" at 4 MB working set may crater at 400 MB when L2 stops absorbing it (Ex.1's purification note). Measure at deployment scale — M1 L7, forever.</div>
+
+<h2>Scenario — the one-line diff worth 11×</h2>
+<p>A medical-imaging startup ports their CPU filter chain to CUDA. The port is correct (fixtures pass — they took M2 L6 seriously) but disappointingly ~2× faster than the 32-core CPU baseline, far under the 40× the roofline promised. The lead is about to conclude "our workload isn't GPU-shaped" — a real category, but a conclusion that costs a hardware strategy, so it deserves a real audit. The audit (5.10's ritual, but you can run it today): ncu shows sectors/request = 31.6 ≈ the scatter floor; the kernel maps one thread per image ROW (quiz 1's layout, verbatim — it was the natural port of the CPU's per-core row loop, where it was RIGHT: 4.5's prefetcher loved it). The diff: swap the thread mapping to lanes-across-columns — index arithmetic only, kernel body untouched. Sectors/request: 4.4. Wall time: 11.2× better. Total: 23× over CPU, close enough to the roofline's promise that the remaining gap has names (tails, one gather stage). Two morals. First: "not GPU-shaped" must be EARNED by an audit showing irreducible scatter/divergence — never inferred from a slow first port, because first ports inherit CPU-optimal patterns that are GPU-pessimal (the same experience that made the CPU code fast made the GPU code slow!). Second: the highest-leverage CUDA skill is not writing clever kernels — it's reading an index expression and seeing sectors. That skill fit in one diff line.</p>
+
+<h2>Practice</h2>
+<details><summary>1. Sector-bill these (floats, perfect alignment, per warp): (a) x[i]; (b) x[i+8]; (c) x[4*i]; (d) x[i/2]; (e) AoS struct{float x,y;} reading .x; (f) x[i%64]; (g) writes to y[N-1-i] (reversal).</summary><div class="body">(a) 4 sectors. (b) 4 (shifted 32 B — still 4 aligned sectors; offset by NON-multiples of 8 floats would straddle → 5). (c) stride-4: spans 512 B → 16 sectors = 4× tax. (d) i/2: PAIRS of lanes share an address → 16 distinct consecutive floats = 64 B = 2 sectors — BETTER than (a) per request (broadcast-ish; hardware merges duplicates — 5.5 Ex.2's broadcast cousin in global). (e) 8-B stride = 2× tax → 8 sectors. (f) i%64: lanes 0..31 → x[0..31] for even warps... careful: warp 0 reads 0..31 (4 sectors), warp 1 reads 32..63 (4 sectors), warp 2 repeats 0..31 — coalesced AND cached: 4 s/r, L2-friendly. (g) reversal: consecutive DESCENDING addresses — still one 128-B span: 4 sectors (direction doesn't matter; adjacency does). Score yourself: (d), (f), (g) catch most people — merging, modulo-reuse, and direction-independence are the instant-rule's fine print.</div></details>
+<details><summary>2. A kernel reads a (H, W) fp16 image with one thread per pixel, i = y*W + x from a (32,8) block. W = 1000 (not divisible by 32). Where does the misalignment tax land, how big is it, and what does padding W to 1024 (M2 L5's pitch/LDA, cudaMallocPitch from 5.3 §2!) buy exactly?</summary><div class="body">Row starts sit at 2000-B offsets → row 1 begins mid-sector (2000 % 32 = 16): every row's warps are shifted 16 B off sector boundaries → each 64-B warp-read (32 lanes × 2 B fp16) straddles one extra sector: 3 sectors where 2 suffice = ~50% read tax on EVERY row after row 0. Padding to W=1024 (2048 B = 64 sectors exactly) re-aligns every row start: 2 s/r, tax gone, cost = 2.4% wasted memory. That's cudaMallocPitch's entire justification (5.3 said "know it exists"; now you know WHY it exists), and it's M2 L5's stride-vs-shape split plus 4.2's LDA, wearing hardware clothes: the pitch is padding purchased to keep every row's coalescing geometry identical.</div></details>
+<details><summary>3. Prove the grid-stride loop coalesces at every step by writing the lane addresses at k=0 and k=1 for blockDim=256, gridDim=64, thread (b,t). Then name the ONE way to break a grid-stride loop's coalescing (hint: the stride VALUE).</summary><div class="body">i = b·256 + t + k·(256·64=16384). Warp (b, t=0..31): k=0 → addresses 4·(b·256+0..31) consecutive ✓; k=1 → 4·(b·256+16384+0..31) consecutive ✓ — each step shifts ALL lanes by the same 64 KB; intra-warp adjacency is untouched (the instant rule's cleanest demonstration). Breaking it: make the stride NOT a multiple of the warp-contiguous unit — e.g., stride = total_threads + 1 ("to avoid cache aliasing", someone will say): now lane addresses drift apart by k, and by k=32 the warp is fully scattered. Grid-stride's safety is structural but not unconditional — the stride must preserve lane adjacency, which gridDim·blockDim always does.</div></details>
+<details><summary>4. Design the layout for a particle system where kernel A (integrator, every step) reads/writes pos+vel; kernel B (renderer, every step) reads pos only; kernel C (rare collisions) reads everything. Give the layout, the sector bill per kernel, and the one query pattern that would force you to re-decide.</summary><div class="body">float4 pos[N] (xyz + one spare lane — 16-B aligned, vector-loadable), float4 vel[N] (same), cold AoS blob for the rest {mass, age, flags...}. Bills: A reads 32 B/particle in two perfect vector streams (4+4... 16 s/r each, all useful); B reads pos only — 16 B/particle, zero drag from vel (the SoA win: B never pays for what it skips); C gathers the cold blob rarely — its scatter tax × its frequency ≈ 0 (budgeted, not fixed: section 2's last lever). Re-decider: if A's integrator ALWAYS reads pos and vel together per particle, an interleaved {pos4, vel4} AoSoA (32-B records) serves A in ONE stream at zero waste — but bills B 2× (drags vel through the bus for nothing). The decision is arithmetic: 2 × B's frequency vs stream-count savings for A — access patterns × frequencies, nothing else votes (M2 L7's table, priced in sectors).</div></details>
+<details><summary>5. Convert saxpy to float4 (sketch the kernel + tail). Predict on T4: (a) already bandwidth-saturated at scalar — speedup?; (b) same kernel at 12% occupancy due to an unrelated register hog — speedup? Explain the asymmetry with 5.6 P6.</summary><div class="body">Sketch: n4 = n/4; float4 loop as in §float4; scalar cleanup for i ≥ 4·n4 (launch either a few extra threads in the same kernel with an if, or accept one warp of tail work). (a) ~1.05×: the bus was already saturated — float4 reduces instruction count, not bytes owed; a saturated denominator can't improve (4.7: you're AT the ceiling). (b) up to ~3–4×: at starved occupancy the bus was UNDER-fed; 4× bytes-in-flight per thread refills the Little's-law pipeline (5.6 P6's 54%→3% table — vectorization substitutes for the warps you don't have). The asymmetry is the whole lesson of rooflines: identical code change, its value set entirely by which resource was binding before it.</div></details>
+<details><summary>6. In v3's tile, explain why t[32][33] padding fixes shared-memory bank conflicts yet does NOTHING for global coalescing — and why the GLOBAL accesses needed no padding at all. Two different physics, one sentence each, plus the config where you WOULD pad global (practice 2 already knows).</summary><div class="body">Banks: shared memory hashes ADDRESS→bank (address/4 % 32); the +1 column rotates each row's residues so a column walk hits 32 DIFFERENT banks (5.5 Ex.2) — a conflict is same-bank-different-word contention inside the SM. Sectors: global memory bills by 32-B chunks touched per warp-instruction; v2/v3's global reads/writes were already lane-consecutive (the tile made them so — that was its JOB), so 4 sectors, nothing to fix. Global padding earns its keep only to ALIGN row starts (practice 2's pitch) — same word "padding", two unrelated purchases: bank-residue rotation (on-chip) vs sector-boundary alignment (off-chip). Confusing them is a classic review-comment error you are now licensed to correct politely.</div></details>
+<details><summary>7. The interview closer: "Your kernel gets 15% of peak bandwidth. Walk me through the diagnosis." Deliver the decision tree: the metric you pull first, its three landmark readings, the fix family each points to, and the two cases where LOW bandwidth is actually fine.</summary><div class="body">Pull sectors/request (plus total HBM bytes): ~4 (floats) → pattern is FINE — low BW must be latency/occupancy starvation (5.6's dial, Little's-law audit; fix: more warps or more in-flight bytes per thread, P5b) or launch-bound tiny grids (5.2). ~8–16 → partial stride/AoS/misalignment → reindex (quiz 1), SoA regroup (P4), or pitch-align (P2). ~32 → scatter floor → sort indices, stage via shared (worked example's template), or budget-and-accept if the algorithm is inherently a gather (§2). Low-but-fine cases: (1) L2 is serving the reuse (quiz 2 — HBM bytes low BECAUSE cache works: check L2 hit rate before "fixing"); (2) the kernel is compute-bound on the roofline (4.7) — 15% of the memory ceiling is EXPECTED when you're pinned to the FLOP ceiling. Close: "pattern metric → landmark → named fix family; and I never optimize a bandwidth number without first asking the roofline which ceiling I'm under." That sentence is the hire signal.</div></details>
+
+<div class="pager">
+  <a href="lesson-06.html">← Warps, divergence & occupancy</a>
+  <a href="lesson-08.html">Next: Reductions & atomics →</a>
+</div>
+<div class="footer">GPU Mastery · Module 5 · Lesson 7 — works offline · progress saved in your browser</div>
+</div>
+<script src="../assets/diagrams5.js"></script>
+<script src="../assets/app.js"></script>
+</body>
+</html>

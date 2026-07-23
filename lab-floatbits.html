@@ -1,0 +1,127 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Float-Format Bit Explorer — GPU Mastery Labs</title>
+<link rel="stylesheet" href="assets/style.css">
+<style>
+  .tool{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:18px 20px;margin:16px 0}
+  .row{display:flex;flex-wrap:wrap;gap:12px;align-items:flex-end;margin:10px 0}
+  .row label{font-size:13px;color:var(--dim);display:flex;flex-direction:column;gap:4px}
+  .row input{background:#10141d;color:var(--tx);border:1px solid var(--line);border-radius:6px;padding:8px 9px;font-size:15px;width:180px;font-family:var(--mono)}
+  .chip{background:var(--card2);color:var(--dim);border:1px solid var(--line);border-radius:999px;padding:5px 11px;font-size:12.5px;cursor:pointer;font-family:var(--mono)}
+  .chip:hover{border-color:var(--acc);color:var(--tx)} .chip.on{background:var(--accBg);color:var(--accT);border-color:var(--acc)}
+  .bits{display:flex;flex-wrap:wrap;gap:3px;margin:12px 0}
+  .bit{width:22px;height:30px;display:flex;align-items:center;justify-content:center;font-family:var(--mono);font-size:14px;border-radius:4px;border:1px solid var(--line)}
+  .bit.s{background:#3a1f28;color:#ff9aa8} .bit.e{background:#1a2740;color:#8fb6ff} .bit.m{background:#14301f;color:#7fe0b0}
+  .bitlabel{font-size:11px;color:var(--dim);margin-right:6px;align-self:center}
+  .facts{width:100%;border-collapse:collapse;margin-top:8px;font-size:13.5px}
+  .facts td{border:1px solid var(--line);padding:6px 10px} .facts td:first-child{color:var(--dim);width:44%}
+  .big{font-size:22px;font-family:var(--mono);font-variant-numeric:tabular-nums}
+  .muted{color:var(--dim);font-size:13px}
+</style>
+</head>
+<body data-lesson="lab-floatbits">
+<nav><div class="inner">
+  <a class="logo" href="index.html">GPU<span>Mastery</span></a>
+  <a class="item" href="index.html">Home</a>
+  <a class="item" href="curriculum.html">Curriculum</a>
+  <a class="item on" href="labs.html">Labs</a>
+  <a class="item" href="setup.html">Lab setup</a>
+</div></nav>
+<div class="wrap">
+
+<div class="lesson-top">
+  <div><span class="badge">Interactive Lab</span><span class="badge dim">M1 L8 · A6 · number formats</span></div>
+  <a class="badge good" href="labs.html">← all labs</a>
+</div>
+<h1>Float-Format Bit Explorer</h1>
+<p class="lead">A number is meaningless until you know how it's stored (M1 L8). Type a value, pick a format from fp32 down to fp4, and see exactly which bits hold it, what value actually gets stored, and how much you lost — the precision-vs-range trade behind mixed precision (A6) made visible.</p>
+
+<div class="tool">
+  <div class="row" id="fmtchips"></div>
+  <div class="row">
+    <label>enter a value<input type="number" id="val" value="0.1" step="any"></label>
+    <div class="row" style="gap:6px;margin:0" id="quick"></div>
+  </div>
+  <div class="muted">bit layout (<span id="layoutdesc"></span>):</div>
+  <div class="bits" id="bits"></div>
+  <div class="row" style="gap:28px">
+    <div><div class="muted">stored value</div><div class="big" id="stored">—</div></div>
+    <div><div class="muted">absolute error</div><div class="big" id="abserr" style="color:var(--warn)">—</div></div>
+    <div><div class="muted">relative error</div><div class="big" id="relerr" style="color:var(--warn)">—</div></div>
+  </div>
+  <div class="muted" id="note" style="margin-top:6px"></div>
+  <table class="facts" id="facts"></table>
+</div>
+
+<h2>What it teaches</h2>
+<p>Every format splits its bits into <strong>sign</strong>, <strong>exponent</strong> (dynamic range — how big/small), and <strong>mantissa</strong> (precision — how many significant digits). This is the whole story of mixed precision (A6): <strong>bf16</strong> keeps fp32's 8 exponent bits (same range, so training doesn't overflow) but drops mantissa to 7 bits (less precision) — which is why it's the training default. <strong>fp16</strong> has more mantissa (10 bits) but only 5 exponent bits, so it overflows around 65504 and needs loss scaling. <strong>fp8</strong> comes in two flavors — e4m3 (more precision, saturates at 448) and e5m2 (more range, has infinity) — the Hopper/Blackwell trade. <strong>fp4</strong> (Blackwell) has almost nothing: try 0.3 and watch it snap to 0.5. Watch the absolute error grow as you drop down the formats — that's the price of every byte you save on the bus (4.6).</p>
+
+<div class="footer">GPU Mastery · Labs · Float-Format Bit Explorer — works offline</div>
+</div>
+
+<script>
+function rne(q){ const f=Math.floor(q), r=q-f; if(r<0.5)return f; if(r>0.5)return f+1; return (f%2===0)?f:f+1; }
+function encode(x, EB, MB, opt){opt=opt||{};
+  const noInf=!!opt.noInf, satMax=(opt.satMax!==undefined)?opt.satMax:null;
+  const bias=(1<<(EB-1))-1, eminN=1-bias, emaxField=(1<<EB)-1;
+  const emaxN = noInf ? (emaxField-bias) : (emaxField-1-bias);
+  const maxFinite = satMax!=null ? satMax : Math.pow(2,emaxN)*(2-Math.pow(2,-MB));
+  const s=(x<0||Object.is(x,-0))?1:0; let a=Math.abs(x);
+  if(a===0) return {s,E:0,M:0,val:s?-0:0,cls:'zero',maxFinite};
+  if(!isFinite(a)) return {s,E:emaxField,M:0,val:(s?-1:1)*Infinity,cls:'inf',maxFinite};
+  if(a>maxFinite*(1+Math.pow(2,-MB-1))){ if(noInf||satMax!=null) return {s,E:emaxField,M:(1<<MB)-1,val:(s?-1:1)*maxFinite,cls:'ovf-sat',maxFinite}; return {s,E:emaxField,M:0,val:(s?-1:1)*Infinity,cls:'ovf-inf',maxFinite}; }
+  let e=Math.floor(Math.log2(a)),E,M,val;
+  if(e<eminN){ const step=Math.pow(2,eminN-MB); let m=rne(a/step);
+    if(m>=(1<<MB)){E=1;M=0;val=(s?-1:1)*Math.pow(2,eminN);} else {E=0;M=m;val=(s?-1:1)*m*step;}
+    return {s,E,M,val,cls:m===0?'underflow':'subnormal',maxFinite}; }
+  if(e>emaxN)e=emaxN;
+  let m=rne((a/Math.pow(2,e)-1)*(1<<MB));
+  if(m===(1<<MB)){m=0;e+=1; if(e>emaxN){ if(noInf||satMax!=null)return {s,E:emaxField,M:(1<<MB)-1,val:(s?-1:1)*maxFinite,cls:'ovf-sat',maxFinite}; return {s,E:emaxField,M:0,val:(s?-1:1)*Infinity,cls:'ovf-inf',maxFinite}; } }
+  E=e+bias;M=m;val=(s?-1:1)*(1+m/(1<<MB))*Math.pow(2,e);
+  return {s,E,M,val,cls:'normal',maxFinite};
+}
+const FMT={ 'fp32':[8,23,{}], 'tf32':[8,10,{}], 'fp16':[5,10,{}], 'bf16':[8,7,{}], 'fp8 e4m3':[4,3,{noInf:true,satMax:448}], 'fp8 e5m2':[5,2,{}], 'fp4 e2m1':[2,1,{noInf:true,satMax:6}] };
+let cur='fp16';
+const $=id=>document.getElementById(id);
+function chips(){ const c=$('fmtchips'); c.innerHTML='';
+  for(const k of Object.keys(FMT)){ const b=document.createElement('span'); b.className='chip'+(k===cur?' on':''); b.textContent=k;
+    b.onclick=()=>{cur=k;[...c.children].forEach(x=>x.classList.remove('on'));b.classList.add('on');render();}; c.appendChild(b);} 
+  const q=$('quick'); q.innerHTML='<span class="muted" style="align-self:center">try:</span>';
+  for(const v of ['0.1','0.3','1','3.14159','256','65504','100000','1e-8']){ const b=document.createElement('span'); b.className='chip'; b.textContent=v; b.onclick=()=>{$('val').value=v;render();}; q.appendChild(b);} }
+function toBits(n,w){ let s=''; for(let i=w-1;i>=0;i--) s+=((n>>i)&1); return s; }
+function render(){
+  const [EB,MB,opt]=FMT[cur]; const x=parseFloat($('val').value);
+  $('layoutdesc').textContent='1 sign · '+EB+' exponent · '+MB+' mantissa = '+(1+EB+MB)+' bits';
+  if(isNaN(x)){ $('stored').textContent='—'; return; }
+  const r=encode(x,EB,MB,opt);
+  const bits=$('bits'); bits.innerHTML='';
+  const add=(ch,cls)=>{const d=document.createElement('div');d.className='bit '+cls;d.textContent=ch;bits.appendChild(d);};
+  const lab=(t)=>{const d=document.createElement('div');d.className='bitlabel';d.textContent=t;bits.appendChild(d);};
+  lab('S'); add(r.s,'s'); lab('E'); for(const c of toBits(r.E,EB))add(c,'e'); lab('M'); for(const c of toBits(r.M,MB))add(c,'m');
+  $('stored').textContent = r.val===Infinity?'+∞':r.val===-Infinity?'−∞':(''+r.val);
+  const ae=Math.abs(r.val-x), re=x!==0?ae/Math.abs(x):0;
+  $('abserr').textContent = isFinite(ae)?ae.toExponential(3):'∞';
+  $('relerr').textContent = isFinite(re)?(re*100).toExponential(2)+'%':'∞';
+  let note='';
+  if(r.cls==='ovf-inf') note='Overflow → this format stores this as infinity (only '+EB+' exponent bits). This is why fp16 training needs loss scaling (A6).';
+  else if(r.cls==='ovf-sat') note='Overflow → saturates to the max finite value '+r.maxFinite+' (this format has no infinity).';
+  else if(r.cls==='subnormal') note='Subnormal: below the min normal, precision degrades gracefully toward zero.';
+  else if(r.cls==='underflow') note='Underflow → stored as zero. The value is smaller than this format can represent (M1 L8).';
+  $('note').textContent=note; $('note').style.color = note?'var(--warn)':'var(--dim)';
+  const bias=(1<<(EB-1))-1, eminN=1-bias, minNormal=Math.pow(2,eminN), minSub=Math.pow(2,eminN-MB);
+  const digits=(MB*Math.log10(2)).toFixed(1), range=(r.maxFinite/minSub);
+  $('facts').innerHTML=
+    '<tr><td>max finite value</td><td>'+r.maxFinite+'</td></tr>'+
+    '<tr><td>min normal</td><td>'+minNormal.toExponential(3)+'</td></tr>'+
+    '<tr><td>min subnormal</td><td>'+minSub.toExponential(3)+'</td></tr>'+
+    '<tr><td>~decimal digits (precision)</td><td>'+digits+'</td></tr>'+
+    '<tr><td>dynamic range (max/min)</td><td>'+range.toExponential(2)+'</td></tr>'+
+    '<tr><td>has infinity?</td><td>'+((opt.noInf)?'no (saturates)':'yes')+'</td></tr>';
+}
+['val'].forEach(id=>$(id).addEventListener('input',render));
+chips(); render();
+</script>
+</body>
+</html>

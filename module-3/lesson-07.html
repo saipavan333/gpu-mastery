@@ -1,0 +1,270 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>3.7 C++ Essentials for CUDA — GPU Mastery</title>
+<link rel="stylesheet" href="../assets/style.css">
+</head>
+<body data-lesson="m3l7">
+<nav><div class="inner">
+  <a class="logo" href="../index.html">GPU<span>Mastery</span></a>
+  <a class="item" href="../index.html">Home</a>
+  <a class="item on" href="../curriculum.html">Curriculum</a>
+  <a class="item" href="../labs.html">Labs</a>
+  <a class="item" href="../setup.html">Lab setup</a>
+  <a class="item" href="../prompt.html">Generator prompt</a>
+</div></nav>
+<div class="wrap">
+
+<div class="lesson-top">
+  <div><span class="badge">Module 3 · Lesson 7</span><span class="badge dim">≈ 3 h</span></div>
+  <button id="donebtn" class="donebtn">Mark lesson complete</button>
+</div>
+<h1>C++ Essentials — exactly the subset CUDA needs</h1>
+<p class="lead">CUDA is C++, but kernel code is C-with-templates, not enterprise OOP. This lesson teaches the precise subset you'll use: references, RAII, vector/string, and light templates — each one retiring a manual C discipline you just earned. Earning it first was the point: you'll know what the automation does.</p>
+
+<div class="note"><strong>Mechanics:</strong> files become .cpp, compiler becomes g++ (same flags — 3.1 §5's defaults apply verbatim). C code is (nearly) valid C++; today we add, not replace. CUDA 13's nvcc compiles this whole subset in .cu files without ceremony.</div>
+
+<h2>Concept</h2>
+
+<h3>References: the pointer that can't be wrong</h3>
+<pre><code>void scale(float &amp;x, float k) { x *= k; }     /* & in the SIGNATURE: reference     */
+float v = 2.0f;
+scale(v, 3.0f);                                /* call site: NO &amp; — v is now 6.0f  */
+
+void report(const std::string &amp;name);          /* const&: look, don't copy,        */
+                                               /* don't modify — THE parameter     */
+                                               /* idiom for anything non-tiny      */</code></pre>
+<p>A reference is an alias: no NULL state, no reseating, no arithmetic — a pointer with the dangerous parts removed. Trade-off to know consciously: the call site <code>scale(v, 3)</code> no longer SHOWS the mutation (C's <code>&amp;v</code> did — 3.3's visibility argument). C++ convention answers: mutation via reference is fine for obvious cases; APIs that want visible mutation take pointers on purpose. Kernel note: device functions use references freely; kernel <em>launch</em> parameters are pointers/values (they cross the PCIe bus — 5.2 explains why).</p>
+
+<h3>RAII: the destructor is a free() that cannot be forgotten</h3>
+<div class="diagram" data-diagram="m3l7-raii" data-caption="Every exit path runs the destructor. 3.5's goto-cleanup pattern, compiled into the language."></div>
+<pre><code>struct Timer {                                  /* the worked example builds this  */
+    double t0;
+    const char *label;
+    Timer(const char *l) : label(l), t0(now_ms()) {}     /* ctor: acquire/start   */
+    ~Timer() { printf("%s: %.2f ms\n", label, now_ms() - t0); }   /* dtor: ALWAYS */
+};
+{
+    Timer t("matmul");        /* starts here                                      */
+    run_matmul();             /* early return? exception? doesn't matter —        */
+}                             /* ← dtor fires HERE, every path (M2 L7's `with`!)  */</code></pre>
+<p>Resource Acquisition Is Initialization: constructor acquires, destructor releases, scope is the contract. You recognize it — it's Python's <code>with</code> (M2 L7 §1) enforced by braces, and it's 3.5's goto-cleanup with the compiler writing the cleanup label. Everything ownable rides it: memory (vector), files (fstream), locks, CUDA streams and device buffers (Module 5 wraps cudaMalloc/cudaFree in exactly this Timer-shaped pattern).</p>
+
+<h3>std::vector: FloatBuf, retired with honors</h3>
+<div class="diagram" data-diagram="m3l7-vector" data-caption="Same three fields you built (data/len/cap), same doubling, same invalidation rule — automated."></div>
+<pre><code>#include &lt;vector&gt;
+std::vector&lt;float&gt; v;             /* your FloatBuf: {data, len, cap} + RAII       */
+v.push_back(2.5f);                /* fb_push, with the realloc dance inside       */
+v.reserve(1'000'000);             /* preallocate: P2's zero-realloc optimization  */
+std::vector&lt;float&gt; m(H * W, 0.0f);/* 3.5's matrix_flat + calloc, one line         */
+v.data(), v.size()                /* the (pointer, count) pair — for C APIs and   */
+                                  /* cudaMemcpy(d_x, v.data(), bytes, ...) in M5  */
+v[i]                              /* unchecked (C speed); v.at(i) throws (checked)*/</code></pre>
+<p>Everything you learned survives: growth doubles (M1 L2's series), <strong>push_back can move the buffer — every pointer/iterator from before is dead</strong> (3.5 Ex.2's rule, verbatim), and .data() is how vectors hand their guts to C and CUDA. What's gone: fb_free (dtor), the realloc-temporary dance (inside), the leak class (structural). What it costs: nothing at -O2 — <code>v[i]</code> compiles to the same indexed load as C (verify with -S; the 3.1 skill keeps paying).</p>
+
+<h3>Value semantics: the opposite default from Python</h3>
+<div class="diagram" data-diagram="m3l7-valuesem" data-caption="C++ assignment copies the buffer. Python aliased. C pointed. Three languages, three defaults — know whose rules you're under."></div>
+<pre><code>std::vector&lt;float&gt; b = a;          /* DEEP COPY — megabytes if a is big           */
+void f(std::vector&lt;float&gt; v);      /* copies on EVERY CALL — the classic perf bug */
+void g(const std::vector&lt;float&gt; &amp;v);   /* the fix: borrow, read-only              */
+void h(std::vector&lt;float&gt; &amp;v);         /* borrow, may mutate                      */</code></pre>
+
+<h3>Templates-lite: dtype as a compile-time parameter</h3>
+<pre><code>template &lt;typename T&gt;
+void saxpy(size_t n, T a, const T *x, T *y) {
+    for (size_t i = 0; i &lt; n; i++) y[i] = a * x[i] + y[i];
+}
+saxpy(n, 2.0f, xf, yf);            /* instantiates saxpy&lt;float&gt;  — fp32 version   */
+saxpy(n, 2.0,  xd, yd);            /* instantiates saxpy&lt;double&gt; — fp64 version   */</code></pre>
+<p>One source, N compiled specializations — M2 L5's dtype parameter moved to compile time, with zero runtime dispatch cost. This is <em>the</em> reason CUDA kernels are templates: <code>template&lt;typename T&gt; __global__ void saxpy(...)</code> serves fp32/fp16/bf16 from one body (Track A6 lives on this). Critical mechanical fact: <strong>template code must live in headers</strong> — the compiler needs the source at each instantiation site (deep dive §4 explains the why); it's the reason CUDA utility code ships as .cuh header libraries.</p>
+
+<h2>Worked example</h2>
+<div class="card">
+<p><strong>Task:</strong> Port 3.6's project to C++ — watch 80 lines of manual discipline become 25 lines with the same machine code, then meet the ONE new bug C++ adds.</p>
+<pre><code>// bench.cpp — buffer.c + timer.c + main.c, consolidated
+#include &lt;cstdio&gt;
+#include &lt;vector&gt;
+#include &lt;string&gt;
+#include &lt;ctime&gt;
+
+static double now_ms() {
+    timespec ts; clock_gettime(CLOCK_MONOTONIC, &amp;ts);
+    return ts.tv_sec * 1e3 + ts.tv_nsec / 1e6;
+}
+struct Timer {                                    // RAII, from the concept section
+    const char *label; double t0;
+    explicit Timer(const char *l) : label(l), t0(now_ms()) {}
+    ~Timer() { std::printf("%s: %.2f ms\n", label, now_ms() - t0); }
+};
+
+template &lt;typename T&gt;
+T checksum(const std::vector&lt;T&gt; &amp;v) {             // const&: borrow (concept §4)
+    T s = 0;
+    for (T x : v) s += x;                          // range-for: M2 L2's for..in
+    return s;
+}
+
+int main() {
+    std::vector&lt;float&gt; data;
+    data.reserve(10'000'000);                      // P2's lesson: pre-size, 0 moves
+    {
+        Timer t("fill");
+        for (int i = 0; i &lt; 10'000'000; i++) data.push_back(i * 0.5f);
+    }                                              // "fill: 21.43 ms" prints here
+    {
+        Timer t("checksum");
+        std::printf("sum=%.6e\n", (double)checksum(data));
+    }
+    return 0;                                      // vector's dtor frees. Nobody forgot.
+}</code></pre>
+<p><strong>The audit:</strong> zero mallocs, zero frees, zero leak-possibilities — and <code>g++ -O2 -S</code> shows the checksum loop compiling to the same vectorized adds the C version got (abstractions that vanish at -O2 are the C++ bargain). <strong>The one new bug, demonstrated deliberately:</strong> add <code>float *p = &amp;data[0];</code> before the fill loop, print <code>*p</code> after — garbage or crash: push_back moved the buffer (the vector diagram's red arrow; 3.5 Ex.2's physics, inherited not escaped). The reserve() call is why the fill loop is legal as written. <strong>Decision made:</strong> we kept printf (kernels use it; iostream is fine host-side — this course won't die on that hill) and marked the ctor <code>explicit</code> (blocks silent conversions — cheap insurance you'll see in every serious codebase).</p>
+</div>
+
+<h2>Key points</h2>
+<ul class="keypoints">
+<li>References are null-free, fixed-target aliases; const T&amp; is THE parameter idiom for non-tiny read-only arguments — borrow, don't copy.</li>
+<li>RAII: ctor acquires, dtor releases, scope is the contract — Python's with + 3.5's goto-cleanup, enforced by the compiler on every exit path.</li>
+<li>std::vector is your FloatBuf industrialized: same fields, same doubling, same invalidation-on-growth rule; .data()/.size() feed C and CUDA APIs.</li>
+<li>C++ assigns by deep copy (opposite of Python's aliasing and C's pointer-passing); pass-by-value vectors is the classic silent performance bug.</li>
+<li>Templates instantiate per-type at compile time — dtype generality with zero dispatch cost; template code lives in headers (.h/.cuh), a fact CUDA is built on.</li>
+<li>The abstractions vanish at -O2 (verify with -S, as always); what remains is C's machine code with C++'s guarantees.</li>
+</ul>
+
+<h2>Quiz</h2>
+<div class="quiz">
+  <div class="q">1. <code>void process(std::vector&lt;float&gt; v)</code> is called in a loop 1000 times with a 40 MB vector. The profiler shows 60% of runtime in memcpy. Diagnosis and the one-character-ish fix?</div>
+  <button class="opt">vector is slow; switch back to raw malloc arrays</button>
+  <button class="opt" data-c="1">Pass-by-value deep-copies 40 MB per call (value semantics!); make it const std::vector&lt;float&gt;&amp; — borrow instead of copy</button>
+  <button class="opt">The allocator is fragmenting; call reserve()</button>
+  <button class="opt">memcpy means cudaMemcpy; check PCIe</button>
+  <div class="expl">40 GB of copying hiding behind a clean-looking signature — the valuesem diagram's cost row, live. const& borrows (Python's default, made explicit and safe). The deeper habit: in C++ reviews, every by-value container parameter gets a "did you mean this?" — it's correct occasionally (when you NEED a private copy), and that intent should be visible in a comment.</div>
+</div>
+<div class="quiz">
+  <div class="q">2. <code>auto &amp;x = v[3]; v.push_back(1.0f); x = 9.0f;</code> — the write to x sometimes updates v[3], sometimes corrupts, sometimes crashes. Which rule from THIS MODULE did the code break, and in which lesson did you first meet it?</div>
+  <button class="opt">References can't bind to vector elements</button>
+  <button class="opt">push_back is not thread-safe</button>
+  <button class="opt" data-c="1">Growth may realloc-move the buffer, invalidating every prior pointer/reference/iterator — 3.5's realloc rule (Ex.2), inherited by vector unchanged</button>
+  <button class="opt">auto&amp; copies, so x was never connected</button>
+  <div class="expl">The reference is an address into the OLD buffer; push_back at capacity moves the block and frees it (use-after-free wearing modern clothes). "Sometimes fine" = capacity had room (no move) — the same nondeterminism that made 3.5's version a heisenbug. Fixes: reserve() first, take the reference AFTER growth, or store the INDEX (indices survive moves — 3.5 Ex.2's closing rule). You built this bug's engine by hand two lessons ago; that's why you can now diagnose it from the symptom line alone.</div>
+</div>
+
+<h2>Exercises</h2>
+<details><summary>Exercise 1 — Build DeviceBufferSim: an RAII class owning a malloc'd float buffer (ctor allocates n floats and prints "alloc n", dtor frees and prints "free n", .data()/.size() accessors, copying FORBIDDEN — delete the copy ctor/assignment). Write a main proving: scope exit frees; early return frees; and a copy attempt fails AT COMPILE TIME. Why is no-copy the right policy for a buffer that will become cudaMalloc-backed in Module 5?</summary><div class="body">
+<pre><code>#include &lt;cstdio&gt;
+#include &lt;cstdlib&gt;
+struct DeviceBufferSim {
+    float *p; size_t n;
+    explicit DeviceBufferSim(size_t n_) : p((float*)std::malloc(n_ * sizeof(float))), n(n_) {
+        std::printf("alloc %zu\n", n);
+    }
+    ~DeviceBufferSim() { std::free(p); std::printf("free %zu\n", n); }
+    DeviceBufferSim(const DeviceBufferSim&amp;) = delete;             // no copies
+    DeviceBufferSim&amp; operator=(const DeviceBufferSim&amp;) = delete;
+    float *data() { return p; }
+    size_t size() const { return n; }
+};
+void user() {
+    DeviceBufferSim b(1024);
+    if (b.size() &gt; 0) return;        // early return → dtor STILL runs ✓
+}
+int main() {
+    { DeviceBufferSim a(256); }       // prints alloc 256 / free 256 in order ✓
+    user();                            // alloc 1024 / free 1024 despite early return ✓
+    // DeviceBufferSim c = a;          // uncomment → compile error: deleted ✓
+    return 0;
+}</code></pre>
+<p>Why no-copy: a copy would either double-free (two dtors, one buffer — 3.5's big three) or force an expensive hidden deep copy of GPU memory. Deleting copies makes ownership UNIQUE and misuse a compile error — errors moved left (3.1's whole theme). This class IS the shape of every real CUDA RAII wrapper (and of std::unique_ptr, which you'd use in production: <code>std::unique_ptr&lt;float[]&gt; p(new float[n]);</code> — two lines, same guarantees). Move semantics (transferring ownership) is the natural next chapter — flagged, deferred: the course needs unique ownership, not the full rule-of-five, and honesty about scope beats coverage theater.</p>
+</div></details>
+<details><summary>Exercise 2 — Template the oracle: port 2.4/3.4's matmul to <code>template&lt;typename T&gt; void matmul(const std::vector&lt;T&gt;&amp; A, const std::vector&lt;T&gt;&amp; B, std::vector&lt;T&gt;&amp; C, size_t M, size_t N, size_t K)</code>, verify float AND double against [[50,32],[122,77]], and then — the punchline — measure fp32 vs fp64 on 512³ and explain the ratio you see (or don't) with M1 L8 + hardware knowledge.</summary><div class="body">
+<pre><code>template &lt;typename T&gt;
+void matmul(const std::vector&lt;T&gt;&amp; A, const std::vector&lt;T&gt;&amp; B,
+            std::vector&lt;T&gt;&amp; C, size_t M, size_t N, size_t K) {
+    for (size_t i = 0; i &lt; M; i++)
+        for (size_t j = 0; j &lt; N; j++) {
+            T s = 0;
+            for (size_t k = 0; k &lt; K; k++) s += A[i*K + k] * B[k*N + j];
+            C[i*N + j] = s;
+        }
+}
+// float: {{50,32},{122,77}} ✓   double: same ✓ (integers ≤ 2²⁴ exact in BOTH — M1 L8)</code></pre>
+<p>The measurement surprise: on CPU, fp64 is typically only ~1.3–2× slower here, NOT 2× flat — this naive loop is memory-pattern-bound (the ijk column walk — 3.9's opening act), and doubles move 2× the bytes but the bottleneck mix muddies the ratio. On a gaming GPU the same comparison lands near 32× (fp64 units are 1/32 rate — 3.2 Ex.2's warning becomes a measured fact in Module 5). The template gave you the A/B experiment for one keystroke — that's the feature: dtype becomes an axis you can measure along, which is Track A6's entire methodology in miniature.</p>
+</div></details>
+
+<hr>
+<h1>Go deeper — the complete guide</h1>
+<p>The C/C++ interop seam (extern "C" and why), strings without tears, why templates live in headers, the failure modes C++ adds (and their diagnostics), and an honest map of what this course deliberately skips.</p>
+
+<h2>1. The interop seam: name mangling and extern "C"</h2>
+<pre><code>// C++ overloading needs distinct linker names:
+void saxpy(float);   → _Z5saxpyf          // "mangled" (encodes types — nm shows these)
+void saxpy(double);  → _Z5saxpyd
+// C code compiled as C has plain names: saxpy. To share across the seam:
+extern "C" {                              // "use C naming for these"
+    #include "buffer.h"                    // your 3.6 C modules, callable from C++
+}
+extern "C" void kernel_launcher(float*, size_t);   // and how CUDA exposes C APIs</code></pre>
+<p>Mangling is WHY C++ can overload and C can't — and why linking C and C++ without extern "C" yields 3.1-style "undefined reference" to names that plainly exist (the mangled and plain names don't match; nm makes the mismatch visible — the 3.1 forensics skill, promoted). Every mixed-language codebase — which includes every Python-extension and most CUDA projects — has this seam; now it's a mechanism you can debug, not folklore.</p>
+
+<h2>2. std::string: char buffers, retired for host code</h2>
+<pre><code>std::string name = "tiled";
+name += "_v2";                        // no strcat budget math, no overflow class
+std::string file = "run_" + std::to_string(i) + ".json";   // M2 L7's filenames
+name.c_str()                          // const char* for C APIs (fopen, printf %s)
+std::string line; std::getline(f, line);   // the gets() disaster, structurally gone
+// snprintf still fine for FORMATTING; string for OWNERSHIP — they compose:
+char buf[64]; std::snprintf(buf, sizeof buf, "%.2f ms", ms); std::string s = buf;</code></pre>
+<p>The entire 3.4 string-safety table collapses: budgets, terminators, and overflow are the object's problem. Same physics underneath (a growable char buffer — small-string optimization even keeps short ones inline, no heap at all), same invalidation rule on growth. Kernel-side note: no std::string in device code — GPU kernels handle numbers; text belongs to the host (a boundary Module 5 makes physical).</p>
+
+<h2>3. Range-for, auto, and the deduction rules that matter</h2>
+<pre><code>for (float x : v)        // COPIES each element — fine for scalars
+for (auto &amp;x : v)        // reference — mutate in place
+for (const auto &amp;x : v)  // borrow read-only — the default for non-tiny T
+auto n = v.size();       // size_t — auto GETS the right type (3.2's %zu ally)
+auto x = v[i];           // float COPY (auto drops the reference!) — the subtle one:
+auto &amp;r = v[i];          // you must ASK for the reference back</code></pre>
+<p>auto-drops-references is the deduction rule that bites: <code>auto row = m[i]</code> in some matrix classes copies a whole row silently. House style: <code>const auto&amp;</code> when iterating anything heavier than a scalar, plain <code>auto</code> for arithmetic locals, and explicit types on API boundaries (signatures are documentation — M2 L3's hints philosophy, compiled).</p>
+
+<h2>4. Why templates live in headers (the two-phase truth)</h2>
+<p>A template is a <em>recipe</em>, not code; <code>saxpy&lt;float&gt;</code> gets compiled only where instantiated — so the compiler needs the full recipe TEXT in every unit that instantiates it. Put the definition in a .cpp and other units see only the declaration: they emit a call to <code>saxpy&lt;float&gt;</code>… which no unit ever generated → 3.1's "undefined reference," now with a mangled template name (the era's most-Googled linker error). Hence: templates in headers (.h/.cuh), and hence header-only libraries (most CUDA utility ecosystems — CUB, Thrust — ship exactly this way). Cost: each unit recompiles the recipes it uses (build time — 3.6's blast-radius math applies); benefit: full-type-knowledge optimization at every site. The trade is the industry's chosen default for performance code.</p>
+
+<h2>5. New failure modes C++ adds (know the diagnostics)</h2>
+<table>
+<tr><th>Failure</th><th>Symptom</th><th>Diagnostic</th></tr>
+<tr><td>Invalidation on growth (quiz 2)</td><td>intermittent corruption after push_back</td><td>ASan use-after-free naming vector's internal free — 3.8's report reads the same</td></tr>
+<tr><td>Accidental copies (quiz 1)</td><td>mysterious memcpy/allocs in profiles</td><td>profiler + by-value parameter audit; -Wclass-memaccess sometimes hints</td></tr>
+<tr><td>Dangling reference to temporary</td><td><code>const auto &amp;s = f().name;</code> then use → garbage</td><td>gcc -Wdangling-* warns for common shapes; ASan otherwise</td></tr>
+<tr><td>vector&lt;bool&gt;</td><td>bit-packed pretender; .data() doesn't give bool*</td><td>use std::vector&lt;uint8_t&gt; for flag arrays — full stop</td></tr>
+<tr><td>Exceptions crossing the seam</td><td>throw escaping into C/CUDA callbacks → terminate</td><td>error codes at boundaries (3.3's convention keeps ruling the seam; CUDA device code has no exceptions at all)</td></tr>
+</table>
+
+<h2>6. Gotchas</h2>
+<div class="gotcha"><strong>By-value containers in signatures.</strong> Quiz 1's 40 GB. const& by reflex; by-value only with a comment declaring "intentional private copy."</div>
+<div class="gotcha"><strong>References/pointers across growth.</strong> Quiz 2. reserve() up front, or index — the 3.5 rule didn't retire; it got a nicer uniform.</div>
+<div class="gotcha"><strong>auto swallowing the &.</strong> <code>auto row = matrix[i];</code> copies. When you mean alias, write auto& — and when you see auto in review, ask which was meant.</div>
+<div class="gotcha"><strong>new[]/delete mismatch.</strong> <code>new float[n]</code> pairs with <code>delete[]</code>, not delete (UB). Better: don't write either — vector/unique_ptr own this course's allocations.</div>
+<div class="gotcha"><strong>Missing & in range-for mutation.</strong> <code>for (auto x : v) x *= 2;</code> scales copies, discards them, loops happily, changes nothing — the C++ twin of Python's "modify loop variable" gotcha (M2 L2). -Wunused sometimes saves you; auto& always does.</div>
+<div class="gotcha"><strong>extern "C" forgotten at the seam.</strong> Undefined reference to a function you can SEE — check nm for mangled vs plain names before doubting your Makefile (§1's forensic).</div>
+
+<h2>Scenario — the wrapper that ended the leak class</h2>
+<p>Your study group's C benchmark suite (3.5–3.6 vintage) has accumulated three memory incidents in a month: a leak in an early-return path (found by the ASan CI you built), a double-free after a refactor split ownership ambiguously, and one realloc-invalidation heisenbug that ate a weekend. The group porting meeting is 45 minutes: buffer.c/h (80 lines) → <code>std::vector</code> (0 lines — deleted outright); the harness's result arrays → vectors with reserve() sized from the dry run (3.5 P7's arena instinct, satisfied more simply); the timer → the RAII Timer, which immediately IMPROVES the science: timing now can't skip the "stop" on early exits, so three benchmarks quietly reporting only their happy paths get honest (M1 L7 would like a word with the old numbers). The C seam stays: matmul kernels remain plain C functions behind extern "C" (§1) because 3.9 A/B-tests them as swappable units and Module 5 will call the CUDA versions the same way — the group learns the architecture lesson bigger than any syntax: <em>C at the compute seam, C++ managing lifetimes around it</em>, which is precisely how PyTorch's own core is shaped (Track A2 will show you: C++ RAII tensors wrapping C-ABI kernels). Incidents since the port: zero. Lines of memory-management code under review since the port: zero. The two zeros are the same fact.</p>
+
+<h2>Practice</h2>
+<details><summary>1. Predict compile-or-run behavior: (a) <code>int &amp;r = 5;</code> (b) <code>const int &amp;r = 5;</code> (c) <code>std::vector&lt;float&gt; v(10); float *p = v.data(); v.reserve(100); *p = 1;</code> (d) same as (c) but reserve BEFORE taking p.</summary><div class="body">(a) Compile error — non-const reference can't bind a temporary. (b) Legal! — const& extends the temporary's lifetime (the rule that makes f(const T&) callable with literals). (c) reserve(100) &gt; capacity(10) → buffer moved → *p is use-after-free (runtime lottery; ASan converts to certainty). (d) Safe: capacity is already 100; taking p after any growth-capable calls is the discipline. (b) and (c) together are the reference/pointer lifecycle in four lines — a fair phone-screen question.</div></details>
+<details><summary>2. The Timer's flaw: our RAII Timer prints in the destructor — name two situations where that design misleads a benchmark, and redesign the interface (keep RAII) so the harness receives the number instead of stdout. (M1 L7 + M2 L3 purity are the graders.)</summary><div class="body">Misleads: (1) dtor-printing includes everything until scope end — accidentally timing the printf of a PREVIOUS timer or cleanup code unless scopes are surgical; (2) output-to-stdout can't be medianed/aggregated — the harness needs values, not text (M2 L3's "return, don't print", violated by v1). Redesign: <code>struct Timer { double t0; double stop() const { return now_ms() - t0; } };</code> used as <code>Timer t; work(); times.push_back(t.stop());</code> — RAII still guards nothing here... so keep a second RAII form for SCOPED logging and use the explicit stop() form inside harness loops: two tools, intents separated. Grading rubric satisfied: values flow to stats (median/IQR — M1 L7), effects (printing) stay at the edge (M2 L3). Instrument design is design.</div></details>
+<details><summary>3. Sight-read real CUDA-adjacent C++: <code>template &lt;typename T&gt; __global__ void axpy(int n, T a, const T *x, T *y);</code> and <code>thrust::device_vector&lt;float&gt; d = h;</code> — identify every concept from this lesson (and one from 3.3) in these two lines.</summary><div class="body">Line 1: template-typename (dtype axis), const T* / T* (3.3's read/write contract), by-value n and a (scalars cross to the device by copy — value semantics doing real work), __global__ (the only new token — 5.2's). Line 2: a vector CLASS whose ctor-from-host-vector performs the cudaMemcpy (RAII + value semantics composing: assignment = deep copy ACROSS THE BUS), dtor cudaFrees. You can now parse ~80% of CUDA library headers before Module 5 begins — which was this lesson's actual KPI.</div></details>
+<details><summary>4. Measure the abstraction tax honestly: time three sum-of-10M-floats loops — raw pointer C-style, vector with v[i], vector with .at(i) — at -O0 and -O2. Predict the -O2 ranking first. What does .at()'s cost buy, and when is paying it correct?</summary><div class="body">-O2 prediction (verify): raw ≈ v[i] (identical codegen — the "vanishing abstraction" claim, MEASURED not vibed), .at() slower (a branch per access; often 1.2–2× on this loop, sometimes less if the predictor eats it). -O0: everything slow, vector worse (uninlined calls) — why debug builds feel dishonest for perf (3.1 §1). .at() buys a thrown exception instead of UB on OOB — correct at API boundaries and in cold paths (parse/setup code), wrong in hot loops where the bound is already proven by the loop header (the M2 L6 boundary-vs-interior checks doctrine, compiled). Numbers in hand beat folklore: you now have a personal answer to "is vector slow?" — no, at -O2, with receipts.</div></details>
+<details><summary>5. unique_ptr in four lines: rewrite Exercise 1's DeviceBufferSim using <code>std::unique_ptr&lt;float[]&gt;</code> — which of your hand-written members (dtor, deleted copies) come free, what syntax transfers ownership OUT (returning it from a factory), and why does the compiler allow the return despite copies being deleted? (One-word answer exists; explaining it is the exercise.)</summary><div class="body"><code>struct Buf { std::unique_ptr&lt;float[]&gt; p; size_t n; explicit Buf(size_t n_) : p(new float[n_]), n(n_) {} };</code> — dtor free (unique_ptr's), copies deleted free (unique_ptr is move-only). Factory: <code>Buf make() { Buf b(1024); return b; }</code> compiles because return performs a MOVE (ownership transfers; source's pointer nulled) — the one-word answer: move semantics. The exercise's honest boundary: this course uses moves where the compiler inserts them (returns) and defers writing move ctors by hand — unique ownership + automatic moves cover the entire curriculum's needs, and knowing WHERE your knowledge's edge sits is itself the professional skill (you'll recognize std::move in read code and know what question to ask).</div></details>
+<details><summary>6. The header-template linker error, staged: put Ex.2's matmul template DECLARATION in matmul.hpp and its definition in matmul.cpp; call matmul&lt;float&gt; from main.cpp; collect the exact linker error text, then fix it two ways (move to header; explicit instantiation) and state when each fix is right.</summary><div class="body">Error: <em>undefined reference to `void matmul&lt;float&gt;(...)'</em> — mangled template name, no unit generated the instance (§4's mechanism, experienced). Fix A (default): full definition in matmul.hpp — every user instantiates what it needs; right for libraries and this course. Fix B: keep the .cpp, add <code>template void matmul&lt;float&gt;(...);</code> (explicit instantiation) there — right when instantiations are few/known and build time or binary bloat matters (large projects pin their dtype set: float/double/half, done). CUDA parallel: .cuh header templates (A) vs libraries pre-instantiating kernels per-dtype (B — what cuBLAS effectively is). You've now debugged the most-asked C++ linker question from first principles.</div></details>
+<details><summary>7. Design: the RAII rules page for the course repo (CONVENTIONS.md §C++). Cover: ownership defaults (what owns, what borrows), signature grammar (when const&/&/*/value), growth-and-invalidation policy, the C seam (extern "C" where), exceptions policy for a codebase headed to CUDA, and the two-line justification you'd give a new contributor for EACH rule. Cite lessons.</summary><div class="body">1. OWN with vector/string/unique_ptr; raw pointers BORROW only, never free (3.5's one-owner law, typed). 2. Signatures: const T& read-borrow (heavier than a scalar), T& mutate-borrow (rare, documented), T* only at C/CUDA seams (nullable or C-ABI — 3.3's grammar), value for scalars and intentional copies (comment required — quiz 1). 3. Growth: reserve() when size is knowable; NO pointers/references/iterators held across any growth-capable call — store indices (3.5 Ex.2 / quiz 2; ASan CI enforces the violations we miss). 4. Seam: compute kernels C-ABI behind extern "C" in dedicated headers (§1; keeps 3.9's A/B harness and Module 5's launchers uniform). 5. Exceptions: allowed in host setup/parse code, NEVER across the seam or in hot paths; kernel-adjacent code returns status (3.3's convention — device code has no unwinding, and mixed policies at a boundary are how programs terminate() in demos). Each rule = one scar + one enforcement (compiler flag, ASan, or grep in CI — M2 L6's constitution absorbing its C++ amendments). A conventions page where every line cites its incident is the difference between rules a team follows and rules a team scrolls.</div></details>
+
+<div class="pager">
+  <a href="lesson-06.html">← Structs, headers & the build</a>
+  <a href="lesson-08.html">Next: Segfaults, gdb & sanitizers →</a>
+</div>
+<div class="footer">GPU Mastery · Module 3 · Lesson 7 — works offline · progress saved in your browser</div>
+</div>
+<script src="../assets/diagrams3.js"></script>
+<script src="../assets/app.js"></script>
+</body>
+</html>

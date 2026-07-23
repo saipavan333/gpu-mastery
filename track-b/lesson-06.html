@@ -1,0 +1,202 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>B6 OpenMP & OpenACC Offload — GPU Mastery</title>
+<link rel="stylesheet" href="../assets/style.css">
+</head>
+<body data-lesson="bl6">
+<nav><div class="inner">
+  <a class="logo" href="../index.html">GPU<span>Mastery</span></a>
+  <a class="item" href="../index.html">Home</a>
+  <a class="item on" href="../curriculum.html">Curriculum</a>
+  <a class="item" href="../labs.html">Labs</a>
+  <a class="item" href="../setup.html">Lab setup</a>
+  <a class="item" href="../prompt.html">Generator prompt</a>
+</div></nav>
+<div class="wrap">
+
+<div class="lesson-top">
+  <div><span class="badge">Track B · Lesson 6</span><span class="badge dim">≈ 3 h</span></div>
+  <button id="donebtn" class="donebtn">Mark lesson complete</button>
+</div>
+<h1>Directives — porting 300,000 lines of science without rewriting them</h1>
+<p class="lead">Real science codes are decades of Fortran and C that will NEVER be rewritten in CUDA — and don't need to be. Directives (OpenACC, OpenMP target) let the compiler write 5.3's plumbing and 5.2's kernels from annotations, reaching 80–90% of hand-tuned speed on bandwidth-bound physics for ~1% of the code churn. The craft is entirely in the DATA clauses — 3.5's ownership tables as pragmas — and in knowing where the 90% ends.</p>
+
+<h2>Concept</h2>
+
+<h3>The model: annotate loops, compiler emits the machinery</h3>
+<div class="diagram" data-diagram="b6-directives" data-caption="A parallel-loop pragma becomes a kernel; a data pragma becomes 5.3's malloc/memcpy lifecycle. You declare WHAT is parallel and WHERE data lives; the compiler writes the how."></div>
+<pre><code>#pragma acc data copyin(a[0:n]) copy(u[0:n])     // ← 5.3's lifecycle, declared
+{
+  for (int step = 0; step &lt; STEPS; ++step) {
+    #pragma acc parallel loop collapse(2) present(a, u)
+    for (int i = 1; i &lt; n-1; ++i)
+      for (int j = 1; j &lt; n-1; ++j)
+        unew[i][j] = stencil(u, a, i, j);         // ← becomes a 5.2 kernel
+    swap(u, unew);
+  }
+}   // ← D2H + free happen HERE, once — not per step
+// OpenMP target spelling of the same ideas:
+//   #pragma omp target data map(to:a[0:n]) map(tofrom:u[0:n])
+//   #pragma omp target teams distribute parallel for collapse(2)
+// mapping to your vocabulary: gang≈block, worker/vector≈threads/warp (5.2);
+// collapse(2) = the 2D grid flattening you did by hand; present = "trust
+// the data region" (and crash honestly if betrayed).</code></pre>
+
+<h3>Data clauses ARE the ownership table</h3>
+<div class="diagram" data-diagram="b6-map" data-caption="copyin/copy/create/present — each clause is a row from 3.5's ownership table. The classic 100× disaster is one missing data region away."></div>
+<pre><code>copyin(a)   H2D once at region entry, device reads it        (read-only inputs)
+copy(u)     H2D at entry + D2H at exit                       (the round-trippers)
+create(tmp) device-only scratch — NEVER crosses (the cheapest clause: use it
+            for every intermediate; forgetting it costs a round trip per field)
+present(a)  "already resident — trust the enclosing region" (and a loud crash
+            if not: 3.3's assert as a memory-map contract)
+THE DISASTER (quiz 1, and every directive team's week one): no enclosing data
+region → the compiler, honoring correctness, copies EVERYTHING in and out
+around EVERY kernel launch — 4.6's bridge toll paid per loop iteration:
+100× slowdowns that profile as pure H2D/D2H. The fix is ONE line of scope.</code></pre>
+
+<h3>The 90/10 curve — where directives end</h3>
+<div class="diagram" data-diagram="b6-ninety" data-caption="Directives reach ~80–90% of hand CUDA quickly on bandwidth-bound physics; the last 10–20% (shared-memory choreography, warp tricks) is paid in craft. Profile decides who crosses."></div>
+<pre><code>directives shine: stencils, elementwise physics, reductions (reduction(+:s)
+  clauses — the compiler emits 5.8's ladder), streaming loops — anything
+  BANDWIDTH-BOUND, because the ceiling is the bus (4.7) and the compiler's
+  straightforward kernel hits the same ceiling your hand kernel does
+directives strain: 5.5-style shared-memory tiling (cache directives exist
+  but control is coarse), warp shuffles/cooperative tricks (5.8/5.6's
+  fine grain), fused multi-op kernels with algebraic restructuring (A5's
+  online softmax — a compiler won't invent the rescale identity)
+the professional pattern: directives EVERYWHERE + interop for the 1–3
+  kernels the profile indicts — acc host_data use_device(u) hands the raw
+  device pointer to YOUR 5.x/cuBLAS kernel: both worlds, one build.</code></pre>
+
+<h2>Worked example</h2>
+<div class="card">
+<p><strong>Task:</strong> Port B3's heat stepper with six pragmas, and audit it like an adult: predicted ceiling, measured fraction, and the one-line disaster staged then fixed. (Representative T4-class numbers; the B3 fixtures run at every stage.)</p>
+<pre><code>the port: 1 data region (outside the time loop!) + 1 parallel-loop collapse(2)
+  + present on the inner pragma + create(unew) + async(1) on the loop,
+  wait before the ledger reads — six lines into a 40-year-old-style C code
+predicted: stencil is bandwidth-bound (B3: 0.12 FLOP/B) → the ceiling is
+  220 GB/s regardless of WHO wrote the kernel → directives should land
+  within ~10–20% of the hand-CUDA r2 (1.4 ms/step)
+measured (representative): 1.6 ms/step ≈ 88% of hand CUDA  ✓ the 90/10
+  curve's happy side — for SIX LINES vs B3's kernel+harness
+staged disaster: delete the data region → 142 ms/step (89× — the copies
+  profile as H2D/D2H walls, 5.10's timeline names it in one look); restore
+  the line, re-run fixtures: conservation 2e-16, spread law 4 digits —
+  physics doesn't care who wrote the kernel, and the fixtures don't either
+the honest asterisk: at B10's multi-GPU rung, directives + MPI still need
+  host_data use_device for CUDA-aware sends (B5) — the interop seam is
+  where directive purity ends and your Module-5 literacy resumes.</code></pre>
+<p><strong>What to internalize:</strong> on bandwidth-bound physics the compiler's kernel and your kernel hit the SAME roofline ceiling — so the 88% wasn't luck, it was 4.7 predicting that authorship doesn't move a memory-bound ceiling. Directives lose exactly where ceilings respond to craft (shared-memory reuse, warp choreography — the compute-bound and latency-bound regimes). Knowing WHICH regime your loop lives in — the skill this course drilled from Module 4 — is what makes directive-vs-CUDA a calculation instead of a religious war.</p>
+</div>
+
+<h2>Key points</h2>
+<ul class="keypoints">
+<li>Directives declare WHAT is parallel (parallel loop / target teams) and WHERE data lives (data regions); the compiler writes 5.2's kernels and 5.3's lifecycle — 80–90% of hand speed on bandwidth-bound physics for ~1% code churn.</li>
+<li>Data clauses are 3.5's ownership table: copyin/copy/create/present, with create for every device-only intermediate and present as the loud contract.</li>
+<li>The one-line disaster: a missing enclosing data region makes the compiler copy everything per kernel launch — measured-class 89× slowdowns that profile as pure H2D/D2H (the first thing to check on ANY slow directive code).</li>
+<li>The 90/10 curve is regime physics, not compiler weakness: bandwidth-bound loops hit the same 220 GB/s ceiling under any author; craft only moves compute/latency-bound ceilings (5.5/5.8 territory) — profile, then interop.</li>
+<li>host_data use_device is the interop seam: raw device pointers flow to your CUDA/cuBLAS/MPI calls — directives everywhere, hand kernels where the profile indicts, one build.</li>
+<li>The B3 fixture suite runs unchanged on directive builds — physics oracles are author-agnostic, which is exactly why they anchor ports (M2 L6's constitution surviving its third compiler).</li>
+</ul>
+
+<h2>Quiz</h2>
+<div class="quiz">
+  <div class="q">1. A Fortran climate module's first OpenACC port runs 74× SLOWER than the CPU original. The team concludes "our code isn't GPU-friendly" and shelves the effort. The profile (which nobody opened) would have shown 96% of time in cuMemcpyHtoD/DtoH, kernels totaling 0.9%. Write the rescue: mechanism, the one-line-class fix, the expected outcome arithmetic, and the organizational lesson about WHERE that profile should have been in the decision.</div>
+  <button class="opt">Fortran can't offload efficiently — rewrite in C first</button>
+  <button class="opt" data-c="1">The signature is b6-map's disaster verbatim: no enclosing data region, so every parallel loop's operands round-trip the bridge per invocation — 96% memcpy time IS the diagnosis (5.10's WHERE, unread). Fix: one data region (or unstructured enter/exit data for messy lifetimes) hoisting residency outside the time loop, plus create() on intermediates; expected outcome by arithmetic: kernels were 0.9% of 74×-slower ≈ comparable-to-CPU compute, and stencil-class loops then land near the bandwidth ceiling → tens-of-× FASTER than CPU, not 74× slower — the staged demo measured 89× from this one line. Organizational lesson: the profile comes BEFORE the verdict, always — "not GPU-friendly" is a claim about regimes (4.7) that a timeline falsifies in five minutes, and shelving a port on an unprofiled 74× is deciding a hardware strategy on a typo</button>
+  <button class="opt">The GPU was thermal throttling — check cooling</button>
+  <button class="opt">74× slower means the arrays are too small</button>
+  <div class="expl">This exact arc — catastrophic first port, verdict pronounced, profile unopened — is the most common way institutions wrongly conclude "GPUs don't work for us" (the B6 twin of 5.7's "not GPU-shaped" scenario). The memcpy-dominated profile is the single most recognizable signature in all of directive computing; pattern-matching it from the symptom description alone (74×, no profile) is the fluency bar. Option 4 has a real cousin (tiny arrays ARE launch/toll-bound) but 96% memcpy convicts the data region, not the size.</div>
+</div>
+<div class="quiz">
+  <div class="q">2. After the fix, the same module runs 31× over CPU — but a hand-CUDA rewrite of its dominant kernel benchmarks 1.18× faster than the directive version. A new team member proposes rewriting all 14 offloaded kernels in CUDA "since CUDA is clearly faster." Arbitrate with the 90/10 curve, Amdahl, and the maintenance ledger — and name the ONE kernel class where you'd approve the rewrite.</div>
+  <button class="opt">Approve — 18% × 14 kernels compounds to huge wins</button>
+  <button class="opt" data-c="1">Amdahl first: if the dominant kernel is 40% of runtime, 1.18× on it buys 1.06× end-to-end; across all 14 (assuming similar margins) maybe 1.15× total — for 14 kernels' worth of CUDA to own forever (A3's maintenance scenario: every arch bump, every new hire, every review now bilingual). The 90/10 curve says WHY the margin is small: these are bandwidth-bound physics loops — both authors sit at the same 220 GB/s ceiling, and 18% is tiling/launch-shape crumbs, not a regime change [worked ex]. The ledger: 1.15× vs permanent bilingual maintenance of the code that was ported with directives PRECISELY to avoid that. Verdict: keep directives; revisit per-kernel WHEN the profile shows a kernel whose ceiling responds to craft. The approvable class: a kernel with real REUSE structure the compiler can't exploit — a 5.5-style tiling opportunity (small matrix products per cell, flux kernels with shared operands) or an A5-style fusion with algebraic restructuring — where hand CUDA buys 2–5×, not 1.18×: THERE the interop seam earns its keep, one kernel at a time (b6-ninety's dashed line, crossed with evidence)</button>
+  <button class="opt">Reject — directive code must stay pure</button>
+  <button class="opt">Split the difference: rewrite 7 of 14</button>
+  <div class="expl">The three-instrument arbitration (Amdahl for the ceiling, the regime curve for the mechanism, the maintenance ledger for the cost) is this course's standard governance move — 5.10 quiz 1 and A11 quiz 1 ran the same play. "Purity" (option 3) is as unserious as "rewrite everything": the interop seam exists so decisions can be per-kernel and evidence-priced. The 2–5×-not-1.18× threshold for approving hand kernels is a good default number to carry into meetings.</div>
+</div>
+
+<h2>Exercises</h2>
+<details><summary>Exercise 1 — The port lab (NVHPC SDK locally/cluster, or the OpenMP-host fallback anywhere): take YOUR B3 stepper (C version) and port it with six pragmas; run the full B3 fixture suite on the ported build; stage the missing-data-region disaster and record the slowdown + the memcpy-dominated profile; restore and measure the fraction-of-hand-CUDA on your card. Lab note: no NVIDIA compiler at hand → compile the SAME OpenMP target pragmas for the host (any modern gcc/clang) — the DATA-CLAUSE discipline and fixtures exercise identically; the GPU measurement waits for cluster access.</summary><div class="body">
+<pre><code>expected: fixtures green untouched (author-agnostic physics); disaster
+staged: 50–100× with nsys/nvprof showing wall-to-wall memcpy (screenshot
+it — quiz 1's signature, self-administered); restored: 80–92% of your B3
+r2 kernel on bandwidth-bound stencils. Deliverable: the three-line audit
+"predicted ceiling / measured / % + one-sentence attribution" — the same
+sentence format every rung of this course files (5.10's discipline).</code></pre>
+</div></details>
+<details><summary>Exercise 2 — The data-clause autopsy drill (paper + small code, runs anywhere): four staged bugs — (a) present(u) with no enclosing region; (b) copy(tmp) on a pure scratch array; (c) reading results on the host mid-region without update host(u); (d) an async(1) loop with the conservation ledger read before wait. For each: predicted symptom class (crash / silent-stale / silent-slow / race), the observed behavior, the fixture or profile view that catches it, and the one-line fix.</summary><div class="body">
+<pre><code>(a) present-not-present → RUNTIME CRASH with a named variable (the loud
+    contract — the BEST failure in this lesson: 3.3's assert philosophy).
+(b) copy on scratch → silent-SLOW: two useless bridge crossings per region
+    (profile catches; fixtures can't — it's correct!). Fix: create(tmp).
+(c) host read mid-region → silent-STALE: host sees the pre-region copy —
+    conservation ledger reads a frozen sum while the device evolves
+    (fixture catches on step 2!). Fix: #pragma acc update host(u) at the
+    read point — priced consciously as a bridge toll (4.6).
+(d) async + early ledger → the 5.3 async law in pragma clothes: reads race
+    the queue — intermittent off-by-one-step ledgers (bitwise rung catches).
+    Fix: wait(1) before the read.
+the drill's moral: FOUR failure classes from ONE concept (residency), each
+with a DIFFERENT detector — which is why the suite has layers (M2 L6),
+and why "it runs" means nothing in directive land without them.</code></pre>
+</div></details>
+
+<hr>
+<h1>Go deeper — directive craft</h1>
+
+<h2>1. Unstructured data + deep structures (real codes are messy)</h2>
+<pre><code>#pragma acc enter data copyin(mesh)      // residency without lexical scope —
+#pragma acc exit data delete(mesh)       // for objects living across modules
+deep copy pain: struct { double *u; } — copyin(s) copies the POINTER, not
+  the payload (3.4's shallow-copy lesson, offload edition): attach/detach
+  semantics or manual member-wise clauses; Fortran allocatables fare better
+  (descriptors carry shape). This is the #1 directive time-sink in C codes —
+  budget for it in any port estimate, or flatten hot structs to arrays
+  (M2 L7's SoA advice, again, for a fourth compiler).</code></pre>
+
+<h2>2. Kernel-shape control (when the defaults disappoint)</h2>
+<pre><code>#pragma acc parallel loop gang vector_length(128) collapse(2)
+  gang/worker/vector ↔ grid/warp-ish/thread (the 5.2 hierarchy renamed);
+  compilers pick decent defaults for dense loops — override only after a
+  5.10-style profile names occupancy or shape as the gap (the 5.6 dial's
+  pragma spelling; same rule: table first, knob second)
+reduction(+:sum) — the compiler emits 5.8's tree; min/max/logical variants;
+  trust it for scalars, benchmark it for arrays (array reductions are young)
+async(q)/wait(q) — 5.9's streams as integer queues: overlap compute with
+  update host/device traffic exactly like the pinned-ring days.</code></pre>
+
+<h2>3. Gotchas</h2>
+<div class="gotcha"><strong>The missing data region.</strong> Quiz 1, staged at 89×. First check on any slow directive code, before any cleverness.</div>
+<div class="gotcha"><strong>copy where create belongs.</strong> Scratch arrays round-tripping the bridge silently (Ex.2b) — correct, slow, and invisible to fixtures: only the profile's memcpy lines convict.</div>
+<div class="gotcha"><strong>Stale host reads.</strong> Anything host-side inside a data region (printfs, ledgers, MPI on host buffers!) sees entry-time data unless update'd — the B5 interop trap: MPI_Send of a host pointer mid-region ships FROZEN halos (use host_data use_device + CUDA-aware, or update first).</div>
+<div class="gotcha"><strong>Pointer-swap ping-pong vs the region.</strong> swap(u, unew) on HOST pointers doesn't swap device residency mappings — the classic "results lag one step" bug; swap inside the device world (or use acc attach semantics) and re-run the bitwise rung.</div>
+<div class="gotcha"><strong>-fast/-ffast-math flags leaking in.</strong> NVHPC's aggressive defaults can reassociate your B8 compensated sums (the measured Kahan deletion!) — numerics flags are part of the build contract (B8's methods-section discipline).</div>
+<div class="gotcha"><strong>Judging directives on compute-bound kernels.</strong> A GEMM-shaped loop under pragmas will lose big to cuBLAS — that's not a directive failure, it's B2's library-first law: directives for YOUR loops, libraries for THE classics, interop stitching both.</div>
+
+<h2>Scenario — the 300k-line code that made it to the GPU era in one quarter</h2>
+<p>A structural-mechanics group (Fortran, 22 years, 300k lines, three domain scientists who know every line and zero CUDA) faces a cluster transition: the new machine is 90% GPU FLOPs. The rewrite quote from a contractor: 18 months, high risk. The B-track path taken instead, one quarter, in-house: week 1–2, profile the CPU code (5.10's law first — three loop nests are 91% of runtime); week 3–6, data-region architecture (the hard thinking: residency lifetimes across the solver's phases — 3.5's ownership map drawn once for the whole code), then pragmas on the three nests + fixtures (their existing regression suite + a conservation ledger added per B3); week 7: the missing-region disaster found ON DAY ONE by profile (89×-class, fixed in an hour — because they knew the signature from training, not from suffering); weeks 8–10: the 90/10 audit — two nests at 85%+ of roofline ceiling (done), one flux kernel with reuse structure at 40% → the ONE hand-CUDA kernel written, via host_data interop (quiz 2's approvable class, 3.1× on that kernel); weeks 11–12: B5's MPI rungs + the scaling workbook. Outcome: 24× end-to-end over the old CPU nodes, 14 pragmas + one CUDA kernel of new code, domain scientists still own every physics line. The department head's summary, which belongs in this course: <em>"We didn't port the code to the GPU; we declared where its data lives and let the compiler port itself — then spent our expertise on the one kernel where expertise pays."</em> That sentence is the whole lesson.</p>
+
+<h2>Practice</h2>
+<details><summary>1. Classify each loop for directive-vs-hand-CUDA using regime + reuse (predict the directive %-of-hand): (a) saxpy-shaped update; (b) B3's 5-point stencil; (c) 8×8 per-cell matrix solves in a flux kernel; (d) B4's Monte Carlo paths; (e) an A5-style fused normalize-scale-shift chain.</summary><div class="body">(a) Bandwidth-bound, zero reuse: directives ≈ 95–100% (the compiler can't miss). (b) Bandwidth-bound, cache-served reuse: 80–90% (hand tiling buys the last slice — worked ex's 88%). (c) Compute-dense with heavy per-cell reuse: directives maybe 30–50% — the b6-ninety dashed zone; hand CUDA (or batched cuBLAS! B2 P6) wins big: quiz 2's approvable class. (d) Embarrassingly parallel, RNG state per thread: directives fine for the loop but cuRAND's device API needs interop — hybrid by necessity. (e) Fusion with algebraic structure: compilers fuse adjacent loops sometimes, but A5-class restructuring (online rescales) is human algebra — hand/Triton territory. The classifier: regime (which ceiling?) × reuse (does craft move it?) — two questions, five correct forecasts.</div></details>
+<details><summary>2. Draw (in prose) the residency map for a solver with phases init → 10k×(assemble → solve → update) → output: which arrays get enter/exit data at which boundaries, where update host is legal, and the ONE placement that makes the whole map wrong.</summary><div class="body">enter data at init's end: mesh geometry (copyin — read-only forever), state u (copyin), scratch/assembly buffers (create). The 10k loop runs with EVERYTHING present — zero clauses inside (present asserts only). update host(u_norm_scalar) allowed per-N-steps for monitoring — a scalar, priced at one toll (4.6), not the field. exit data at output: copyout(u), delete the rest. The killer placement: enter data INSIDE the time loop (or a structured region wrapping only assemble) — residency churns per iteration and you've rebuilt quiz 1 with extra steps. The map's principle: residency boundaries align with PHASE boundaries, not loop bodies — 3.5's "allocate at the top, free at the bottom," inflated to program scale.</div></details>
+<details><summary>3. Your directive build passes all fixtures but runs 2.1× slower than last month; nothing in the physics changed. The module system updated the compiler. List the four version-sensitive suspects and the 10-minute audit order (harvest: 5.6's register weather, quiz 1's signature, §2's defaults, B8's flags).</summary><div class="body">(1) Kernel-shape defaults changed (compiler picks new gang/vector sizes → occupancy shift — 5.6's weather, pragma edition): compare -Minfo=accel output old-vs-new (the compiler NARRATES its choices — read the diff). (2) Data-region behavior/attach semantics changed → new implicit copies: nsys memcpy lines (quiz 1's signature at smaller scale). (3) Numerics flags default-shifted (-fast implying reassociation → different code paths AND B8 risk): diff the effective flag sets. (4) Reduction implementation regressed for your array shapes: isolate with a reduction microbenchmark. Order: -Minfo diff (2 min, names most), nsys (5 min), flags diff (1 min), micro (10 min). The meta: directive builds have a WEATHER LAYER (the compiler's choices) that hand-CUDA exposes explicitly — the -Minfo listing is your ptxas -v (5.6's tripwire), and it belongs in CI logs for exactly this morning.</div></details>
+<details><summary>4. Translate the interop seam precisely: what does host_data use_device(u) actually change, why is it REQUIRED for CUDA-aware MPI_Send of a resident array, and what goes wrong with each of the two naive alternatives (sending u directly; update host then send)?</summary><div class="body">Inside host_data, the symbol u evaluates to its DEVICE address (the runtime's residency table consulted — otherwise host code sees the host pointer). CUDA-aware MPI needs the device pointer to engage GPUDirect (B5); sending u directly ships the HOST copy — which is STALE (frozen at region entry — gotcha 3): correct-looking, physically wrong halos (B3 quiz 2's seam, manufactured). update host + send is CORRECT but pays D2H per exchange — the staged path rebuilt voluntarily (B5 quiz 2's 2.8 GB/s, self-inflicted): fixtures pass, scaling dies. host_data is the one-line bridge that keeps both correctness AND the fast path — and its absence is the #1 reason "directives + MPI" ports mysteriously underperform their pure-CUDA twins.</div></details>
+<details><summary>5. NVHPC's -Minfo=accel prints, for your stencil: "Generating implicit copyin(u[:n*n]) … loop carried dependence of unew prevents parallelization … generated vector simd code" on ONE of your three loops. Decode all three messages, the fix for each, and which one the fixtures would have caught.</summary><div class="body">(1) implicit copyin: you forgot the clause; the compiler covered for you PER REGION — correct now, quiz-1 disaster when this loop moves inside the time loop: make residency explicit (the map, P2). (2) carried dependence on unew: the compiler suspects iteration i writes what i+1 reads — usually pointer aliasing it can't disprove (3.3's restrict lesson returns!): restrict-qualify or use independent/loop directives to assert — but FIRST verify it's truly independent (if the dependence is REAL, forcing it is a race: Ex.2's class-d cousin, and the bitwise rung catches your lie). (3) "vector simd" on what should be a GPU loop: this loop fell back to HOST vectorization (missing target/parallel construct or unsupported inner call) — silently correct, silently CPU: only the profile (kernel absent from the GPU timeline) or a 50× step-time anomaly reveals it. Fixtures catch (2)-if-forced (bitwise/symmetry break); (1) and (3) are performance-silent — the compiler LISTING is their only witness, which is why -Minfo reading is a named skill in this track, the exact peer of reading ptxas -v (5.6) and PTX (A4 Ex.2).</div></details>
+<details><summary>6. Estimate a port (the scenario's week-3 skill): a 120k-line ocean model, profile says 4 loop nests = 87% of time, all stencil/streaming-shaped; 30 arrays cross phases; structs are flat Fortran arrays. Give the phase plan with time estimates, the two risk items you'd flag, and the go/no-go arithmetic vs a quoted 12-month rewrite.</summary><div class="body">Plan: residency map for 30 arrays (1–2 weeks — THE thinking); pragmas on 4 nests + fixture wiring (1–2 weeks; Fortran flat arrays = no deep-copy pain — the risk that ISN'T there, worth stating); disaster-audit + -Minfo review (days, because the signatures are known); 90/10 audit + at most 1–2 interop kernels (2–3 weeks); MPI rungs + scaling workbook (2 weeks). Total ≈ one quarter, in-house, scientists retain ownership. Risks flagged: (1) any host-side physics INSIDE the time loop (I/O, diagnostics) forces update tolls — audit their frequency now (4.6 pricing); (2) the solver library dependency (if any nest calls a CPU library per step, that's a B2 replacement project hiding inside the port — scope it separately). Go/no-go: quarter × in-house vs 12 months × contractor × ownership-loss; directives win unless the profile had shown compute-bound reuse-heavy kernels dominating (then the calculus shifts toward targeted CUDA anyway — never toward the full rewrite). Port estimation from a profile + this checklist is a genuinely rare, genuinely senior skill — and it's four numbers.</div></details>
+<details><summary>7. Interview closer: "Would you port our legacy simulation with directives or CUDA?" — 90 seconds: profile-first, the regime argument for why directives reach 80–90% on bandwidth-bound physics, the data-region discipline as the actual work, the staged-disaster signature you'd check on day one, the interop seam for indicted kernels, and the maintenance ledger that usually decides it.</summary><div class="body">Skeleton: "Profile before ideology: if the hot loops are bandwidth-bound stencils and streams — they usually are in simulation — the ceiling is the memory bus, and a compiler-generated kernel hits the same 220 GB/s mine does: I've measured directive ports at 88% of hand CUDA for six pragmas [worked ex]. The real work isn't the loop pragmas, it's the RESIDENCY MAP — data regions aligned to program phases, create for scratch, present as contract: 3.5's ownership table, declared [§map, P2]. Day one I check the one-line disaster: a missing data region copies the world per launch — 89× measured, and it profiles as wall-to-wall memcpy, which is also why 'we tried GPUs, 74× slower' verdicts deserve a profile subpoena [quiz 1]. Where the profile indicts a kernel whose ceiling responds to craft — reuse structure, fusion algebra — I cross the interop seam for THAT kernel: host_data hands my CUDA the device pointer, 2–5× wins only [quiz 2, P4]. The decision is usually settled by the maintenance ledger: domain scientists keep owning their physics in their language, and the CUDA surface stays small enough to staff. Directives where authorship doesn't move the ceiling; craft where it does; a profile to tell them apart — that's the whole policy." Close with the 300k-line quarter story if they want proof it survives contact [scenario].</div></details>
+
+<div class="pager">
+  <a href="lesson-05.html">← MPI + CUDA</a>
+  <a href="lesson-07.html">Next: Clusters — SLURM, modules, Apptainer →</a>
+</div>
+<div class="footer">GPU Mastery · Track B · Lesson 6 — works offline · progress saved in your browser</div>
+</div>
+<script src="../assets/diagramsB.js"></script>
+<script src="../assets/app.js"></script>
+</body>
+</html>

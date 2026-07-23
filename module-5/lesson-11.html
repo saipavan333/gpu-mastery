@@ -1,0 +1,199 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>5.11 Capstone — The Matmul Ladder — GPU Mastery</title>
+<link rel="stylesheet" href="../assets/style.css">
+</head>
+<body data-lesson="m5l11">
+<nav><div class="inner">
+  <a class="logo" href="../index.html">GPU<span>Mastery</span></a>
+  <a class="item" href="../index.html">Home</a>
+  <a class="item on" href="../curriculum.html">Curriculum</a>
+  <a class="item" href="../labs.html">Labs</a>
+  <a class="item" href="../setup.html">Lab setup</a>
+  <a class="item" href="../prompt.html">Generator prompt</a>
+</div></nav>
+<div class="wrap">
+
+<div class="lesson-top">
+  <div><span class="badge">Module 5 · Capstone</span><span class="badge dim">≈ 2–3 days</span></div>
+  <button id="donebtn" class="donebtn">Mark lesson complete</button>
+</div>
+<h1>Capstone — The Matmul Ladder: everything you know, one repo, defensible</h1>
+<p class="lead">No new concepts today. The capstone is a PROJECT: climb matmul from 2 GFLOP/s to ~40% of your GPU's peak, one audited rung at a time, and package it so a stranger — or an interviewer — can verify every claim. This repo is the deliverable of the entire core curriculum. Build it like it's going on your résumé, because it is.</p>
+
+<h2>The spec</h2>
+<pre><code>DELIVERABLE  a public git repo: sgemm ladder, C = αAB + βC, fp32, row-major
+RUNGS        v0 CPU oracle → v1 naive → v2 coalesced → v3 tiled →
+             v4 register-tiled → v5 vectorized/tuned → cuBLAS reference
+EVERY RUNG   fixture-green (budgeted vs double oracle) · sanitizer-clean ·
+             GpuTimer median (5.9) · roofline placement (4.7) · occupancy
+             audit (5.6) · ncu table row (5.10) · one-paragraph writeup:
+             lever pulled, predicted delta, measured delta, gap named
+DEFENSE      README table + the Q&A bank (below) answered in your own words
+RULE OF THE GAME  predictions BEFORE measurements, in writing, every rung
+             (M1 L7's ritual — the repo's git history should prove it)</code></pre>
+
+<h2>The ladder at altitude — know the terrain before climbing</h2>
+<div class="diagram" data-diagram="m5l11-ladder" data-caption="Representative T4 ladder, N=2048. Each rung names its lever and its lesson. Your numbers WILL differ — the shape and the reasoning must not."></div>
+<pre><code>rung  lever (lesson)                       T4 GFLOP/s   % of 8.1 TF   × prev
+v0    CPU ikj -O2, 1 core (3.9)                ~2.5        —            —
+v1    one thread/output, bad mapping (5.2)      2.1       0.03%        ~1×
+v2    index swap → coalesced B (5.7)            ~95        1.2%        45×
+v3    16×16 shared tiles (5.5)                 ~600        7.4%        6.3×
+v4    4×4 register micro-tiles (5.6)          ~2200       27%          3.7×
+v5    float4 loads + 64×64 blocks (5.7)       ~3200       40%          1.5×
+ref   cuBLAS sgemm                            ~4400       54%          1.4×
+// two readings of the same table:
+//   the ladder's TOTAL: 1500× from v1 to v5 — all of it index arithmetic,
+//     memory placement, and resource budgeting. Zero exotic instructions.
+//   the CEILING: cuBLAS's 54% ≈ practical peak for fp32-on-CUDA-cores
+//     (real sgemm must issue loads alongside FMAs — pure-FMA "peak" is a
+//     brochure number, 4.7's derate lesson). The 1.4× v5→cuBLAS gap is
+//     months of vendor tuning (swizzles, cp.async, scheduling) — respect
+//     it, cite it, don't chase it in week one.</code></pre>
+
+<h2>Phase 0 — the trust stack (build this BEFORE any kernel)</h2>
+<div class="diagram" data-diagram="m5l11-trust" data-caption="The verification pyramid: every performance claim stands on the layer below it. A fast kernel on a broken layer is a liability with good numbers."></div>
+<pre><code>repo/
+  src/ v1..v5.cu  common/ cuda_check.h (5.4)  gpu_buffer.cuh (5.3)
+                          gpu_timer.h (5.9)   oracle.cpp (3.9's ikj, DOUBLE)
+  tests/ test_plumbing.cu (5.3 P7 — runs FIRST, forever)
+         test_sgemm.cu    — every rung × {N=16 hand-checkable, 257, 1024,
+                            4095 ragged, non-square 512×1024×256}
+  bench/ ladder.cu — GpuTimer medians, fixed clocks noted, N labeled
+  MACHINE.md — 5.1's generator output + measured ceilings (5.3 Ex.2, 5.7 Ex.1)
+TOLERANCE POLICY (write it in the README, cite M1 L8):
+  oracle computes in double; kernels in fp32 with FMA. |gpu−oracle| ≤
+  rtol·|oracle| with rtol = K·2⁻²³-ish scaled ≈ 1e-4 at K=2048 (each output
+  is a K-term sum: error budget GROWS with K — a rtol that ignores K will
+  false-alarm on big matrices and rubber-stamp small ones).
+THE BITWISE SURPRISE you must be able to explain (defense bank #2):
+  v1 through v5 are typically bitwise IDENTICAL to each other — every rung
+  accumulates each output's K products in the same k-order with the same
+  FMA contraction; tiling reorders LOADS, not ADDS (Module 3's loop-reorder
+  lesson, GPU edition). None match the CPU (FMA vs separate mul+add — M1 L8).
+  What WOULD break rung-vs-rung bitwise: split-K, atomics (5.8), reordered
+  accumulator unrolls. Your fixtures should ASSERT rung-agreement bitwise
+  AND oracle-agreement budgeted — two different claims, two different tests.</code></pre>
+
+<h2>Phases 1–5 — the climb (one rung, one lever, one audit)</h2>
+<div class="diagram" data-diagram="m5l11-regtile" data-caption="v4's move: each thread owns a 4×4 accumulator patch in REGISTERS, reading 4+4 shared values to update 16 outputs — arithmetic intensity climbs again, occupancy drops by design (5.6's trade, chosen deliberately)."></div>
+<pre><code>PHASE 1  v1, v2 (5.2 + 5.7): the one-line index swap IS rung v2 — commit them
+         separately so the 45× diff is a single line in your history (the
+         5.7 scenario, reenacted as a commit).
+PHASE 2  v3 (5.5): TILE=16 skeleton + BOTH barriers; racecheck before timing
+         (speed claims on racy kernels are void — trust stack, layer 3).
+PHASE 3  v4 (5.6): 4×4 micro-tiles. Each thread: 16 accumulators + 4+4 shared
+         reads per k-step → 16 FMAs per 8 loads (vs 1 per 2 in v3) — the AI
+         lever pulled INSIDE the SM. Run the FULL audit ritual: ptxas -v
+         (expect ~90–128 regs), the min() table, the occupancy verdict
+         (~50%, registers binding), and the sentence explaining why that's
+         FINE (5.6's worked example — you are re-deriving it on your card).
+PHASE 4  v5 (5.7): float4 loads for A/B staging (alignment: N%4, else pitch
+         or scalar tail); optional double-buffer (5.5 P4) — price its shared
+         bill against YOUR occupancy table first, predict, then measure.
+PHASE 5  the 5.10 loop on every rung: ncu table (SOL/sectors/occ/stalls) —
+         the metrics should MIGRATE exactly as 5.10's worked example showed:
+         sectors clean up at v2, SOL-mem falls from 96% toward 60s at v3–v4,
+         stall-barrier rises then falls across v3→v4 (5.10 P4's rotation).
+         Any metric that DOESN'T match the story: that's your gap to name
+         (4.7's law — this is where real learning happens; write it down).</code></pre>
+
+<h2>Phase 6 — the ship package</h2>
+<pre><code>README.md   the ladder table (YOUR numbers, YOUR card, N labeled, medians) ·
+            tolerance policy w/ K-scaling · the bitwise-surprise paragraph ·
+            "what I'd do next" (cp.async, swizzled smem, split-K + 5.8's
+            determinism note, TCs → Track A) — scoped, honest, cited
+CI          plumbing suite + fixtures + ptxas-regs tripwire (5.10 §2) ·
+            weekly sanitizer job (5.4) — yes, on a solo repo: the HABIT is
+            the credential; interviewers read CI configs like tea leaves… no:
+            like EVIDENCE, which is the point
+SHIP RULE   (from 5.9's scenario) every sync outside a drain point carries a
+            justifying comment · every claim in the README traces to a
+            committed script — nothing hand-waved, nothing unreproducible</code></pre>
+
+<h2>Key points</h2>
+<ul class="keypoints">
+<li>The capstone's thesis: 1500× of matmul is index arithmetic + memory placement + resource budgets — the three literacies of Modules 4–5 — with zero exotic hardware features.</li>
+<li>Trust stack before speed: plumbing suite, double-precision oracle with K-scaled tolerance, sanitizers, THEN benchmarks — a fast kernel on an unverified stack is a liability with good numbers.</li>
+<li>Rungs v1–v5 are bitwise identical to each other (same k-order, same FMA) but never to the CPU — assert rung-agreement bitwise and oracle-agreement budgeted, as two separate tests.</li>
+<li>Every rung ships with prediction-before-measurement, the lever's lesson citation, and the ncu row that confirms the mechanism — the gap between predicted and measured is the rung's real lesson.</li>
+<li>cuBLAS at ~54% of brochure peak IS the practical ceiling for fp32 CUDA-core sgemm; knowing why (issue-slot sharing, 4.7's derates) and when not to compete (production uses the library) is part of the deliverable.</li>
+<li>The repo is the credential: commit history proving the ritual, CI proving the habits, README proving you can communicate a performance claim a stranger can verify.</li>
+</ul>
+
+<h2>Defense quiz — the two you WILL be asked</h2>
+<div class="quiz">
+  <div class="q">1. Interviewer: "Your v5 hits 3.2 TF; cuBLAS hits 4.4 on the same card. Why would anyone ever run your kernel — and when would hand-rolling actually be the right call in production?"</div>
+  <button class="opt">Mine is simpler to read — that's worth 30%</button>
+  <button class="opt" data-c="1">In production, for plain sgemm: nobody should — you ship the library (vendor-tuned per arch; my ladder exists so the library is a CHOICE I can audit, not a mystery I depend on). Hand-rolling earns its keep exactly where libraries can't go: FUSION (epilogues — bias+GELU into the matmul's registers, skipping an HBM round trip that no separate library call can skip — 5.10 P7's lever), special shapes/sparsity the library serves badly (tall-skinny, K tiny — regimes where cuBLAS's tiles misfit, verified by benchmark not vibes), and determinism or numerical-order contracts (5.8's territory). The 1.4× gap I don't chase is swizzles + cp.async + scheduling — months of vendor work; the gap I CAN beat is the memory traffic BETWEEN library calls</button>
+  <button class="opt">cuBLAS has overhead my kernel avoids</button>
+  <button class="opt">I'd close the gap with more tuning time</button>
+  <div class="expl">The answer interviewers want has three moves: concede the library's dominance on its home turf (maturity signal), name the exact niches where custom wins WITH mechanisms (fusion = traffic, not FLOPs — the course's deepest refrain), and show the ladder's real purpose (auditable understanding, not competition). Options 3/4 signal a junior who'll burn quarters rediscovering this. "I know when not to compete" is a hire signal at every ML-systems shop.</div>
+</div>
+<div class="quiz">
+  <div class="q">2. Interviewer: "You claim v3 tiling made matmul 6× faster but the results are bitwise identical to v1. A colleague insists tiling reorders the summation, so identical bits prove your test is broken. Adjudicate."</div>
+  <button class="opt">Colleague is right — identical bits means both kernels hit a cached result</button>
+  <button class="opt" data-c="1">The test is fine; the colleague conflates reordering LOADS with reordering ADDS. v3's tile loop changes WHEN operands arrive from memory, but each output's accumulator still sweeps k = 0..K−1 in identical order with identical FMA contraction — float addition order per output is UNCHANGED, so bits match (Module 3 proved this exact distinction on the CPU: ikj vs naive, bitwise identical). What WOULD change bits: split-K (two partial sums merged — a genuinely different addition tree), atomics (5.8's scheduler-ordered adds), or unrolling that interleaves multiple accumulators per output. My fixtures encode this: rung-vs-rung asserted BITWISE (a free, powerful invariant — any drift flags an accidental algorithm change), rung-vs-oracle asserted with K-scaled budget (M1 L8)</button>
+  <button class="opt">Floats are approximate, so bitwise comparison is never meaningful</button>
+  <button class="opt">nvcc detected the kernels are equivalent and compiled them identically</button>
+  <div class="expl">This is the single most discriminating numerics question in GPU interviews because BOTH naive intuitions are wrong: "tiling must change bits" (no — trace the accumulator's order) and "floats can't be compared bitwise" (no — determinism is about ORDER, and when order is fixed, bits are law: M1 L8). Being able to name the three real bit-breakers, unprompted, is the difference between having read about floating point and having instrumented it. Option 4 flunks 3.6: different PTX, verifiably.</div>
+</div>
+
+<h2>The build — acceptance criteria per phase</h2>
+<details><summary>Phases 0–2 (day one): trust stack, v1→v3. ACCEPT when: plumbing suite green including the staged direction-typo tripwire (5.3 P7); oracle vs hand-computed 3×3 case exact; v1/v2/v3 fixture-green on all five N-shapes; racecheck clean on v3 WITH the quiz-1-of-5.5 missing-barrier bug staged once as an expected-failure; the v1→v2 commit is ONE line; ladder table rows filled with medians + predictions that were committed BEFORE the measurements.</summary><div class="body">
+<p>Guidance, not hand-holding: budget half the day for Phase 0 — it feels slow and is the fastest route (5.3's scenario arithmetic: friend B's week). The N=16 case should be verifiable by hand/NumPy (M2's fixture doctrine: one case you can check with your eyes). The 4095 case will fail on your first v3 — the ragged-edge gotcha (5.5) — that failure is scheduled learning, not a setback: fix loads with zero-fill, stores with guards, barriers unconditional (5.6 P5). Non-square 512×1024×256 catches every M/N/K mix-up your square tests hide (swapped-dims bugs are matmul's most-shipped class — M2 L6's boundary doctrine applied to SHAPE space).</p>
+</div></details>
+<details><summary>Phases 3–6 (days two–three): v4, v5, profiles, package. ACCEPT when: v4's occupancy audit is written BEFORE its first timing (ptxas number, min() table, "registers binding at ~50%, and here's why that's correct for this kernel" — 5.6's worked example re-derived on your card); v5's float4 path handles N%4 (scalar tail or pitch — and the README says which and why, 5.7 P2); the ncu table shows the metric MIGRATION story across rungs with any surprises named; README passes the stranger test: someone with a GPU and your repo reproduces every number within noise, offline, from the committed scripts alone.</summary><div class="body">
+<p>The one place almost everyone stumbles: v4's indexing (each thread's 4×4 patch = four shared rows × four shared cols; off-by-ones multiply). Do it on paper first — draw one thread's patch inside one block's 64×64 tile (the m5l11-regtile diagram is your template; M1 L2's index arithmetic is the whole difficulty). When v4 lands 3–4× over v3, run the 5.10 loop and watch stall-barrier FALL (16 FMAs amortize each sync — 5.10 P4's prediction, confirmed by your own counters: that moment is the course clicking shut). If v5's double-buffer variant does NOT help on your card, that's a valid, documentable result — the occupancy bill exceeded the barrier savings (5.5 P4's warning); a measured "no" with a named mechanism is worth more in the README than a copied "yes".</p>
+</div></details>
+
+<hr>
+<h1>Beyond the ladder — the honest horizon</h1>
+
+<h2>1. What the next 1.4× costs (so you can cite it, not chase it)</h2>
+<pre><code>cp.async / TMA        loads bypass registers into shared, hardware-pipelined —
+                      double-buffering without the register bill (Ampere+/Hopper+)
+swizzled shared       XOR-permuted layouts: conflict-free AND padding-free
+                      (5.5 Ex.2's [33] trick, graduated to bit tricks — M1 L3)
+warp-tile scheduling  instruction-level choreography of FMA/load ratios
+split-K + 5.8         for skinny-K shapes: parallelize the SUM itself —
+                      and now determinism costs something (defense #2's list)
+Tensor Cores          fp16/bf16/TF32 MMA: 4–8× beyond ALL of this — Track A's
+                      opening act, with M1 L8's budget story rewritten
+each is a rung on the same ladder you just climbed: a reuse/latency lever,
+an occupancy bill, a fixture question. The FRAME transfers; only the
+instruction names change. That is the course's promise, kept.</code></pre>
+
+<h2>2. Gotchas (capstone-specific, all bloodied by predecessors)</h2>
+<div class="gotcha"><strong>cuBLAS is column-major.</strong> The classic first-benchmark disaster: comparing your row-major C against cublasSgemm's column-major output "proves" your kernel wrong (or worse, you benchmark the TRANSPOSED shape). The identity C_row = (Bᵀ Aᵀ)_col lets you call cuBLAS on swapped operands — and your fixtures adjudicate (M2 L5's layout literacy, cashing its final check).</div>
+<div class="gotcha"><strong>Benchmarking the wrong regime.</strong> N=256 measures launch overhead and tails (5.2's floor), not your tiles. The ladder's claims live at N labeled ≥ 1024; say so in the README (5.9 P6's regime labels).</div>
+<div class="gotcha"><strong>Timing the allocation.</strong> cudaMalloc inside the timed region (5.3's hot-loop gotcha) — GpuTimer brackets the LAUNCH; buffers come from the harness, warm.</div>
+<div class="gotcha"><strong>Flag asymmetry.</strong> Comparing your -O2 -use_fast_math kernel against an -O0 oracle, or vs cuBLAS with different fmad settings — flag parity is part of the experiment's control (M1 L7 + 3.6's -O0 fiction).</div>
+<div class="gotcha"><strong>fp16 accumulation temptation.</strong> When Track A halves your dtypes, accumulate in fp32 regardless — K-term sums in fp16 lose bits M1 L8 can quantify (the tolerance policy's K-scaling, with a vengeance). Pre-registering this now saves a week later.</div>
+<div class="gotcha"><strong>The eternally-almost-done repo.</strong> v5 tuning is a fractal; the package is the deliverable. Ship at 40%±, write "next steps" honestly, and stop — 4.7's stopping rule applies to projects too.</div>
+
+<h2>3. Scenario — forty-five minutes, one repo, hired</h2>
+<p>The interview is for an ML-infrastructure role. "Tell me about a performance project" — and instead of adjectives, the candidate shares the ladder README. What follows is forty-five minutes of the interviewer walking the table and the candidate answering from artifacts: <em>Why is v1 so slow?</em> — sectors/request 31.7, here's the ncu row, here's the one-line v2 diff that bought 45× (5.7). <em>How do you know v3 is correct?</em> — fixture matrix including 4095 and non-square, racecheck in CI, and the bitwise-surprise paragraph that spawns a ten-minute numerics conversation the candidate CONTROLS (defense #2). <em>Why is v4 only at 50% occupancy?</em> — the committed audit table, the "registers binding, and here's the Volkov arithmetic for why that's right" sentence (5.6 P6). <em>Would you ship this?</em> — no: cuBLAS, and here's my fusion answer for when custom wins (defense #1). <em>What would you do with a week and an A100?</em> — the horizon section, verbatim, with honest cost estimates. The interviewer's real question all along was never "can you write a fast kernel" — it was "when you claim something about performance, can I trust it, and can you teach my team to be trustable too." The repo answers with commit hashes. That is what this course was for: not the 3.2 TF — the EVIDENCE HABIT that produced it. Ship the repo, then come back for a track: A (ML infra: Triton, TCs, fusion, distributed), B (HPC), C (graphics), or D (portable GPU) — the core is complete, and every one of them now starts from strength.</p>
+
+<h2>Defense bank — answer all seven in writing, in your own words</h2>
+<details><summary>1. Walk the ladder: for each rung, the lever, the lesson, the multiplier — 90 seconds, no notes.</summary><div class="body">Your table, spoken. The grading bar: every multiplier gets a MECHANISM (not "tiling helped" but "traffic ÷16 → AI ×16 → new roofline bound, and I landed at 68% of it"). Rehearse until the 4.7-roofline thread is the spine of the story — bounds predicted, measured, gaps named. Interviewers escalate until you run out of mechanism; the ladder means you don't.</div></details>
+<details><summary>2. Why are your rungs bitwise identical to each other but not to the CPU — and name the three changes that would break rung-agreement.</summary><div class="body">Quiz 2's answer, in your words, with the Module 3 CPU precedent cited (ikj vs naive) and the breaker list (split-K, atomics, interleaved accumulators). Bonus depth: why FMA specifically splits GPU from CPU (single rounding vs two — M1 L8), and why -fmad=false would cost both speed AND the agreement you'd be trying to create.</div></details>
+<details><summary>3. Your tolerance is rtol ≈ 1e-4 at K=2048. Defend the K-scaling against "just use 1e-6 everywhere" — and what happens to the policy at K=32768? At fp16 inputs?</summary><div class="body">Each output is a K-term dot product: worst-case relative error grows ~linearly in K for sequential accumulation (M1 L8's absorption arithmetic) — 1e-6 at K=2048 false-alarms on legitimate fp32 results; 1e-4 at K=64 rubber-stamps real bugs. K=32768: rtol scales up ~16× (or you switch the ORACLE claim: pairwise/compensated summation tightens the bound — 5.8 P7's tree argument). fp16 inputs with fp32 accumulate: input quantization (2⁻¹⁰) dominates the budget, not the summation — the policy's TERMS change, which is why it's a written policy, not a magic number (M2 L6's constitution, final clause).</div></details>
+<details><summary>4. N=4095: everything that breaks, everything you did about it, and the measured cost of raggedness on your card.</summary><div class="body">Breaks: edge tiles read OOB (zero-fill loads — 5.5's gotcha), edge stores trespass (guards), float4 alignment dies mid-row (scalar tail path or pitch — 5.7 P2), and the LAST row/col of blocks diverges (5.6: tail warps only — measure it: typically &lt;2% at N=4095 because 63/64 blocks are full). The senior detail: you MEASURED the ragged tax instead of fearing it — divergence economics (5.6) said it'd be negligible at this shape, and your table proves it. Fear of edge cases priced by arithmetic: that's the course's whole personality.</div></details>
+<details><summary>5. Change ONE assumption: B arrives transposed (both row-major, C = A·Bᵀ). What breaks in each rung, which rung's fix is a data-layout decision (5.7 P4's logic), and when do you pre-transpose vs fuse?</summary><div class="body">Now A-rows · B-ROWS: v2's B access flips from coalesced to strided (the crime returns, other operand); v3+ absorb it in the TILE LOAD (stage Bᵀ's rows into shared, transpose during the load like 5.7's worked example — the way-station template's whole point: the kernel body never knows). Pre-transpose (a separate 5.7 kernel, ~2 copy costs) pays when B is REUSED across many matmuls (amortized — 4.6's residency ledger); fuse the transpose into the tile load when B is used once (zero extra HBM round trips). The economics, not the code, is the answer — every layout question in this course reduced to trips×tolls (4.6), and this one's no different.</div></details>
+<details><summary>6. Scale it: N=65536 (16 GB per matrix — doesn't fit). Design the out-of-core sgemm with 5.9's machinery: blocking scheme, stream pipeline, pinned pool sizing, the max-lane arithmetic on YOUR PCIe numbers, and the single design choice that dominates whether this is compute-bound or bus-bound.</summary><div class="body">Block into panel products: C-tiles of (say) 8192² accumulate A-panels × B-panels; each panel-product is compute-heavy (2·8192²·8192 FLOP over 3·8192²·4 B moved → AI = 2·8192³/(3·8192²·4) ≈ 1365 FLOP/B — deeply compute-bound PER TILE if panels are big enough). The dominating choice: PANEL SIZE — big panels amortize the bridge (4.6's ledger: FLOPs grow as size³, traffic as size²: the course's oldest scaling law, from 4.7); small panels drown in PCIe (max-lane = copy). Pipeline: DEPTH-3 ring (5.9 P4's Little's law) of pinned panel slots, H2D of next panels overlapping current tile's compute, C-tiles resident until complete (write once). With T4-Colab's 11 GB/s: shipping a panel-product's two 268 MB panels costs ~49 ms vs 2·8192³ ≈ 1.1 TFLOP ≈ 550 ms of compute at 2 TF — compute-bound by ~11×, and with a DEPTH-3 ring the bus vanishes behind the math entirely. This design IS how real out-of-core and multi-GPU GEMMs work; you derived it from four lesson citations.</div></details>
+<details><summary>7. The stranger test, inverted: list the five ways a README performance claim can be unreproducible even with honest authors, and the specific line in YOUR repo that closes each.</summary><div class="body">(1) Unlabeled regime (N, dtype, warm/cold) → the table's header row + bench script flags (5.9 P6). (2) Clock/thermal variance → GpuTimer median-of-K + "T4, default clocks, medians of 21" note (M1 L7). (3) Different toolchain → nvcc version + flags committed in Makefile, ptxas log in CI artifacts (5.6's weather gotcha). (4) Fixture-free speed ("fast but is it right?") → CI badge + tolerance policy paragraph (trust stack). (5) Hardware lottery → MACHINE.md with the 5.1 generator output + measured ceilings, so a reader on an A100 knows to re-derive bounds, not expect your numbers (4.7: bounds travel, numbers don't). Closing line for the README and the interview both: "every number in this table is a claim; every claim has a committed script; every script has a fixture. Run it." That sentence is the course, compressed.</div></details>
+
+<div class="pager">
+  <a href="lesson-10.html">← Nsight profiling</a>
+  <a href="../curriculum.html">Curriculum — the core is complete →</a>
+</div>
+<div class="footer">GPU Mastery · Module 5 · Capstone — works offline · progress saved in your browser</div>
+</div>
+<script src="../assets/diagrams5.js"></script>
+<script src="../assets/app.js"></script>
+</body>
+</html>

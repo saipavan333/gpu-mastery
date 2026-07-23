@@ -1,0 +1,196 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>5.8 Reductions & Atomics — GPU Mastery</title>
+<link rel="stylesheet" href="../assets/style.css">
+</head>
+<body data-lesson="m5l8">
+<nav><div class="inner">
+  <a class="logo" href="../index.html">GPU<span>Mastery</span></a>
+  <a class="item" href="../index.html">Home</a>
+  <a class="item on" href="../curriculum.html">Curriculum</a>
+  <a class="item" href="../labs.html">Labs</a>
+  <a class="item" href="../setup.html">Lab setup</a>
+  <a class="item" href="../prompt.html">Generator prompt</a>
+</div></nav>
+<div class="wrap">
+
+<div class="lesson-top">
+  <div><span class="badge">Module 5 · Lesson 8</span><span class="badge dim">≈ 3.5 h</span></div>
+  <button id="donebtn" class="donebtn">Mark lesson complete</button>
+</div>
+<h1>Reductions & Atomics — when 100,000 threads want the same variable</h1>
+<p class="lead">Everything so far kept threads apart: own index, own element, no sharing (5.2's law). But sum, max, argmin, histogram — half of real computing — need threads to MEET. Today: the race you'd write naively, the atomic that fixes it, the contention bill it runs up, and the ladder of privatization that makes reductions run at memcpy speed.</p>
+
+<h2>Concept</h2>
+
+<h3>The race, and the atomic</h3>
+<pre><code>__global__ void sum_naive(const float *x, float *total, int n) {
+    int i = blockIdx.x*blockDim.x + threadIdx.x;
+    if (i &lt; n) *total += x[i];        // 4.3's data race, 100k-fold: load,add,
+}                                      // store interleave → most adds LOST.
+                                       // Result: garbage (and racecheck-invisible:
+                                       // it's a GLOBAL race — sanitizer catches
+                                       // shared-mem races; this one needs your eyes)
+    if (i &lt; n) atomicAdd(total, x[i]); // CORRECT: hardware read-modify-write,
+                                       // indivisible (4.3's LOCK-prefix cousin,
+                                       // served by the L2 slice that owns the line)
+// Correct ≠ fast: every add to ONE address serializes at that L2 slice —
+// you built a 100,000-thread queue for a single cash register (4.6's toll
+// booth, self-inflicted). The rest of the lesson is emptying that queue.</code></pre>
+
+<h3>The privatization ladder — same trick at every scale</h3>
+<div class="diagram" data-diagram="m5l8-grid" data-caption="Grid-stride partials in registers → block tree in shared → ONE atomic per block. Contention shrinks from N adds to gridDim adds: five orders of magnitude."></div>
+<pre><code>LADDER RULE: reduce PRIVATELY as long as possible; go public as LATE as possible.
+  rung 1  each thread: grid-stride partial in a REGISTER   (free — no sharing yet)
+          for (int i = gid; i &lt; n; i += gridSize) p += x[i];   // coalesced! (5.7 P3)
+  rung 2  each block: tree-reduce 256 partials in SHARED    (5.5's tool, 8 steps)
+  rung 3  each block: ONE atomicAdd(total, block_sum)       (contention: gridDim ≈
+                                                             hundreds, not millions)
+// The histogram version of the same ladder: per-block bins in shared
+// (atomics on SHARED — cheap, SM-local) → merge blocks' bins globally once.
+// "Privatize then merge" is the entire genre; sum is just its simplest member.</code></pre>
+
+<h3>The block tree, done right</h3>
+<div class="diagram" data-diagram="m5l8-tree" data-caption="Sequential addressing: active threads stay CONTIGUOUS (tid < s) — whole warps retire cleanly (5.6), reads stay bank-parallel (5.5). The interleaved version diverges every warp, every step."></div>
+<pre><code>__shared__ float s[256];
+s[tid] = p; __syncthreads();
+for (int stride = 128; stride &gt; 0; stride &gt;&gt;= 1) {
+    if (tid &lt; stride) s[tid] += s[tid + stride];   // contiguous actives ✓
+    __syncthreads();                                // every step (5.5's law)
+}
+// if (tid == 0) atomicAdd(total, s[0]);
+// WHY tid&lt;stride and not tid%(2*stride)==0 (the "obvious" tree):
+//   modulo version: actives SCATTERED 1-per-2s → EVERY warp diverges at
+//   EVERY step (5.6's tax) and the adds stride the banks (5.5's tax).
+//   sequential: actives 0..s-1 → warps ≥ s/32 retire WHOLE (free), reads
+//   at s[tid+stride] are consecutive (bank-clean). Same math, ~3× faster.</code></pre>
+
+<h3>The last 32: shuffles, not shared</h3>
+<div class="diagram" data-diagram="m5l8-shuffle" data-caption="__shfl_down_sync moves values REGISTER to REGISTER within a warp: no shared memory, no barrier — five steps and lane 0 holds the warp's sum."></div>
+<pre><code>float warp_sum(float v) {                       // requires full-warp participation
+    for (int off = 16; off &gt; 0; off &gt;&gt;= 1)
+        v += __shfl_down_sync(0xffffffff, v, off);  // lane i gets lane i+off's v
+    return v;                                    // lane 0: the warp's total
+}
+// _sync + mask: 5.6 §1's post-Volta law in action — you DECLARE which lanes
+// participate; the primitive synchronizes exactly them. No __syncthreads
+// anywhere: the exchange is intra-warp, in registers — the cheapest memory
+// that exists (4.4). Modern pattern: warp_sum → one shared slot per warp →
+// first warp reduces THOSE 8 → single atomic. Shared traffic: 8 floats total.</code></pre>
+
+<h2>Worked example</h2>
+<div class="card">
+<p><strong>Task:</strong> The reduction ladder, measured. Sum 16M floats (64 MB) on T4. The finish line is known BEFORE starting (4.7's habit): reduction reads every byte once → memory-bound → ideal = 64 MB ÷ ~200 GB/s ≈ 0.32 ms. Anything near that is done.</p>
+<pre><code>v1 atomicAdd per element:        ~28 ms     (~90× off — one cash register,
+                                             16M customers; correct, unusable)
+v2 block tree + 1 atomic/block:  ~0.48 ms   (58× over v1 — privatization pays;
+                                             tree's 8 sync'd steps now the tax)
+v3 grid-stride ×8 elems/thread   ~0.33 ms   (≈ 97% of the read ceiling ✓
+   + warp shuffles + 1 atomic:               fewer blocks, each doing more:
+                                             5.6 P6's ILP lever, third sighting)
+CPU oracle check: |gpu − cpu| / |cpu| ≈ 3e-7  ✓ within float budget (M1 L8)
+  … and v3 run twice: results differ in the LAST BIT between runs. Not a bug —
+  the subject of quiz 2, and of every "irreproducible loss" ticket ever filed.</code></pre>
+<p><strong>Read the ladder like an economist:</strong> v1→v2 removed CONTENTION (the queue), v2→v3 removed OVERHEAD (sync steps, block count) — different taxes, different tools, and the measurement told you when to stop: 97% of a physical ceiling means further cleverness buys 3% at most (4.7's stopping rule — knowing when you're DONE is a skill interviews probe). Production note, delivered once and honestly: <code>cub::DeviceReduce::Sum</code> is this v3, tuned per-arch by NVIDIA, and it's what you SHIP; you build the ladder once so that cub is a choice, not a mystery — and so the interview question "how would cub do it?" has a witness.</p>
+</div>
+
+<h2>Key points</h2>
+<ul class="keypoints">
+<li>Unsynchronized += from many threads loses updates (4.3 at grid scale) — and global-memory races are YOURS to spot: racecheck audits shared memory, not this.</li>
+<li>Atomics are correct at any contention but serialize per address: price = queue length at the hot address, so the design problem is shrinking the queue, not avoiding atomics.</li>
+<li>The universal shape: privatize (registers → shared → global) and merge late — sum, max, histogram, argmin are all this one pattern at different rung heights.</li>
+<li>Block trees use sequential addressing (tid &lt; stride): contiguous actives retire whole warps (5.6) and keep banks clean (5.5); the modulo tree pays both taxes for identical math.</li>
+<li>Warp shuffles reduce 32 values in registers with no shared memory and no block barrier — the _sync mask (5.6 §1) declares participants; full-warp masks want full-warp participation.</li>
+<li>Float atomicAdd is order-nondeterministic across runs → last-bit wobble (M1 L8's non-associativity, live); integer sums are exact; determinism, when required, is an ARCHITECTURE choice (fixed-order merge), not a flag.</li>
+</ul>
+
+<h2>Quiz</h2>
+<div class="quiz">
+  <div class="q">1. A histogram kernel (256 bins, 100M uint8 pixels) using one global atomicAdd per pixel runs 40× slower than the same kernel on UNIFORM-random pixels when fed a real X-ray (mostly black — 80% of pixels in bins 0–3). Same instruction count. Explain, and give the two-rung fix.</div>
+  <button class="opt">Dark pixels are slower to load from HBM</button>
+  <button class="opt" data-c="1">Contention is per-ADDRESS: uniform pixels spread atomics across 256 bin addresses (256 short queues, mostly parallel); the X-ray funnels 80% of 100M atomics into 4 addresses — four enormous serialized queues (the cash-register economics, data-dependent!). Fix: rung 1 — per-BLOCK bins in shared memory (atomics on shared: SM-local, ~10× cheaper, and 4 hot bins × 100s of blocks = parallel queues); rung 2 — one merge pass adding each block's 256 bins globally (256 × gridDim atomics total, contention-free by construction)</button>
+  <button class="opt">The GPU throttled on the medical image</button>
+  <button class="opt">uint8 loads can't coalesce</button>
+  <div class="expl">Atomic cost scales with QUEUE LENGTH AT EACH ADDRESS, so performance became a property of the DATA's histogram itself — beautifully circular and a real production trap (medical, astronomy, any skewed distribution). Privatization converts data-dependent serialization into fixed-cost merging. This exact question — "your histogram is slow only on real data, why?" — is a staple at imaging and ML-infra shops because it tests whether "atomics serialize" is a slogan or a model.</div>
+</div>
+<div class="quiz">
+  <div class="q">2. Your v3 reduction returns 16777216.0, 16777215.8, 16777216.2 across three identical runs. An auditor demands bit-identical results run-to-run ("regulatory reproducibility"). Diagnose the wobble and give the two-level response: what you change, and what you tell the auditor about the CPU baseline they trust.</div>
+  <button class="opt">Race condition — add more __syncthreads</button>
+  <button class="opt">Faulty GPU memory — run ECC checks</button>
+  <button class="opt" data-c="1">No race: every add is atomic; what varies is ORDER (blocks finish in scheduler-dependent sequence, and float addition isn't associative — M1 L8). Fix: replace the final atomics with a deterministic architecture — blocks write partials to an ARRAY (slot = blockIdx), then a single-block second kernel reduces that array in FIXED order: bit-identical forever, ~zero cost at this size. Tell the auditor: their single-threaded CPU sum is just ONE arbitrary order among the N! possible — also not "the true value"; the honest standard is a documented, fixed order plus an error bound (pairwise trees have BETTER bounds than the CPU's left-to-right — M1 L8's absorption lesson)</button>
+  <button class="opt">Use double atomics — nondeterminism is a precision bug</button>
+  <div class="expl">Distinguishing NONDETERMINISM (order varies, each result individually valid) from RACES (updates lost, results invalid) is the difference between a redesign and a bugfix. Doubles shrink the wobble but don't zero it — order still varies (option 4 treats the symptom's size, not its existence). The blocks-to-array + fixed-order-merge pattern is exactly how frameworks implement deterministic mode, and knowing that the CPU's answer is not ground truth — just a privileged order — is the M1 L8 literacy that ends audit arguments.</div>
+</div>
+
+<h2>Exercises</h2>
+<details><summary>Exercise 1 — Build the ladder v1→v3 on Colab (16M floats, 5.3's harness, CPU oracle at rtol 1e-5): atomic-per-element, block-tree + atomic-per-block, grid-stride ×8 + warp shuffles. Measure against your computed read-ceiling. Then break v3 deliberately: change the shuffle mask to 0x0000ffff while keeping 256-thread blocks, predict what happens BEFORE running, and explain what the mask actually promises (5.6 §1).</summary><div class="body">
+<p>Expected: your three timings within ~2× of the worked example's ratios (v1's absolute time swings wildly with GPU/driver — atomic throughput differs; the RATIOS are the lesson). The mask break: 0x0000ffff declares lanes 0–15 as participants, but lanes 16–31 still EXECUTE the shuffle line — reading from undeclared lanes yields undefined values → sums go wrong quietly, sometimes only for some warps (post-Volta scheduling dependent!). The mask is a CONTRACT about who's synchronized-and-valid, not a filter — mismatch between mask and actual control flow is THE modern warp-primitive bug (5.6 §1's law, experienced). Fixture catches the corruption; understanding names it.</p>
+</div></details>
+<details><summary>Exercise 2 — The determinism lab: run v3 500× on identical input; collect the exact bit patterns (store as uint32 via the M1 L8 pun) and count distinct values. Then build the deterministic two-phase version (partials array + fixed-order single-block merge), rerun 500×, confirm exactly ONE bit pattern. Time both; write the one-paragraph policy memo: when does your team pay the determinism cost?</summary><div class="body">
+<pre><code>typical: v3 → 5–20 distinct bit patterns over 500 runs (spread grows with
+gridDim — more orderings); deterministic version → 1 pattern, cost ≈ +2–5 µs
+(one extra tiny kernel launch — 5.2's launch-overhead floor, remeeting you).</code></pre>
+<p>Memo skeleton (keep yours): elementwise/test fixtures — bitwise compare, no atomics involved anyway (M2 L6); training loops — budget compare (rtol), accept wobble, DOCUMENT the source (the scenario's registry — a known-nondeterministic-ops list is what ends week-long ghost hunts); regulated/replay contexts (finance, medical, RL replays) — deterministic architecture from day one, priced here at microseconds. The expensive failure mode isn't either policy — it's not KNOWING which policy a given pipeline runs under, discovering it during an audit (quiz 2) or a debugging session (scenario) instead of reading it off a design doc.</p>
+</div></details>
+
+<hr>
+<h1>Go deeper — the atomic toolbox and its fine print</h1>
+
+<h2>1. The atomic family (and the gaps)</h2>
+<pre><code>atomicAdd    int, uint, ull, float | double (sm_60+) | __half/bf16 (newer archs)
+atomicMax/Min/And/Or/Xor/Exch      integers (Max/Min: NO float version — §2's trick)
+atomicCAS    the universal one: compare-and-swap builds everything else
+scopes:      atomics on SHARED memory (SM-local, cheap — quiz 1's rung 1)
+             vs GLOBAL (L2, default) vs system-wide _system variants (CPU+GPU
+             coherent — Track B's territory). Narrowest scope that's correct = fastest.
+aggregation: nvcc often warp-aggregates same-address atomics automatically
+             (one atomic per warp instead of 32) — mercy, not license: v1's 90×
+             already INCLUDED whatever aggregation the compiler managed.</code></pre>
+
+<h2>2. atomicMax for float — the M1 L8 party trick, weaponized</h2>
+<pre><code>// No atomicMax(float*). But M1 L8 taught: NON-NEGATIVE floats compare like
+// their bit patterns as ints (sign-magnitude ordering). So:
+__device__ void atomicMaxFloat(float *addr, float v) {
+    atomicMax((int*)addr, __float_as_int(v));        // valid when all values ≥ 0
+}
+// negatives break it (sign bit flips int ordering) — the general fix inverts
+// bits for negatives, or uses the CAS loop:
+    int old = *a, assumed;
+    do { assumed = old;
+         old = atomicCAS(a, assumed, __float_as_int(fmaxf(v, __int_as_float(assumed))));
+    } while (old != assumed);   // the retry loop that IS how all exotic atomics
+                                 // are built — livelock-free because someone
+                                 // always makes progress (lock-free 101)</code></pre>
+
+<h2>3. Gotchas</h2>
+<div class="gotcha"><strong>Global races that racecheck can't see.</strong> The sanitizer's racecheck tool covers SHARED memory. The sum_naive global race is invisible to it — your defenses are the fixture (wrong answer, loudly) and pattern literacy (any read-modify-write on a shared global address = atomic or redesign).</div>
+<div class="gotcha"><strong>Atomics as a synchronization protocol.</strong> Spinning on a global flag ("block 0 sets, others wait") deadlocks when the waiting blocks occupy all SMs and the setter can't be scheduled — blocks are NOT concurrent by contract (5.2's independence law; grid-wide sync = kernel boundary or cooperative groups, Track A).</div>
+<div class="gotcha"><strong>The benign-race temptation.</strong> "Find any matching index": concurrent word-sized aligned writes of DIFFERENT values — CUDA guarantees some single write wins whole, so 'any winner' semantics can legally skip the atomic. Legal ≠ free: document it, fence it in a comment, and expect the review question — undocumented benign races are indistinguishable from bugs (3.2's UB-adjacent discipline).</div>
+<div class="gotcha"><strong>Shuffle masks vs actual control flow.</strong> Ex.1's break: mask declares participants; divergence decides them. Full-warp mask inside a guard that some lanes failed = undefined values. Keep warp collectives OUTSIDE guards, or compute the real mask with __ballot_sync (5.6 §1).</div>
+<div class="gotcha"><strong>Tree reduction with blockDim not a power of two.</strong> The halving loop silently drops elements (stride arithmetic assumes 2^k). Pad shared with identity values (0 for sum, -inf for max — M2 L4's identity-element lesson) or clamp block sizes to powers of two. The fixture on n=257 catches it (M2 L6's boundary doctrine).</div>
+<div class="gotcha"><strong>Double-counting the tail in grid-stride ladders.</strong> ×8-per-thread unrolls plus a remainder loop: the classic off-by-one hands elements to both. The n=8k+3 fixture case exists precisely for this (5.2's coverage kit, still on duty).</div>
+
+<h2>Scenario — the week-long hunt for a ghost that was an atomicAdd</h2>
+<p>An ML team's training runs stopped reproducing: same code, same data, same seed, loss curves diverging at step ~40k by 1e-4, growing to real model-quality differences by convergence. The hunt, week one: data-loader shuffling audited (innocent), seeds triple-checked (innocent), a cuDNN nondeterminism flag flipped (helped nothing), two engineers deep in framework issue threads at 2 a.m. The breakthrough came from someone who'd built quiz 2's mental model: "which of OUR kernels reduces floats via atomics?" — grep for atomicAdd in the custom ops → one embedding-gradient scatter-add (many tokens updating the same embedding row: quiz 1's skew, gradient edition). Two identical runs diverged at the LAST BIT of that gradient at step 1; the optimizer amplified last-bits into weight differences; chaos did the rest (loss curves are dynamical systems — M1 L7's warmup wobble writ large). The fix menu, all from this lesson: sort-then-segmented-reduce for a deterministic scatter-add (chosen — cost 3%), or document-and-accept with budget-based regression tests instead of curve-matching (adopted for research runs). The registry born that week — "ops that may wobble: their location, their alternative, their cost" — is the single most senior-looking document a new GPU hire can produce in month one. Total cost of the missing mental model: two engineer-weeks. Cost of the model: this lesson.</p>
+
+<h2>Practice</h2>
+<details><summary>1. Choose the tool (atomic / private+merge / plain reduction / benign race / different algorithm) for: (a) global sum; (b) 256-bin histogram; (c) global max; (d) "any one index where x[i]==key"; (e) running prefix-sum of 16M elements; (f) top-10 values.</summary><div class="body">(a) Ladder (this lesson's v3) — atomics only at block granularity. (b) Private shared bins + merge (quiz 1). (c) Ladder with max as the operator (shuffles work for ANY associative op — swap += for fmaxf; identity = -inf). (d) Benign race (documented!) or atomicExch — any winner is valid by spec (gotcha 3). (e) NEITHER atomics nor this lesson's tree: prefix-sum is SCAN — a different parallel primitive (Blelloch/decoupled-lookback), teased here, delivered in Track A/B; recognizing "this isn't a reduction" is the tested skill. (f) Top-k: per-block private top-10 (registers/shared) + merge — the privatize-late pattern generalizes beyond arithmetic ops to any MERGEABLE summary (the deep pattern under the whole lesson).</div></details>
+<details><summary>2. Price v1's queue with arithmetic: 16M atomicAdds to one address, L2 atomic throughput ~1 op/2ns to a single address. Compare with the measured ~28 ms. Then price quiz 1's X-ray: 80M atomics across 4 hot addresses. What does the arithmetic say the shared-memory fix must beat?</summary><div class="body">16M × 2 ns = 32 ms ≈ measured 28 ms ✓ (warp aggregation shaved a bit) — the model FITS: v1 was a pure queue, bandwidth irrelevant. X-ray: 80M/4 = 20M per hot address × 2 ns ≈ 40 ms serial floor per queue, 4 queues in parallel → ~40 ms (queues run concurrently at different L2 slices). Shared fix: each SM's bins absorb its blocks' traffic at shared-atomic speed (~4× faster per op, AND hundreds of parallel queues across SMs) + merge (gridDim×256 global atomics ≈ 0.1 ms) → arithmetic promises ≥50×. The habit on display: queue arithmetic BEFORE coding, same as 4.6's toll math — atomics are just tolls with data-dependent traffic.</div></details>
+<details><summary>3. Why does the sequential tree need __syncthreads every step, while the warp-shuffle phase needs none — and what EXACTLY would break if you removed the tree's barrier at stride=4 (which threads, reading what stale value)? Post-Volta nuance included.</summary><div class="body">Tree: at stride 4, threads 0–3 read s[4..7] — values written at stride 8 by threads 4–7, who are (post-Volta especially, 5.6 §1) under NO timing guarantee relative to threads 0–3 even in the same warp without a sync point: remove the barrier and thread 0 may read s[4] BEFORE thread 4's stride-8 add lands → a stale partial silently halves part of the sum (intermittent, input-dependent — racecheck DOES catch this one: it's shared memory). Shuffle: the value moves register-to-register inside the __shfl_down_sync instruction itself — the _sync converges the named lanes as part of the primitive; there is no memory in between to be stale. One is communication THROUGH storage (needs ordering imposed), the other communication INSIDE an instruction (ordering built in) — 4.3's visibility framework, final exam.</div></details>
+<details><summary>4. A colleague replaces your 8-step block tree with "one thread per block just loops over the 256 shared values". Blocks are 256 wide. Price both (steps × active threads vs 256 serial adds + idle lanes), then explain why the REAL v3 does neither for the last 32 — and what rung the colleague accidentally reinvented.</summary><div class="body">Serial: 256 adds by 1 thread while 255 idle ≈ 256 × ~2-cycle shared reads ≈ 512+ cycles (plus it's 5.6 P2d's one-sided if — no divergence tax, just idleness). Tree: 8 steps × barrier (~20–30 cycles each) + halving work ≈ 300–400 cycles — better but barrier-dominated at the narrow end. That's exactly why v3 shuffles the last 32 (5 barrier-free register steps ≈ tens of cycles) and only trees down TO warp width. The colleague reinvented rung 0 of privatization (serial private work is FINE when it's each thread's grid-stride phase — v3's ×8 unroll IS serial private accumulation!) but deployed it at the wrong rung: serialize where you're PRIVATE (registers, free), parallelize where you're SHARED (the tree/shuffle), atomize only where you're GLOBAL. Rung placement, not technique, was the error.</div></details>
+<details><summary>5. Implement (sketch) atomicAdd for a struct {float sum; int count;} — i.e., a running mean's ingredients updated together. Why can't two separate atomics work, what does the CAS loop look like on the 8-byte pair, and what's the privatization answer that makes the whole question moot?</summary><div class="body">Two separate atomics: each is individually indivisible but the PAIR isn't — a reader (or the final merge) can observe sum-updated-count-not-yet (torn logical state; 4.3's invariant lesson: atomicity must cover the INVARIANT, not the words). CAS approach: pack into one 64-bit word (float bits + int in a ull — M1 L8's pun at work), atomicCAS(ull*) retry loop swapping the whole pair. Cost: heavy under contention. The adult answer: per-block private {sum, count} in shared (each updated with cheap shared atomics or per-warp shuffles — no pairing problem privately since the merge is per-block single-threaded), one global CAS-pair or two-phase merge per BLOCK. Privatization didn't just speed things up — it shrank the atomicity REQUIREMENT to a place where it's trivial. Design lesson of the whole module: move problems to where they're cheap.</div></details>
+<details><summary>6. Your deterministic two-phase reduction (Ex.2) must now handle n up to 2³⁵ elements (128 GB — bigger than GPU memory). Design the full pipeline: chunking over 5.9's streams (preview), per-chunk deterministic partials, the fixed merge ORDER across chunks, and where the M1 L8 error bound now comes from. What NEW nondeterminism source did chunk-level parallelism almost reintroduce?</summary><div class="body">Chunks of ~1 GB: H2D (pinned, 5.3 Ex.2) → per-chunk v3-deterministic → partial[chunk_id] to a host/device array — chunk index, not completion order, decides the slot (the same slot-array trick, one level up). Final: fixed-order (or fixed pairwise-tree) merge over partials — pairwise gives O(log chunks) error growth vs left-to-right's O(chunks) (M1 L8's absorption arithmetic — at 128 chunks, pairwise is meaningfully tighter). The near-miss: overlapping chunks via streams (5.9) tempts you to merge partials AS THEY ARRIVE (completion order = nondeterminism reborn at chunk scale!) — the fix costs nothing: store by index, merge after the barrier. Every scale reintroduces the same bug in new clothes; the slot-array is the reusable antidote. This design — chunked, streamed, deterministic, bounded — is a real interview whiteboard at data-platform shops.</div></details>
+<details><summary>7. Interview closer: "Sum a billion floats: correct, fast, and reproducible — go." Deliver the 90-second architecture with numbers (T4 or your card), naming: the ceiling, the ladder, the determinism mechanism, the error bound vs the naive CPU sum, and the one-line cub caveat.</summary><div class="body">Skeleton: 4 GB read-once → memory-bound; T4 ceiling ~200 GB/s → ~20 ms floor — that number anchors everything (4.7 first, always). Ladder: grid-stride register partials ×8 (coalesced, 5.7; ILP, 5.6 P6) → sequential shared tree to warp width → shuffles to lane 0 → partial[blockIdx] (SLOT-ADDRESSED, no atomics at all in the deterministic build) → fixed pairwise merge kernel (~µs). Reproducibility: order is a function of the GRID GEOMETRY, not the scheduler → bit-identical across runs on same config; document that changing gridDim changes the (still-valid) bits. Accuracy: pairwise tree error O(log n) growth vs CPU left-to-right O(n) — the GPU answer is REPRODUCIBLE AND TIGHTER than the baseline auditors trust (quiz 2's closing move, with the bound). Cub caveat: "cub::DeviceReduce is what I'd ship for non-deterministic-tolerant paths — it's this same ladder, arch-tuned; deterministic mode I build as above because cub's ordering guarantees are configuration-dependent." Every clause cites a lesson; that's the point of the module.</div></details>
+
+<div class="pager">
+  <a href="lesson-07.html">← Coalescing in code</a>
+  <a href="lesson-09.html">Next: Streams, events & async →</a>
+</div>
+<div class="footer">GPU Mastery · Module 5 · Lesson 8 — works offline · progress saved in your browser</div>
+</div>
+<script src="../assets/diagrams5.js"></script>
+<script src="../assets/app.js"></script>
+</body>
+</html>

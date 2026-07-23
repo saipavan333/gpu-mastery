@@ -1,0 +1,125 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Coalescing / Sector Visualizer — GPU Mastery Labs</title>
+<link rel="stylesheet" href="assets/style.css">
+<style>
+  .tool{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:18px 20px;margin:16px 0}
+  .row{display:flex;flex-wrap:wrap;gap:10px;align-items:center;margin:10px 0}
+  .chip{background:var(--card2);color:var(--dim);border:1px solid var(--line);border-radius:999px;padding:5px 11px;font-size:12.5px;cursor:pointer;font-family:var(--mono)}
+  .chip:hover{border-color:var(--acc);color:var(--tx)} .chip.on{background:var(--accBg);color:var(--accT);border-color:var(--acc)}
+  canvas{width:100%;max-width:660px;height:auto;background:#10141d;border:1px solid var(--line);border-radius:10px;display:block;margin:10px 0}
+  .metrics{display:flex;flex-wrap:wrap;gap:26px;margin:8px 0}
+  .metrics .big{font-size:30px;font-weight:800;font-variant-numeric:tabular-nums}
+  .muted{color:var(--dim);font-size:13px}
+  .verdict{border-radius:10px;padding:11px 13px;font-size:14.5px;margin-top:8px}
+  .ok{background:var(--goodBg);border:1px solid #2c5a3e} .warnv{background:var(--warnBg);border:1px solid #5a4a1e} .badv{background:var(--badBg);border:1px solid #5a2c2c}
+</style>
+</head>
+<body data-lesson="lab-coalescing">
+<nav><div class="inner">
+  <a class="logo" href="index.html">GPU<span>Mastery</span></a>
+  <a class="item" href="index.html">Home</a>
+  <a class="item" href="curriculum.html">Curriculum</a>
+  <a class="item on" href="labs.html">Labs</a>
+  <a class="item" href="setup.html">Lab setup</a>
+</div></nav>
+<div class="wrap">
+
+<div class="lesson-top">
+  <div><span class="badge">Interactive Lab</span><span class="badge dim">5.7 · coalescing</span></div>
+  <a class="badge good" href="labs.html">← all labs</a>
+</div>
+<h1>Coalescing / Sector Visualizer</h1>
+<p class="lead">The highest-leverage GPU skill: reading an index expression and seeing the memory traffic it orders (5.7). Pick an access pattern and watch a 32-lane warp's addresses land in 32-byte sectors — and how many bytes get fetched but wasted.</p>
+
+<div class="tool">
+  <div class="muted">access pattern (one warp, 32 lanes):</div>
+  <div class="row" id="pats"></div>
+  <div class="muted">element type:</div>
+  <div class="row" id="dtypes"></div>
+  <canvas id="cv" width="660" height="240"></canvas>
+  <div class="metrics">
+    <div><div class="muted">sectors / request</div><div class="big" id="sr">—</div></div>
+    <div><div class="muted">useful bytes</div><div class="big" id="use" style="color:var(--good)">—</div></div>
+    <div><div class="muted">fetched bytes</div><div class="big" id="fetch" style="color:var(--warn)">—</div></div>
+    <div><div class="muted">traffic tax</div><div class="big" id="tax" style="color:var(--bad)">—</div></div>
+  </div>
+  <div class="verdict" id="verdict"></div>
+</div>
+
+<h2>What it teaches</h2>
+<p>The memory system moves data in <strong>32-byte sectors</strong>, and coalescing is judged across the 32 lanes at ONE instant (5.7's instant rule). Perfectly consecutive floats fill 4 sectors with zero waste. A stride, an array-of-structs field, or a scatter spreads the lanes across many sectors, so the hardware fetches bytes it throws away — that's the tax. The floor for fp32 is <strong>8×</strong> (a 32-byte sector holds 8 floats, so one float per sector wastes 7/8); for fp64 it's <strong>4×</strong> (4 doubles per sector). Switch the dtype and the pattern and watch the floor change — this is exactly the executed stride cliff from 5.7 (measured floor ~1/8 of stride-1 bandwidth).</p>
+<p class="muted">Try: fp32 stride-1 (tax 1×, coalesced) → stride-2 (2×) → stride-8 or AoS (8×, the floor). Then switch to fp64 and see the floor drop to 4×. The gather is data-dependent — its tax depends on where the indices land (embeddings live here).</p>
+
+<div class="footer">GPU Mastery · Labs · Coalescing Visualizer — works offline</div>
+</div>
+
+<script>
+const $=id=>document.getElementById(id);
+const cv=$('cv'), ctx=cv.getContext('2d'), W=660, H=240;
+const C={line:'#2a3245',tx:'#e8edf5',dim:'#7e8aa0',acc:'#5b9bff',good:'#36c98a',warn:'#f5b850',bad:'#ff6b6b'};
+let pat='stride1', dsz=4;
+const PAT={ 'x[i] (stride 1)':'stride1','x[i+7] (offset)':'off7','x[2*i] (stride 2)':'stride2','x[4*i] (stride 4)':'stride4','x[8*i] / AoS-8':'stride8','x[32*i]':'stride32','x[perm[i]] gather':'gather' };
+let seed=1; function rnd(){ seed=(seed*1103515245+12345)&0x7fffffff; return seed/0x7fffffff; }
+function addrs(){ const a=[]; seed=7;
+  for(let l=0;l<32;l++){ let idx;
+    if(pat==='stride1')idx=l; else if(pat==='off7')idx=l+7; else if(pat==='stride2')idx=2*l;
+    else if(pat==='stride4')idx=4*l; else if(pat==='stride8')idx=8*l; else if(pat==='stride32')idx=32*l;
+    else idx=Math.floor(rnd()*256);
+    a.push(idx*dsz); }
+  return a; }
+function chips(){ const p=$('pats'); p.innerHTML='';
+  for(const k of Object.keys(PAT)){ const b=document.createElement('span'); b.className='chip'+(PAT[k]===pat?' on':''); b.textContent=k;
+    b.onclick=()=>{pat=PAT[k];[...p.children].forEach(x=>x.classList.remove('on'));b.classList.add('on');render();}; p.appendChild(b);} 
+  const d=$('dtypes'); d.innerHTML='';
+  for(const [k,v] of [['fp32 (4 B)',4],['fp64 (8 B)',8]]){ const b=document.createElement('span'); b.className='chip'+(v===dsz?' on':''); b.textContent=k;
+    b.onclick=()=>{dsz=v;[...d.children].forEach(x=>x.classList.remove('on'));b.classList.add('on');render();}; d.appendChild(b);} }
+function render(){
+  const A=addrs();
+  const sectorsOf=A.map(x=>Math.floor(x/32));
+  const uniq=[...new Set(sectorsOf)].sort((a,b)=>a-b);
+  const useful=32*dsz, fetched=uniq.length*32, tax=fetched/useful;
+  ctx.clearRect(0,0,W,H); ctx.font='10px ui-monospace, monospace'; ctx.textAlign='center';
+  // lanes row
+  const lw=(W-40)/32, ly=40;
+  ctx.fillStyle=C.dim; ctx.textAlign='left'; ctx.fillText('warp: 32 lanes, each reads '+dsz+' B',20,24); ctx.textAlign='center';
+  for(let l=0;l<32;l++){ const x=20+l*lw; ctx.fillStyle=C.acc; ctx.globalAlpha=.85; ctx.fillRect(x+1,ly,lw-2,18); ctx.globalAlpha=1; }
+  // sectors row (show the touched range, capped to fit)
+  const minS=uniq[0], maxS=uniq[uniq.length-1]; let span=maxS-minS+1; const capped=span>34;
+  const showSecs = capped ? uniq : [];
+  const sectorsToDraw = capped ? uniq.map((s,i)=>({s,slot:i,n:uniq.length})) : [];
+  const sy=150; const cols = capped?uniq.length:span; const sw=(W-40)/Math.max(cols,1);
+  const setU={}; sectorsOf.forEach(s=>setU[s]=(setU[s]||0)+1);
+  const idxOf = {}; uniq.forEach((s,i)=>idxOf[s]=i);
+  ctx.textAlign='left'; ctx.fillStyle=C.dim; ctx.fillText(uniq.length+' × 32-byte sectors touched',20,138); ctx.textAlign='center';
+  function sectorSlot(s){ return capped ? idxOf[s] : (s-minS); }
+  for(let i=0;i<cols;i++){ let s = capped ? uniq[i] : (minS+i); const used=setU[s]||0;
+    const x=20+i*sw; const full = used*dsz>=32; 
+    ctx.fillStyle = used===0 ? '#161b26' : full ? C.good : C.warn; ctx.globalAlpha= used===0?.4:.85;
+    ctx.fillRect(x+1,sy,sw-2,20); ctx.globalAlpha=1;
+    ctx.strokeStyle=C.line; ctx.strokeRect(x+1,sy,sw-2,20);
+    if(sw>14){ ctx.fillStyle=C.tx; ctx.fillText(used?used:'', x+sw/2, sy+14); } }
+  // connectors
+  ctx.strokeStyle=C.dim; ctx.globalAlpha=.35; ctx.lineWidth=1;
+  for(let l=0;l<32;l++){ const lx=20+l*lw+lw/2; const s=sectorsOf[l]; const slot=sectorSlot(s); const sx=20+slot*sw+sw/2;
+    ctx.beginPath(); ctx.moveTo(lx,ly+18); ctx.lineTo(sx,sy); ctx.stroke(); }
+  ctx.globalAlpha=1;
+  ctx.fillStyle=C.dim; ctx.textAlign='center'; ctx.fillText('green = fully-used sector · amber = partially wasted · dim = (gap)', W/2, H-10);
+  // metrics
+  $('sr').textContent=uniq.length;
+  $('use').textContent=useful+' B'; $('fetch').textContent=fetched+' B';
+  $('tax').textContent=tax.toFixed(tax<10?1:0)+'×'; $('tax').style.color = tax<1.25?'var(--good)':tax<3?'var(--warn)':'var(--bad)';
+  const floor = dsz===4?8:4;
+  const v=$('verdict'); v.className='verdict '+(tax<1.25?'ok':tax<3?'warnv':'badv');
+  let m='';
+  if(tax<1.25) m='<b>Coalesced ✓</b> — the 32 lanes hit consecutive addresses, filling '+uniq.length+' sectors with no waste. This is the memory system working for you (5.7).';
+  else if(pat==='gather') m='<b>Gather (data-dependent)</b> — tax '+tax.toFixed(1)+'× here, but it depends on where the indices land. Sorted/clustered indices coalesce; uniform-random scatter hits the '+floor+'× floor. L2 can rescue reused rows (embeddings).';
+  else m='<b>Uncoalesced — '+tax.toFixed(tax<10?1:0)+'× tax.</b> The lanes are spread across '+uniq.length+' sectors, so the hardware fetches '+fetched+' B to deliver '+useful+' useful. The floor for '+(dsz===4?'fp32 is 8×':'fp64 is 4×')+' (a 32-B sector holds '+(32/dsz)+' elements). Fix: change the index mapping so adjacent lanes read adjacent elements (SoA, reindex).';
+  v.innerHTML=m;
+}
+chips(); render();
+</script>
+</body>
+</html>

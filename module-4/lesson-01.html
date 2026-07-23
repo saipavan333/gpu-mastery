@@ -1,0 +1,194 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>4.1 Inside a CPU Core — GPU Mastery</title>
+<link rel="stylesheet" href="../assets/style.css">
+</head>
+<body data-lesson="m4l1">
+<nav><div class="inner">
+  <a class="logo" href="../index.html">GPU<span>Mastery</span></a>
+  <a class="item" href="../index.html">Home</a>
+  <a class="item on" href="../curriculum.html">Curriculum</a>
+  <a class="item" href="../labs.html">Labs</a>
+  <a class="item" href="../setup.html">Lab setup</a>
+  <a class="item" href="../prompt.html">Generator prompt</a>
+</div></nav>
+<div class="wrap">
+
+<div class="lesson-top">
+  <div><span class="badge">Module 4 · Lesson 1</span><span class="badge dim">≈ 3 h</span></div>
+  <button id="donebtn" class="donebtn">Mark lesson complete</button>
+</div>
+<h1>Inside a CPU Core — pipelines, predictions & the meaning of IPC 0.4</h1>
+<p class="lead">Module 3 ended with measured mysteries; this module explains them from silicon up. First: what a core actually does with your instructions — and why "3 GHz" tells you almost nothing about speed. Every idea here reappears, mutated, inside a GPU SM in 4.4.</p>
+
+<h2>Concept</h2>
+
+<h3>The contract: fetch, decode, execute — forever</h3>
+<p>A core is a machine that loops: <strong>fetch</strong> the instruction at the program counter, <strong>decode</strong> what it means, <strong>execute</strong> it, touch <strong>memory</strong> if needed, <strong>write back</strong> the result. Your 3.1 assembly (<code>mulsd</code>, <code>vfmadd</code>…) is literally the input stream to this loop. If each instruction took the full trip alone, a 3 GHz core would do ~600M instructions/s. Real cores do 10 billion+. Three tricks close that gap — and their <em>failure modes</em> are your Module 3 mysteries.</p>
+
+<h3>Trick 1 — pipelining: an assembly line for instructions</h3>
+<div class="diagram" data-diagram="m4l1-pipeline" data-caption="Five instructions in flight at once. Latency unchanged; throughput ×5."></div>
+<p>Stage the trip: while I1 executes, I2 decodes and I3 fetches. After the pipe fills, one instruction <em>completes</em> per cycle even though each still takes 5 (real cores: 14–20 stages). You met this exact latency-vs-throughput split as M1 L3's ladder and you'll meet it as the whole GPU philosophy in 4.3. The catch: the line only flows if the next instruction is <em>known</em> and its <em>inputs are ready</em> — which is exactly what branches and dependencies break.</p>
+
+<h3>Trick 2 — branch prediction: guessing to keep the line moving</h3>
+<div class="diagram" data-diagram="m4l1-branch" data-caption="A wrong guess flushes the speculated work: ~15–20 cycles of nothing."></div>
+<pre><code>if (x[i] &gt; threshold) count++;      /* the branch resolves DEEP in the pipe —    */
+                                    /* so the fetcher GUESSES the outcome and    */
+                                    /* barrels ahead. Right: free. Wrong: flush. */</code></pre>
+<p>Predictors track history per-branch and hit 95–99% on regular patterns (loops: "taken, taken, taken…" is trivial). The nightmare input is a 50/50 <em>random</em> branch: ~half the guesses wrong, ~10–20 cycles each. This lesson's worked example <em>measures</em> it — the famous sorted-vs-shuffled experiment — and the punchline generalizes: <strong>data-dependent branching is expensive on CPUs and catastrophic inside GPU warps</strong> (4.4's divergence is this idea ×32).</p>
+
+<h3>Trick 3 — superscalar + out-of-order: width, if you feed it</h3>
+<div class="diagram" data-diagram="m4l1-ilp" data-caption="Four independent multiplies issue together; a dependent chain trickles one result per latency."></div>
+<p>Modern cores issue 4–6 instructions per cycle from a window of ~300+ waiting instructions, executing <em>out of order</em> whenever inputs are ready. The limit is data dependencies: <code>b = a*z</code> cannot start until <code>a</code> exists. <strong>Instruction-level parallelism (ILP)</strong> is how much independent work the window can find. Now read your 3.9 mystery: naive matmul's <strong>IPC 0.4</strong> = one serial accumulator chain (each <code>s +=</code> waits ~4 cycles for the previous) <em>plus</em> memory stalls (next lesson). And the fix compilers use — splitting a sum into 4–8 independent partial sums — is exactly what M1 L8 forbids them from doing to <em>float</em> sums without <code>-ffast-math</code>: your 3.9 QA measured that gap as real.</p>
+
+<h2>Worked example</h2>
+<div class="card">
+<p><strong>Task:</strong> The branch-predictor experiment — same data, same total work, one shuffle apart. (Runs anywhere; this course's QA ran it on a sandbox CPU.)</p>
+<pre><code>/* branch_lab.c — sum a LOOKUP for elements &gt; 128 in 50M random bytes.
+   Why a lookup? A guarded LOAD cannot be if-converted (a speculated load
+   might fault — 3.8's pages), so the compiler MUST keep a real branch.
+   The simple `if (x[i]&gt;128) s += x[i];` gets turned into a branch-free
+   cmov by gcc -O2 — check your .s! — and then measures nothing.          */
+#include &lt;stdio.h&gt;
+#include &lt;stdlib.h&gt;
+#include &lt;string.h&gt;
+#include &lt;time.h&gt;
+static double now_ms(void){ struct timespec ts; clock_gettime(CLOCK_MONOTONIC,&amp;ts);
+    return ts.tv_sec*1e3 + ts.tv_nsec/1e6; }
+static int cmp_u8(const void *a, const void *b){ return *(const unsigned char*)a - *(const unsigned char*)b; }
+static long long lut[256];
+static double run(const unsigned char *x, size_t n, long long *out) {
+    double t0 = now_ms(); long long s = 0;
+    for (size_t i = 0; i &lt; n; i++)
+        if (x[i] &gt; 128) s += lut[x[i]];          /* the un-convertible branch */
+    *out = s; return now_ms() - t0;
+}
+int main(void) {
+    size_t n = 50u*1000*1000;
+    unsigned char *shuf = malloc(n), *sorted = malloc(n);
+    srand(42); for (size_t i = 0; i &lt; n; i++) shuf[i] = rand() &amp; 0xFF;
+    for (int i = 0; i &lt; 256; i++) lut[i] = i;
+    memcpy(sorted, shuf, n); qsort(sorted, n, 1, cmp_u8);
+    long long s1, s2;
+    run(shuf, n, &amp;s1); run(sorted, n, &amp;s2);       /* warmup (M1 L7)            */
+    double a = run(shuf, n, &amp;s1), b = run(sorted, n, &amp;s2);   /* interleave A/B */
+    double a2 = run(shuf, n, &amp;s1), b2 = run(sorted, n, &amp;s2); /* vs throttling  */
+    printf("shuffled: %.1f ms   sorted: %.1f ms   ratio %.1fx   sums_equal=%d\n",
+           (a+a2)/2, (b+b2)/2, (a+a2)/(b+b2), s1 == s2);
+    return 0;
+}</code></pre>
+<pre><code>$ gcc -O2 branch_lab.c -o branch_lab &amp;&amp; ./branch_lab
+shuffled: 196.7 ms   sorted: 26.0 ms   ratio 7.6x   sums_equal=1
+# (this course's QA machine; 2–8× is the typical range — measure YOURS)</code></pre>
+<p><strong>The reading:</strong> identical instructions, identical sums — the only change is the predictor's hit rate. Shuffled: ~25M mispredictions × ~15–20 cycles ≈ 400M+ wasted cycles (M1 L3 arithmetic matching the measurement — do this check on YOUR numbers). <strong>Three professional codas:</strong> (1) the simple <code>if (x&gt;128) s+=x</code> version measures ~nothing at -O2 because the compiler if-converts it to <code>cmov</code> — finding that in your <code>-S</code> output is the experiment succeeding <em>differently</em> (3.1's assembly glance, mandatory here); (2) the guarded-<em>load</em> construction defeats if-conversion because speculating a load that might fault is illegal — a correctness rule (3.8) shaping a benchmark; (3) branchless rewrites like <code>s += (x[i] &gt; 128) * lut16[x[i] &amp; 15];</code> are the exact trick GPU code uses to avoid divergence (4.4). <strong>Decision made:</strong> warmup + interleaved A/B runs (the frequency-negotiation gotcha, §2 — applied to our own experiment) and verified equal sums: a benchmark that doesn't check outputs is a rumor (3.9's law).</p>
+</div>
+
+<h2>Key points</h2>
+<ul class="keypoints">
+<li>A core loops fetch→decode→execute→memory→write-back; pipelining overlaps the stages — latency per instruction unchanged, throughput ×depth.</li>
+<li>Branches are guessed so the pipe never waits; mispredictions flush ~15–20 cycles — random-data branches are the worst case (sorted-vs-shuffled proves it).</li>
+<li>Superscalar cores issue 4–6/cycle out-of-order, limited by data dependencies: ILP is the fuel, dependency chains are the brake.</li>
+<li>IPC (instructions per cycle) is the honest speed metric: ~4+ = fed and flowing; &lt;1 = stalled on memory or chained on data (3.9's 0.4, decoded).</li>
+<li>Float-sum chains can't be legally split without -ffast-math (M1 L8) — the compiler's hands are tied exactly where matmul needs ILP most.</li>
+<li>Everything here previews the GPU: divergence = misprediction ×32 lanes, and SMs swap "predict + reorder" for "switch to another warp" (4.4).</li>
+</ul>
+
+<h2>Quiz</h2>
+<div class="quiz">
+  <div class="q">1. A 3.5 GHz core runs your loop at IPC 0.4. Your colleague proposes overclocking to 4.0 GHz (+14%). Roughly what speedup should you promise, and what's the better first move?</div>
+  <button class="opt">+14% — clock is clock</button>
+  <button class="opt" data-c="1">Likely much less than 14% if the stalls are MEMORY-bound (DRAM doesn't speed up with the core clock); the better first move is finding WHY IPC is 0.4 — perf counters, then fix stalls or chains</button>
+  <button class="opt">+40% — IPC scales with frequency</button>
+  <button class="opt">Zero — IPC caps all improvements</button>
+  <div class="expl">IPC 0.4 says the core is idle 90% of issue slots. If waits are memory-latency (measured in NANOSECONDS, not cycles), a faster clock just counts more idle cycles per wait. If the chain is arithmetic-latency, clock helps proportionally. Diagnose before buying hertz — the exact discipline 3.9's perf preview taught, now with the mechanism attached.</div>
+</div>
+<div class="quiz">
+  <div class="q">2. Why does <code>s += x[i]</code> in a float loop cap IPC near 0.25 on a 4-wide core with 4-cycle FP add latency — and why can't -O2 fix it while -O2 CAN fix the same loop over ints?</div>
+  <button class="opt">Float adds are 4× slower than int adds</button>
+  <button class="opt" data-c="1">Each += depends on the previous (a serial chain: one result per 4 cycles = 0.25/cycle); splitting into partial sums changes float ROUNDING ORDER (M1 L8: non-associative), so -O2 may not do it — int addition IS associative, so -O2 unrolls ints freely</button>
+  <button class="opt">The loop counter serializes everything</button>
+  <button class="opt">x[i] loads block all reordering</button>
+  <div class="expl">The chain diagram, quantified: latency 4, one chain → 1 add per 4 cycles regardless of width. Integer sums reassociate legally (exact math — M1 L1); float sums don't (M1 L8) — so the identical loop shape gets vectorized for int and left serial for float unless YOU write partial sums or grant -ffast-math. This asymmetry, which your 3.9 QA measured as the -O3-helps-ikj-more mystery, is a genuinely elite interview answer.</div>
+</div>
+
+<h2>Exercises</h2>
+<details><summary>Exercise 1 — Break the chain by hand: write sum4.c computing the sum of 100M floats two ways — one accumulator vs four interleaved partial sums (s0..s3 over i, i+1, i+2, i+3 strides) combined at the end. Measure both at -O2. Predict the ratio from "latency 4–5, width ≥2" BEFORE running; then explain why the two results differ in the last digits and why that's fine (cite the budget).</summary><div class="body">
+<pre><code>float s0=0,s1=0,s2=0,s3=0;
+for (size_t i = 0; i + 3 &lt; n; i += 4) {
+    s0 += x[i]; s1 += x[i+1]; s2 += x[i+2]; s3 += x[i+3];
+}
+float total = (s0 + s1) + (s2 + s3);   /* + tail loop for n%4 */</code></pre>
+<p>Prediction: the single chain is latency-bound at 1 add per ~4–5 cycles; four independent chains can overlap in the FP units → up to ~4× (measured: typically 2.5–4× at -O2, until MEMORY bandwidth becomes the new wall — you'll see the ratio shrink for arrays past cache size: next lesson's territory arriving on schedule). The last-digit difference: four partial sums = a different addition ORDER (M1 L8 non-associativity); budget ~n·ε for the worst case, and your 2.6 tolerance discipline covers it. You have now hand-written what -ffast-math would do — with YOUR choice of order, documented, instead of the compiler's. That's the professional version.</p>
+</div></details>
+<details><summary>Exercise 2 — Branchless by construction: convert this pixel-threshold loop to branchless form two ways (arithmetic mask; ternary that compiles to cmov), measure all three on shuffled data, then state the GPU rule it rehearses. <code>for(i..) if (p[i] &gt; t) out[i] = 255; else out[i] = 0;</code></summary><div class="body">
+<pre><code>out[i] = (p[i] &gt; t) * 255;                     /* comparison IS 0/1 (M2 L2!) — arithmetic mask */
+out[i] = p[i] &gt; t ? 255 : 0;                    /* -O2 typically emits cmov / SIMD blend        */</code></pre>
+<p>Measured (typical): branchy 250–350 ms on shuffled bytes; both branchless forms ~60–90 ms — and identical on SORTED data (the predictor was already perfect there). Inspect with -S: look for <code>cmov</code> or SIMD <code>pcmpgtb/pblendvb</code> instead of a jump (3.1's assembly-glancing habit, working). GPU rule rehearsed: inside a warp, both sides of a divergent branch execute serially (4.4) — so GPU code prefers exactly these predicated/select forms; in CUDA you'll write the same ternary and the hardware turns it into a select. Note the honest limit: branchless does BOTH computations always — when one side is expensive and rare, the branch wins even with mispredictions. Measure, don't chant.</p>
+</div></details>
+
+<hr>
+<h1>Go deeper — the complete guide</h1>
+<p>Perf counters as your IPC microscope, the frequency lie (turbo/AVX offsets), hyperthreading honestly, cmov vs branch economics, and the CPU→GPU translation table this module builds toward.</p>
+
+<h2>1. Reading the core's own diary: perf</h2>
+<pre><code>$ perf stat ./branch_lab            # the 3.9 §2 preview, now with vocabulary
+  insn per cycle        0.41        # IPC — THE number
+  branch-misses         48.2%       # of all branches (shuffled run!)
+  ...
+$ perf stat -e cache-misses,cycles,instructions ./bench blocked   # pick counters</code></pre>
+<p>The workflow: IPC first (fed vs starving), then WHY — branch-misses high → prediction (this lesson); cache-misses high → memory (4.2); neither → dependency chains (check with the sum4 experiment). Counters are per-hardware-event truths, not sampling guesses, and the same mental model drives Nsight Compute's GPU counters in 5.10 (issue-slot utilization = IPC's GPU cousin). If you're on Linux, twenty minutes with perf on your own 3.9 binaries is the single highest-leverage lab in this module.</p>
+
+<h2>2. GHz is a negotiation, not a number</h2>
+<p>"3.5 GHz" is base clock; real frequency floats: <strong>turbo</strong> (single-core sprints to 5+ GHz until thermals object), <strong>all-core limits</strong> (8 busy cores clock lower than 1), and <strong>AVX offsets</strong> (heavy 512-bit SIMD historically dropped the clock — narrower on modern parts, still real). Consequences you've already met: 3.9 Ex.2's back-to-back drift (turbo states = M1 L7 variance made of silicon) and the benchmarking rules (warmup, medians, locked governors, reported environment). New consequence for scaling math: 8 threads × lower all-core clock ≠ 8 × single-thread speed even before Amdahl and bandwidth (4.3's scaling autopsy adds the other two terms).</p>
+
+<h2>3. Hyperthreading: two warps per CPU core (almost)</h2>
+<p>SMT runs 2 instruction streams on one core's execution units: when thread A stalls, thread B's instructions fill the slots. Sound familiar? It's a 2-deep version of the GPU's 64-warp latency-hiding (4.4) — same idea, tiny scale. Honest expectations: +0–30% throughput for mixed/stall-heavy workloads; ~0% (or negative, via cache fighting) for dense FP code that already saturates the units — which is why 3.9's ladder pinned OMP_NUM_THREADS to physical cores. The interview-grade sentence: "SMT shares one core's width between two contexts to hide stalls; GPUs take that idea to 64 contexts per scheduler with zero-cost switching."</p>
+
+<h2>4. The cmov economy (when branchless wins, precisely)</h2>
+<pre><code>branchy:    cost ≈ P(mispredict) × penalty(~15–20 cyc)     — but only ONE side executes
+branchless: cost ≈ both sides + select (a data dependency)  — but NEVER flushes
+crossover:  mispredict-rate × 17 ≳ extra-work-cycles → go branchless</code></pre>
+<p>Predictable branch (sorted data, loop exits): branchy wins — near-zero cost, work skipped. Coin-flip branch with cheap sides: branchless wins big (the exercise's 3–4×). Coin-flip with one EXPENSIVE side: branchy can still win (you skip the expense half the time). Compilers weigh exactly this; your job is recognizing when they chose wrong for your data (they can't know your distribution — you can, and profile-guided optimization exists to tell them). GPU version of the same economy in 4.4: divergence costs both-sides-always, so the crossover shifts hard toward branchless/predication.</p>
+
+<h2>5. The translation table (start of the module-long bridge)</h2>
+<table>
+<tr><th>CPU concept (this lesson)</th><th>GPU counterpart (4.4)</th><th>What transfers</th></tr>
+<tr><td>pipeline stall</td><td>warp stall</td><td>the cure differs: predict/reorder vs SWITCH WARP</td></tr>
+<tr><td>branch misprediction flush</td><td>warp divergence (both paths serially)</td><td>data-dependent branching is the enemy; branchless/predication the tool</td></tr>
+<tr><td>ILP window (~300 instr)</td><td>TLP pool (up to 64 warps/SM)</td><td>parallelism hides latency — found by hardware vs SUPPLIED BY YOU</td></tr>
+<tr><td>IPC</td><td>issue-slot utilization / achieved occupancy</td><td>the "is it fed?" question, same shape in Nsight</td></tr>
+<tr><td>SMT (2 threads/core)</td><td>64 warps/scheduler-group</td><td>same trick, 32× the depth, 0-cost switch</td></tr>
+</table>
+
+<h2>6. Gotchas</h2>
+<div class="gotcha"><strong>Buying GHz for a memory-bound problem.</strong> Quiz 1's trap at purchasing scale. IPC + counters first; hardware second. (Cloud corollary: the pricier instance type isn't faster if you're stalled on DRAM.)</div>
+<div class="gotcha"><strong>Benchmarking branches on friendly data.</strong> Your test data was sorted/uniform; production is adversarial. The sorted-vs-shuffled ratio IS the risk band — measure both ends (M2 L6's edge-case ethic, performance edition).</div>
+<div class="gotcha"><strong>Reading IPC without context.</strong> IPC 2.0 on scalar code is great; IPC 2.0 where SIMD could do 4×8 lanes is terrible. Pair IPC with "of what instructions" (vectorized or not — check the assembly, 3.1 §3).</div>
+<div class="gotcha"><strong>Chasing branchless everywhere.</strong> §4's crossover is real: predictable branches are FREE. Rewriting a 99%-taken guard into arithmetic pessimizes. Profile shuffled AND sorted before surgery.</div>
+<div class="gotcha"><strong>Ignoring the frequency negotiation in comparisons.</strong> A/B runs where A ran cold (turbo) and B ran hot (throttled) "prove" nonsense. Interleave runs A,B,A,B and compare medians (M1 L7 blocking, thermal edition).</div>
+<div class="gotcha"><strong>Assuming the compiler split your float chain.</strong> It legally can't (quiz 2). If the inner loop's IPC is ~0.25 on FP adds, the fix is YOURS: partial sums, or FMA restructuring, or (GPU) a tree reduction — never assumed, always verified in -S or counters.</div>
+
+<h2>Scenario — the "faster server" that lost the bake-off</h2>
+<p>Your lab gets budget for one new compute node and two candidates: Server A (4.8 GHz, 8 cores) and Server B (3.6 GHz, 32 cores, wider SIMD, more memory channels). The PI's instinct: "A — higher GHz." You run the bake-off with this lesson's instruments instead of instincts. On the lab's three real workloads: the Monte-Carlo code (branch-light, FP-chain-heavy after your Ex.1-style partial-sum fix) hits IPC 3.1 on both — A wins by clock, +30%. The genomics filter (data-dependent branches on unsorted reads) shows 45% branch-miss on both — you apply Ex.2's branchless mask rewrite and it goes bandwidth-bound… B's extra memory channels win 2.1×. The big matmul-ish solver: B's wider SIMD + channels win 2.8× (3.9's ladder logic: the ceiling was never the clock). Verdict memo, one page, counters attached: B for the fleet, and — the part that impresses the PI — a two-line code fix (branchless filter) that made the OLD servers 2× faster on workload two, purchased by understanding rather than by invoice. The meta-lesson you write at the bottom is this lesson's thesis: <em>clock buys you nothing you're not already able to feed.</em></p>
+
+<h2>Practice</h2>
+<details><summary>1. A 20-stage pipeline at 4 GHz mispredicts 2% of branches; branches are 20% of instructions. Compute the IPC ceiling from mispredictions alone (ideal IPC 4). (M1 L3 arithmetic on silicon.)</summary><div class="body">Per 1000 instructions: 200 branches × 2% = 4 flushes × ~18 cycles ≈ 72 lost cycles. Ideal: 1000/4 = 250 cycles; actual ≈ 322 → IPC ≈ 3.1. One bad percentage point of prediction costs ~8% of throughput at these settings — why predictors get transistor budgets that would embarrass a 1990s supercomputer.</div></details>
+<details><summary>2. Explain to a Python-only colleague (three sentences, no jargon) why their <code>if x &gt; 0:</code> in a hot NumPy-free loop can cost more than the arithmetic around it — and what M2 L5 idiom sidesteps the whole issue.</summary><div class="body">"The chip works on an assembly line and has to GUESS which way your if goes before it knows; when your data makes the guess a coin flip, it throws away ~15 steps of work on every wrong guess. The comparison itself is one step — the wrong guesses are the bill. NumPy's boolean-mask style (out = (x > 0) * v) computes the comparison as DATA across the whole array — no guessing, no flushes — which is also why it maps straight onto GPUs." (M2 L5's masks were secretly branch-elimination all along.)</div></details>
+<details><summary>3. Your sum4 experiment shows 3.8× for arrays of 100K floats but only 1.4× at 100M. Reconstruct both numbers' stories and name the lesson that owns the second.</summary><div class="body">100K floats = 400 KB — fits L2: the chain's 4-cycle latency was the wall, four chains fill it → ~4×. 100M = 400 MB — DRAM-resident: the new wall is bandwidth (~10+ GB/s per stream vs ~30-50 available); adding ILP can't manufacture bytes. The crossover point where the ratio collapses ≈ where the working set exits cache — you can locate your L2/L3 sizes from THIS experiment alone. Owner of story two: 4.2 (and it's 3.9's blocked-vs-naive asymmetry, third sighting).</div></details>
+<details><summary>4. Sketch (pseudo-assembly or prose) how cmov turns Ex.2's ternary into a data dependency, and why that's immune to prediction but NOT free — then give the one case where a predictable branch beats it.</summary><div class="body">cmp p[i], t; cmovg out, 255/0 — the move's RESULT depends on the flags: it's an ordinary data edge in the dependency graph, executed always, never speculated → no flush possible. Cost: the cmov waits for the compare (a real latency link) and both values must exist — you traded control risk for data latency. Predictable branch wins when: taken 99%+ AND the not-taken side is expensive (you actually skip work) — e.g., a rare-error check around a heavy recompute. §4's crossover, in one concrete shape.</div></details>
+<details><summary>5. perf shows: IPC 1.9, branch-misses 0.3%, cache-misses high, backend-stall cycles 60%. Which lesson's problem is this, what would you try first, and why is this lesson still relevant to the fix?</summary><div class="body">Memory-bound (4.2's problem: backend stalls + cache misses, prediction fine). First try: access-pattern surgery — stride-1 walks, blocking, SoA (the M2 L5 → 3.9 toolkit). This lesson's relevance: while waiting on memory, ILP determines how much OTHER work overlaps the wait — restructuring so independent loads issue early (software pipelining, done by -O3 when chains allow) converts latency-bound into bandwidth-bound. The two lessons compose: feed the core (4.1) with bytes that arrive (4.2).</div></details>
+<details><summary>6. Hyperthreading A/B: your OpenMP matmul (3.9) on 8 physical cores — predict the 8-thread vs 16-thread (SMT) result and justify with §3. Then predict the same for the shuffled branch_lab run 16-way. Different answers expected — why?</summary><div class="body">Matmul (dense FP, units saturated): 16 threads ≈ 8 threads ±5%, possibly worse (L1/L2 now shared by thread pairs — the T=64 tile budget halves! 3.9 Ex.1's arithmetic with new occupants). branch_lab (stall-heavy on mispredicts): SMT fills flush bubbles with the sibling's instructions → +15–30% plausible. SMT is a stall-filler: its value is proportional to the stalls you have. Measure both; report with the environment field "SMT on/off" (3.9's provenance discipline grows a row).</div></details>
+<details><summary>7. Design: a "CPU triage" one-pager for the course repo — given any slow loop, the 6-step decision tree using only tools this course has taught (time medians → IPC → branch-miss% → cache-miss% → -S glance → the four fixes: branchless / partial sums / access pattern / vectorize check), with the expected signature of each diagnosis and the lesson that owns each fix. This page becomes the CPU half of 5.10's GPU triage.</summary><div class="body">Tree: (1) median±IQR baseline (M1 L7) — is it even slow reproducibly? (2) perf IPC: ≥3 → you're compute-fed, optimize algorithm/SIMD (3.9 §3); &lt;1 → stalled, continue. (3) branch-miss &gt;5%? → sorted-vs-shuffled A/B confirms → branchless/mask fix (THIS lesson, Ex.2). (4) cache-miss high / backend-stall dominant? → stride/blocking/SoA (4.2, 3.9's ladder). (5) neither → dependency chain: -S shows serial FP adds → partial sums (Ex.1) or FMA restructure. (6) after any fix: re-measure, CHECK OUTPUT UNCHANGED within budget (2.6), archive numbers+environment (2.7 provenance). Signatures table: "IPC 0.2–0.5 + low misses = chain" / "IPC &lt;1 + branch-miss 20%+ = predictor" / "IPC &lt;1 + backend 50%+ = memory". The GPU half (5.10) will be the same tree with occupancy/divergence/coalescing swapped in — one epistemology, two instruction sets, which is this module's whole design.</div></details>
+
+<div class="pager">
+  <a href="../curriculum.html">← Curriculum</a>
+  <a href="lesson-02.html">Next: The memory hierarchy →</a>
+</div>
+<div class="footer">GPU Mastery · Module 4 · Lesson 1 — works offline · progress saved in your browser</div>
+</div>
+<script src="../assets/diagrams4.js"></script>
+<script src="../assets/app.js"></script>
+</body>
+</html>

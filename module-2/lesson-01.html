@@ -1,0 +1,239 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>2.1 Your First Program — GPU Mastery</title>
+<link rel="stylesheet" href="../assets/style.css">
+</head>
+<body data-lesson="m2l1">
+<nav><div class="inner">
+  <a class="logo" href="../index.html">GPU<span>Mastery</span></a>
+  <a class="item" href="../index.html">Home</a>
+  <a class="item on" href="../curriculum.html">Curriculum</a>
+  <a class="item" href="../labs.html">Labs</a>
+  <a class="item" href="../setup.html">Lab setup</a>
+  <a class="item" href="../prompt.html">Generator prompt</a>
+</div></nav>
+<div class="wrap">
+
+<div class="lesson-top">
+  <div><span class="badge">Module 2 · Lesson 1</span><span class="badge dim">≈ 2–3 h</span></div>
+  <button id="donebtn" class="donebtn">Mark lesson complete</button>
+</div>
+<h1>Your First Program — values, variables & types</h1>
+<p class="lead">Today you stop reading code and start writing it. You already own the math (Module 1); Python is just the fastest way to make a machine do that math. By the end of this lesson your first program will be a genuinely professional artifact: a GPU kernel-time estimator.</p>
+
+<div class="note"><strong>Set up in 60 seconds:</strong> open <a href="https://colab.research.google.com">colab.research.google.com</a> → New notebook. Type code in a cell, press <strong>Shift+Enter</strong> to run it. That's the whole loop for this module. (Local option and details: <a href="../setup.html">Lab setup</a>.)</div>
+
+<h2>Concept</h2>
+
+<h3>What a program actually is</h3>
+<p>A program is a text file of instructions executed top to bottom. Python is an <em>interpreter</em>: a running translator that reads your line, does it, and moves on. C (Module 3) is <em>compiled</em>: the whole text is translated to machine code first, then run. The trade is flexibility now versus speed later — and it's why Python is where everyone starts and why GPUs will eventually demand C from you.</p>
+<div class="diagram" data-diagram="m2l1-pipeline" data-caption="Same destination, two routes. Python acts immediately; C translates first."></div>
+<pre><code>print("hello, GPU world")      # run it. You are now a programmer.
+print(2**37)                    # 137438953472 — M1 L3's matmul FLOP count, computed by machine</code></pre>
+<p>Everything after <code>#</code> is a comment — notes for humans, invisible to Python.</p>
+
+<h3>Variables: it's an action, not an equation</h3>
+<p>M1 L2 warned you: <code>=</code> means "gets," not "equals." Now it's real. A variable in Python is a <strong>name tag pointed at an object</strong> — and this picture, more than any other, is what makes Python behave the way it does:</p>
+<div class="diagram" data-diagram="m2l1-names" data-caption="Assignment points a tag. Re-assignment re-points it. Nothing is copied."></div>
+<pre><code>flops = 2 * 4096**3         # tag 'flops' → the int 137438953472
+flops = flops / 50e12       # re-point: now → the float 0.00274877...
+gpu_name = "H100"           # tags can point at any type; names are case-sensitive
+GPU_NAME = "different tag"  # this is a DIFFERENT variable</code></pre>
+<p>Name rules: letters, digits, underscores; can't start with a digit; <code>snake_case</code> by convention. Give things honest names — <code>bytes_per_element</code>, not <code>b</code> — your future debugging self is the customer.</p>
+
+<h3>The types you'll use 95% of the time</h3>
+<div class="diagram" data-diagram="m2l1-numbers" data-caption="You studied both of these in Module 1 — Python just gives them names."></div>
+<table>
+<tr><th>Type</th><th>Literal</th><th>What it really is</th><th>M1 connection</th></tr>
+<tr><td><code>int</code></td><td><code>42</code>, <code>2**1000</code></td><td>arbitrary-precision integer</td><td>L1: no fixed width → no overflow (Python pays speed for this)</td></tr>
+<tr><td><code>float</code></td><td><code>3.5</code>, <code>5e13</code>, <code>0.1</code></td><td>IEEE-754 fp64, exactly</td><td>L8: everything applies — try <code>0.1 + 0.2</code> right now</td></tr>
+<tr><td><code>str</code></td><td><code>"H100"</code>, <code>'text'</code></td><td>immutable text</td><td>L1 preview: secretly bytes + an encoding (2.7)</td></tr>
+<tr><td><code>bool</code></td><td><code>True</code>, <code>False</code></td><td>a 1-bit truth value</td><td>L1: the smallest possible information</td></tr>
+</table>
+<pre><code>type(42)        # &lt;class 'int'&gt;   — when confused, ask the object what it is
+7 / 2           # 3.5   — / ALWAYS produces a float, even for exact divisions
+7 // 2          # 3     — floor division stays integer (M1 L2: -7//2 = -4, floors!)
+7 % 2           # 1     — remainder; (a//b)*b + a%b == a, Python's version
+2**0.5          # 1.4142... — ** is power; fractional exponents work (M1 L3)</code></pre>
+
+<h3>Strings and f-strings: making output speak</h3>
+<pre><code>gpu = "H100"
+tflops = 989
+print(f"{gpu}: {tflops} TFLOP/s fp16")          # f-string: expressions inside {}
+print(f"time = {1.37e11 / 5e13 * 1000:.2f} ms")  # :.2f → 2 decimal places → "2.75 ms"
+print(f"{16_777_216:,}")                          # underscores in literals, commas out: 16,777,216</code></pre>
+<p>The <code>:.2f</code>, <code>:,</code>, <code>:e</code> format codes are how professionals stop printing <code>0.0027487790694101243</code> at people. You'll use f-strings in every program you ever write from here.</p>
+
+<h3>Converting between types (and when Python refuses)</h3>
+<pre><code>int("512")       # 512      — parse a string into a number
+float("3.5")     # 3.5
+str(2.75)        # "2.75"
+int(2.99)        # 2        — TRUNCATES toward zero (M1 L2!), not rounds
+round(2.99)      # 3        — rounding is a different, explicit operation
+"batch=" + 32    # TypeError! Python never guesses; write "batch=" + str(32)</code></pre>
+<div class="warnbox">That <code>TypeError</code> is Python being your ally: it refuses to guess whether <code>"2" + 2</code> means <code>4</code> or <code>"22"</code>. Languages that guess (JavaScript) produce famous bugs. Read error messages as design feedback, not punishment — Lesson 2.6 makes you fluent in them.</div>
+
+<h2>Worked example</h2>
+<div class="card">
+<p><strong>Task:</strong> Your first real program — the back-of-envelope kernel estimator from M1 L3, as executable code. Given a matrix size and a GPU's specs, print whether a matmul is compute- or memory-bound and its time floor.</p>
+<pre><code># kernel_estimate.py — my first program that would be useful at work
+n              = 4096          # square matrix size
+peak_flops     = 50e12         # 50 TFLOP/s fp32
+bandwidth      = 1.0e12        # 1 TB/s
+
+work_flops   = 2 * n**3                     # M1 L6: matmul costs 2·n³
+bytes_moved  = 3 * n**2 * 4                 # 3 matrices, fp32 = 4 bytes (M1 L8)
+t_compute_ms = work_flops  / peak_flops * 1000
+t_memory_ms  = bytes_moved / bandwidth  * 1000
+intensity    = work_flops / bytes_moved     # FLOPs per byte (M1 L3 §4)
+
+print(f"work: {work_flops:.3e} FLOPs, data: {bytes_moved/1e6:.0f} MB")
+print(f"compute floor: {t_compute_ms:.2f} ms   memory floor: {t_memory_ms:.2f} ms")
+print(f"arithmetic intensity: {intensity:.0f} FLOP/byte")
+print(f"bound by: {'COMPUTE' if t_compute_ms > t_memory_ms else 'MEMORY'}")</code></pre>
+<p><strong>Output:</strong></p>
+<pre><code>work: 1.374e+11 FLOPs, data: 201 MB
+compute floor: 2.75 ms   memory floor: 0.20 ms
+arithmetic intensity: 683 FLOP/byte
+bound by: COMPUTE</code></pre>
+<p><strong>Decisions made:</strong> names that read as physics (<code>t_compute_ms</code> carries its unit — a professional habit that has prevented actual spacecraft crashes); formatted output a human can scan; and the one-line conditional expression (<code>A if cond else B</code>) as a preview of Lesson 2.2. Change <code>n</code> to 512 and run again — watch it flip to MEMORY-bound. You now own an interactive version of M1 L3's roofline reasoning.</p>
+</div>
+
+<h2>Key points</h2>
+<ul class="keypoints">
+<li>A program runs top to bottom; Python interprets it line by line — immediate, flexible, and ~100 ns per step slower than compiled code (a cost Lesson 2.5 will dodge).</li>
+<li><code>=</code> points a name tag at an object; it never copies. <code>x = x + 1</code> re-points the tag at a new object.</li>
+<li>Python <code>int</code> is M1 L1's unlimited integer (no overflow); Python <code>float</code> IS M1 L8's fp64 — all its rules apply, starting with "no ==".</li>
+<li><code>/</code> always yields float; <code>//</code> floor-divides (negatives floor DOWN, unlike C); <code>%</code> is the remainder; <code>**</code> is power.</li>
+<li>f-strings <code>f"{x:.2f}"</code> are the standard way to produce readable output; unformatted float spew is amateur signature.</li>
+<li>Python never coerces types across <code>+</code>: <code>"a" + 1</code> is a TypeError — convert explicitly and be glad it asked.</li>
+</ul>
+
+<h2>Quiz</h2>
+<div class="quiz">
+  <div class="q">1. After <code>x = 7; y = x; x = x + 1</code>, what are x and y — and why?</div>
+  <button class="opt">x = 8, y = 8 — y points at x, so it follows</button>
+  <button class="opt" data-c="1">x = 8, y = 7 — y's tag still points at the int 7; only x was re-pointed</button>
+  <button class="opt">x = 8, y = 8 — integers are shared objects</button>
+  <button class="opt">Error — x can't change while y refers to it</button>
+  <div class="expl">y = x pointed y's tag at the SAME int 7 object x pointed at. x = x + 1 then re-pointed x at a new object (8); y's tag never moved. Names point at objects; they do not point at other names. (This exact picture becomes critical when the object is a mutable list — 2.4.)</div>
+</div>
+<div class="quiz">
+  <div class="q">2. What does <code>print(int("7") + int(2.9) + 7 // 2)</code> output?</div>
+  <button class="opt">13 — 7 + 3 + 3.5 rounds</button>
+  <button class="opt">12.5 — the division makes everything float</button>
+  <button class="opt" data-c="1">12 — 7 + 2 (truncated) + 3 (floor division)</button>
+  <button class="opt">TypeError — can't mix conversions</button>
+  <div class="expl">int("7")=7; int(2.9)=2 — int() truncates toward zero, it does NOT round; 7//2=3 — floor division stays int. Sum: 12. The int()-truncates fact is a recurring interview micro-trap and a real bug source in index math.</div>
+</div>
+
+<h2>Exercises</h2>
+<details><summary>Exercise 1 — Write a VRAM budget calculator: given <code>params = 7e9</code> and <code>bytes_per_param = 2</code> (bf16 — M1 L8), print the weight memory in GiB (not GB — M1 L1!), and the tokens/second ceiling at 3 TB/s if each generated token reads every weight once (M1 L3, Ex.1). Format to 2 decimals.</summary><div class="body">
+<pre><code>params          = 7e9
+bytes_per_param = 2          # bf16
+bandwidth       = 3e12       # 3 TB/s
+
+weight_bytes = params * bytes_per_param
+weight_gib   = weight_bytes / 2**30          # GiB uses 2^30 (M1 L1), not 1e9
+tok_per_s    = bandwidth / weight_bytes      # one full weight-read per token
+
+print(f"weights: {weight_gib:.2f} GiB")      # 13.04 GiB
+print(f"ceiling: {tok_per_s:.2f} tokens/s")  # 214.29 tokens/s</code></pre>
+<p>Note the two deliberate choices: <code>2**30</code> for GiB (binary units for memory) and names carrying units. If you printed 14.00 "GB," you'd be off by 7.4% versus the GiB the driver reports — M1 L1's marketing-vs-memory gap, now in your own code.</p>
+</div></details>
+<details><summary>Exercise 2 — Predict, run, explain: <code>print(0.1 + 0.2 == 0.3)</code>, <code>print(0.1 + 0.2)</code>, <code>print(f"{0.1 + 0.2:.20f}")</code>, and <code>print(10**16 + 1.0 == 10**16)</code>. Tie each output to its M1 L8 mechanism.</summary><div class="body">
+<pre><code>False                       # 0.1, 0.2, 0.3 are all rounded binary fractions (M1 L8 §"0.1")
+0.30000000000000004         # the sum lands one ulp off the rounded 0.3
+0.30000000000000004441      # :.20f exposes the stored value's full lie
+True                        # 10**16 &gt; 2**53: float64's integer-exact range ends at 2^53
+                            # ≈ 9.007e15, so adding 1.0 is ABSORBED (M1 L8 absorption)</code></pre>
+<p>The last line is the fp64 version of M1's "+1 at 2²⁴ does nothing in fp32." Python's int would handle 10**16 + 1 exactly — but writing <code>1.0</code> made it a float computation. One character, different number system. This is why scientific code audits every literal.</p>
+</div></details>
+
+<hr>
+<h1>Go deeper — the complete guide</h1>
+<p>The interpreter's actual pipeline, the object model that explains every "weird" Python behavior in advance, numbers in full (including the decimal escape hatch), string internals, and the input/validation pattern you'll use forever.</p>
+
+<h2>1. What really happens when you press Run</h2>
+<p>Python doesn't interpret your raw text character by character. It <em>compiles</em> your file to <strong>bytecode</strong> (simple stack-machine instructions) once, then a loop executes those instructions. You can watch:</p>
+<pre><code>import dis
+dis.dis("flops / 50e12")     # LOAD_NAME flops → LOAD_CONST 5e13 → BINARY_OP / → ...</code></pre>
+<p>Each bytecode step costs tens of nanoseconds of bookkeeping (type checks, reference counting, dispatch). That's the "~100 ns per step" from the diagram — irrelevant for 100 operations, fatal for 100 million (Lesson 2.5's whole plot). CPython 3.13/3.14 have been shaving this overhead (adaptive specialization, an experimental JIT), but the order of magnitude stands: <strong>per-element Python is slow; Python orchestrating compiled bulk operations is world-class</strong> — which is precisely the division of labor in every GPU stack: Python drives, compiled kernels do the work.</p>
+
+<h2>2. The object model: three facts that predict everything</h2>
+<p><strong>(1) Everything is an object</strong> — the int 5, the string "H100", functions themselves. Every object has an identity (<code>id(x)</code> — think address, M1 L1), a type, and a value. <strong>(2) Names are tags</strong>, stored in namespaces (dictionaries, as it happens — 2.4). <strong>(3) Objects are either mutable or immutable:</strong></p>
+<table>
+<tr><th>Immutable (value can never change)</th><th>Mutable (can change in place)</th></tr>
+<tr><td>int, float, bool, str, tuple</td><td>list, dict, set, NumPy arrays</td></tr>
+<tr><td>"changing" one = making a new object</td><td>changing one is visible through EVERY tag on it</td></tr>
+</table>
+<p>All of Module 2's famous traps — aliased lists (2.4), the shared default argument (2.4), views mutating arrays (2.5) — are this table plus the tag picture. You now hold the skeleton key three lessons early. Two curiosities to file: CPython pre-creates small ints (−5..256), so <code>id(7)</code> is shared — harmless, but it's why <code>is</code> sometimes "works" for small numbers and then betrays you at 257. Rule: <strong><code>==</code> compares values; <code>is</code> asks "same object?"</strong> — use <code>is</code> only for <code>None</code>.</p>
+
+<h2>3. Numbers, completely</h2>
+<pre><code>0b10101101     # 173 — binary literals (M1 L1 notation, built into the language)
+0xAD           # 173 — hex literals
+1_000_000      # underscores group digits
+5e13           # float scientific notation
+7 // 2, -7 // 2    # 3, -4   — floor division FLOORS (C truncates: -3. M1 L2's table)
+-7 % 2             # 1       — remainder follows the divisor's sign in Python
+divmod(11551, 3)   # (3850, 1) — quotient and remainder in one call (M1 L2 decode!)
+abs(-5), round(2.675, 2)   # 5, 2.67 — wait, not 2.68? See below.</code></pre>
+<p><code>round(2.675, 2) == 2.67</code> because 2.675 isn't representable and stores as 2.67499999… (M1 L8). Also, <code>round</code> uses banker's rounding (ties to even: <code>round(0.5) == 0</code>, <code>round(1.5) == 2</code>) — IEEE-754's tie rule, which you met in M1 L8 §1. When decimal exactness is a requirement (money!), Python ships an escape hatch:</p>
+<pre><code>from decimal import Decimal
+Decimal("0.1") + Decimal("0.2") == Decimal("0.3")   # True — base-10 arithmetic, slower</code></pre>
+<p>Rule of the house: floats for measurements and math, ints for counts and indices, Decimal for money, never floats for money.</p>
+
+<h2>4. Strings, enough to be dangerous</h2>
+<pre><code>s = "NVIDIA H100 SXM"
+len(s)          # 15
+s[0], s[-1]     # 'N', 'M'    — 0-based, negatives from the end (2.4 formalizes)
+s[7:11]         # 'H100'      — half-open slice, M1 L2 intervals again
+s.upper(), s.split(" "), s.strip(), s.replace("H100", "B200")
+"—".join(["a", "b", "c"])     # 'a—b—c'
+f"{3.14159:8.2f}|{42:>6}|{'x':&lt;4}|"   # '    3.14|    42|x   |' — width/align codes</code></pre>
+<p>Strings are <strong>immutable</strong>: <code>s[0] = "n"</code> is a TypeError; every "modification" builds a new string. Consequence worth knowing now: building a big string with <code>+=</code> in a loop re-copies everything each time (a Gauss-sum O(n²) of copying — M1 L2 §4); collect pieces in a list and <code>"".join(pieces)</code> at the end. And an f-string debugging gem: <code>f"{x=}"</code> prints <code>x=2.75</code> — name and value together.</p>
+
+<h2>5. Input, validation, and your first defensive pattern</h2>
+<pre><code>raw = input("matrix size n: ")     # ALWAYS returns a str — "4096", not 4096
+n = int(raw)                        # crashes on "40k" — ValueError</code></pre>
+<p>Real programs validate at the boundary — convert and check immediately, so garbage can't travel deeper (the same at-ingestion discipline M1 L8 preached for NaNs):</p>
+<pre><code>raw = input("matrix size n: ").strip()
+if not raw.isdigit():
+    print(f"'{raw}' is not a positive integer"); raise SystemExit(1)
+n = int(raw)
+if not (1 &lt;= n &lt;= 65536):
+    print(f"n={n} outside sane range [1, 65536]"); raise SystemExit(1)</code></pre>
+<p>(Full error machinery arrives in 2.6; the shape of the pattern — <em>convert, check, fail loudly, fail early</em> — is the takeaway today.)</p>
+
+<h2>6. Gotchas</h2>
+<div class="gotcha"><strong><code>=</code> vs <code>==</code>.</strong> Assignment vs comparison. Python at least refuses <code>if x = 5:</code> with a SyntaxError (C silently accepts the bug — Module 3 will re-warn you).</div>
+<div class="gotcha"><strong><code>int()</code> truncates.</strong> <code>int(2.99) == 2</code>, <code>int(-2.99) == -2</code> (toward zero!). For real rounding use <code>round()</code>; for floors of negatives use <code>math.floor</code> — three different operations, choose consciously (M1 L2's negative-division table).</div>
+<div class="gotcha"><strong>Case sensitivity + lookalikes.</strong> <code>Total</code>, <code>total</code>, and <code>totaI</code> (capital i) are three names. NameError on a name you "just defined" is a typo in one of its spellings 95% of the time.</div>
+<div class="gotcha"><strong>Float display ≠ float value.</strong> <code>print(x)</code> shows the shortest string that round-trips; the stored bits may differ (M1 L8). Debug numerics with <code>f"{x:.17g}"</code> or <code>x.hex()</code>, never by eyeballing two prints.</div>
+<div class="gotcha"><strong>Integer bling in float clothing.</strong> <code>10**16 + 1.0</code> absorbs (fp64, 2⁵³ limit); <code>10**16 + 1</code> is exact (Python int). One misplaced <code>.0</code> switches number systems. Audit literals in index/size arithmetic.</div>
+<div class="gotcha"><strong>Shadowing builtins.</strong> <code>type = "fp16"</code> or <code>sum = 0</code> silently kills those functions for the rest of the file (they're just names in the builtins namespace — §2). If <code>sum(xs)</code> ever says "int is not callable," you did this.</div>
+
+<h2>Scenario — the estimator that made the meeting</h2>
+<p>Two weeks into your first job-adjacent project, a teammate proposes moving a nightly batch scoring job to fp16 on a spot-priced GPU "to save money," and the room starts opining. You open a notebook and type for ninety seconds: the worked example's estimator, plus three lines — model size 1.3B params × 2 bytes = 2.6 GB of weights; batch matmul work per 10k-row chunk ≈ 2·10⁴·4096·1024 FLOPs; at the cheap GPU's 30 TFLOP/s and 600 GB/s, arithmetic intensity says memory-bound; time floor ≈ weights-read-per-batch dominated → the job is <em>bandwidth</em>-shopping, not FLOPs-shopping, and the "slower" GPU with faster memory wins at half the price. You paste the four printed lines into the chat. The debate ends. Nobody in the room knew more Python than this lesson teaches — variables, arithmetic, f-strings — but the person who could <em>compute the answer while others adjectived</em> set the decision. That is what "first program" means when Module 1 is behind it.</p>
+
+<h2>Practice</h2>
+<details><summary>1. Predict without running: <code>9 / 3</code>, <code>2**10 == 1024</code>, <code>type(2**10 / 1)</code>, <code>-9 // 4</code>, <code>-9 % 4</code>.</summary><div class="body"><code>3.0</code> (/ always floats — even exact divisions), <code>True</code>, <code>&lt;class 'float'&gt;</code>, <code>-3</code> (floors down), <code>3</code> (sign of divisor). The last two are Python's floor convention — C would give -2 and -1 (M1 L2).</div></details>
+<details><summary>2. Write one f-string that prints <code>eps=1.19e-07 ulp@1024=1.22e-04</code> from <code>eps = 2**-23</code> and <code>ulp = 2**(10-23)</code> (M1 L8 numbers).</summary><div class="body"><code>print(f"eps={eps:.2e} ulp@1024={ulp:.2e}")</code>. The <code>:.2e</code> code is scientific notation with 2 decimals — the professional format for tiny/huge magnitudes (M1 L3's notation, automated).</div></details>
+<details><summary>3. <code>a = "3"; b = 4</code>. Give all four distinct results you can produce with one conversion each: string concat, int add, float add, repetition — and the one that errors.</summary><div class="body"><code>a + str(b) → "34"</code>; <code>int(a) + b → 7</code>; <code>float(a) + b → 7.0</code>; <code>a * b → "3333"</code> (string repetition — no conversion needed!); <code>a + b → TypeError</code>. The str*int repetition surprises everyone once; it's why "type errors caught loudly" beats guessing.</div></details>
+<details><summary>4. Why does <code>0.1 + 0.7 == 0.8</code> print False but <code>0.25 + 0.5 == 0.75</code> print True? State the M1 L8 rule.</summary><div class="body">0.25, 0.5, 0.75 are p/2ᵏ — exact in binary; the arithmetic is exact, equality holds. 0.1 and 0.7 have factor 5 in the denominator → rounded storage → sum lands an ulp off 0.8's rounding. Representability rule: denominator a pure power of two ⇔ exact.</div></details>
+<details><summary>5. A colleague writes <code>seconds = ms * 1000</code>. The variable names say the bug. Rewrite correctly both directions and state the naming rule that would have caught it in review.</summary><div class="body"><code>seconds = ms / 1000</code>; <code>ms = seconds * 1000</code>. Rule: units live in names (<code>t_ms</code>, <code>bytes_per_row</code>), so every line can be dimension-checked by reading. The Mars Climate Orbiter was lost to exactly this class of bug — units are not pedantry.</div></details>
+<details><summary>6. Compute in your head using M1 skills, then verify in Python: <code>(2**20 * 3) // 2**10</code> and <code>0xFF & 0x0F</code> and <code>1 &lt;&lt; 20</code>.</summary><div class="body">3·2²⁰/2¹⁰ = 3·2¹⁰ = 3072. 0xFF & 0x0F keeps the low nibble → 0x0F = 15. 1&lt;&lt;20 = 2²⁰ = 1 048 576 (a MiB of bytes). Python's bitwise operators are C's (M1 L1 §5), unlimited-width — and yes, they'll matter again in CUDA.</div></details>
+<details><summary>7. Design: sketch (names + formulas only, no new syntax needed) a "GPU shopping calculator" script: inputs are price, TFLOP/s, and GB/s for two GPUs plus one workload's FLOPs and bytes; it prints which GPU is cheaper per job. Which M1 lessons is it built from?</summary><div class="body">For each GPU: <code>t = max(flops/peak_flops, bytes/bandwidth)</code> (the two floors — the max is the binding one; M1 L3 roofline), <code>cost_per_job = price_per_hour * t / 3600</code>; print both, compare. Extensions: arithmetic-intensity print to show WHY (M1 L3), GiB-vs-GB honesty for memory fit (M1 L1), and fp16 vs fp32 byte counts (M1 L8). Total new Python required beyond this lesson: zero — which is the point. Tomorrow's control flow just lets it loop over a whole price list.</div></details>
+
+<div class="pager">
+  <a href="../curriculum.html">← Curriculum</a>
+  <a href="lesson-02.html">Next: Control flow →</a>
+</div>
+<div class="footer">GPU Mastery · Module 2 · Lesson 1 — works offline · progress saved in your browser</div>
+</div>
+<script src="../assets/diagrams2.js"></script>
+<script src="../assets/app.js"></script>
+</body>
+</html>

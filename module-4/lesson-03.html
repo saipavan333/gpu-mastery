@@ -1,0 +1,180 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>4.3 The Parallelism Taxonomy — GPU Mastery</title>
+<link rel="stylesheet" href="../assets/style.css">
+</head>
+<body data-lesson="m4l3">
+<nav><div class="inner">
+  <a class="logo" href="../index.html">GPU<span>Mastery</span></a>
+  <a class="item" href="../index.html">Home</a>
+  <a class="item on" href="../curriculum.html">Curriculum</a>
+  <a class="item" href="../labs.html">Labs</a>
+  <a class="item" href="../setup.html">Lab setup</a>
+  <a class="item" href="../prompt.html">Generator prompt</a>
+</div></nav>
+<div class="wrap">
+
+<div class="lesson-top">
+  <div><span class="badge">Module 4 · Lesson 3</span><span class="badge dim">≈ 2–3 h</span></div>
+  <button id="donebtn" class="donebtn">Mark lesson complete</button>
+</div>
+<h1>The Parallelism Taxonomy — latency, throughput & Amdahl's bill</h1>
+<p class="lead">Before the GPU tour (next lesson), the vocabulary that makes it legible: the two processor philosophies, the three parallelism shapes you've already used, and the two laws — Amdahl's and the bandwidth roof — that dismembered 3.9's "why only 5.6× on 8 threads?" mystery.</p>
+
+<h2>Concept</h2>
+
+<h3>Latency vs throughput: two products, not two qualities</h3>
+<div class="diagram" data-diagram="m4l3-latencythroughput" data-caption="The car answers 'how fast is ONE?' The bus fleet answers 'how many per hour?'"></div>
+<p>A CPU core spends its silicon making ONE stream fast: pipelines, predictors, out-of-order windows, mega-caches (4.1–4.2 was a tour of that spending). A GPU spends the same transistors on <em>lanes</em>: thousands of simple cores, tiny caches, and the assumption that <em>someone else in the crowd always has work ready</em> (4.4's latency hiding). Neither wins in general: your editor's keystroke wants the car; your two-million-pixel blur wants the fleet. The professional's phrasing: <strong>CPUs minimize time-to-first-result; GPUs maximize results-per-second.</strong> Every architecture question in interviews is this sentence applied.</p>
+
+<h3>The three shapes of parallel (you've used all three)</h3>
+<div class="diagram" data-diagram="m4l3-taxonomy" data-caption="One instruction/many lanes (SIMD) · one instruction/many threads-with-masks (SIMT) · many full cores (MIMD)."></div>
+<table>
+<tr><th>Shape</th><th>Where you used it</th><th>Grain</th><th>Divergence story</th></tr>
+<tr><td><strong>SIMD</strong></td><td>NumPy ufuncs (M2 L5), BLAS microkernels (3.9 §3), -O3 vectorized loops</td><td>8–16 lanes, one PC</td><td>none — lanes can't disagree; you mask by arithmetic (4.1 Ex.2)</td></tr>
+<tr><td><strong>SIMT</strong></td><td>every CUDA warp (Module 5)</td><td>32 threads, one scheduler, per-thread registers + mask</td><td>allowed but serialized: both branch paths run (4.4)</td></tr>
+<tr><td><strong>MIMD</strong></td><td>OpenMP threads (3.9), processes, the 8-core bake-off (4.1)</td><td>full cores, own PCs</td><td>free — cores are strangers (coherence bills aside, 4.2)</td></tr>
+</table>
+<p>A modern GPU stacks all three: <strong>MIMD across 132 SMs, SIMT within each warp, SIMD inside tensor cores</strong>. When you write one CUDA kernel you are programming all three layers with one source — the reason the mental model matters more than the syntax.</p>
+
+<h3>Amdahl's law: the serial fraction is a ceiling, not a tax</h3>
+<div class="diagram" data-diagram="m4l3-amdahl" data-caption="speedup = 1/((1−p) + p/N). At p = 50%, infinite hardware buys 2×."></div>
+<pre><code>speedup(N) = 1 / ((1 − p) + p/N)          p = parallel fraction of the RUNTIME
+p = 90%:  8 cores → 4.7×;  ∞ → 10×        the last 10% costs you half the machine
+p = 99%:  ∞ → 100×                         and on a 10,000-lane GPU, p = 99%
+                                           still caps you at ~100× of one lane!</code></pre>
+<p>The GPU corollary deserves italics: <em>with N ≈ 10⁴, anything serial — a startup loop, a single-threaded reduction finish, one thread writing the output header — dominates instantly.</em> This is why CUDA kernels obsess over parallelizing the "trivial" parts (5.8's tree reductions exist because a serial sum of 132 partial results would be the whole runtime), and why "just port the hot loop" underwhelms: the law bills whatever you leave behind.</p>
+
+<h3>The two companions Amdahl travels with</h3>
+<p><strong>Gustafson's rejoinder:</strong> nobody runs the OLD problem on the new machine — they run a BIGGER one (more resolution, more tokens, more rays). If the parallel part grows with N while the serial part stays fixed, effective speedup scales far better. Both laws are true; they answer different questions (fixed-work vs fixed-time). Marketing quotes Gustafson; capacity planning must do both. <strong>The bandwidth roof:</strong> Amdahl assumes N workers never queue for a shared resource — but cores share DRAM (4.2), and 3.9's threads hit that roof at ~5.6×. The complete scaling autopsy is: <code>speedup = min(Amdahl(p, N), BW_roof / per-thread-traffic, contention terms)</code> — three ceilings, lowest wins. You now own all three.</p>
+
+<h2>Worked example</h2>
+<div class="card">
+<p><strong>Task:</strong> The full autopsy of 3.9's "5.6× on 8 threads" — assigning the missing 2.4× to named laws, with arithmetic.</p>
+<pre><code>measured: blocked matmul 1024³ — 1 thread: 148 ms → 8 threads: 26.5 ms = 5.6×
+
+suspect 1 — Amdahl: the harness's serial parts (alloc once, fixture check, the
+  final reduction of... nothing — matmul tiles are independent). Instrument:
+  time the parallel REGION alone → 25.9 ms of 26.5. Serial ≈ 0.6 ms → p ≈ 99.6%,
+  Amdahl(8) = 7.8×. Verdict: Amdahl explains 0.2× of the gap. NOT the culprit.
+
+suspect 2 — shared-resource contention: blocked traffic ≈ 2·N³/T · 4 B ≈ 134 MB
+  per matmul → only ~5 GB/s of DRAM demand: the DRAM roof does NOT bind here
+  (blocking did its job — naive ijk WOULD have hit it). The shared resource that
+  DOES: L3 — 8 threads' tile bands thrash the shared 32 MB (4 MB each vs the
+  aggregate working set). Control experiment: at 4 threads, per-thread speed
+  recovers ~12% → contention term ≈ 1.15×. (Measure, don't assume the roof!)
+
+suspect 3 — frequency negotiation (4.1 §2): all-core clock 3.9 GHz vs 1-core
+  turbo 4.8 GHz = 1.23× baseline shift hiding inside "per-core speed".
+
+reconciliation: 8 / (1.15 × 1.23 × 1.02) ≈ 5.5× — brackets the measured
+  5.6× within noise. CASE CLOSED with three named, MEASURED terms.</code></pre>
+<p><strong>The method is the takeaway:</strong> scaling gaps decompose into (serial fraction) × (shared-resource roofs) × (frequency physics) — measure each independently (time the region, count the bytes, read the clocks) instead of shrugging "overhead." <strong>Decision made:</strong> we wrote the reconciliation as a bracket, not a point — three interacting estimates honestly bound the answer (M1 L7's spread ethic applied to explanation itself). On the GPU, the same autopsy template runs with occupancy in Amdahl's seat and HBM in DRAM's — 5.10 hands you the counters.</p>
+</div>
+
+<h2>Key points</h2>
+<ul class="keypoints">
+<li>CPUs buy time-to-first-result (deep pipelines, prediction, caches); GPUs buy results-per-second (lanes + latency hiding) — different products, both optimal at their question.</li>
+<li>SIMD = lanes sharing one PC (mask by arithmetic); SIMT = 32 threads sharing one scheduler with per-thread state (divergence serializes); MIMD = independent cores (coherence bills apply). GPUs stack all three.</li>
+<li>Amdahl: speedup = 1/((1−p)+p/N) — the serial fraction is a hard ceiling, and at GPU lane counts even 1% serial dominates everything.</li>
+<li>Gustafson answers the other question (bigger problems, fixed time): both laws true, quote the one your decision actually needs.</li>
+<li>Real scaling = min(Amdahl, bandwidth roof, contention, frequency negotiation) — 3.9's 5.6× decomposes into named, measured terms.</li>
+<li>The scaling autopsy is a reusable template: time the serial region, count aggregate bytes vs the roof, check clocks — never accept "overhead" as an explanation.</li>
+</ul>
+
+<h2>Quiz</h2>
+<div class="quiz">
+  <div class="q">1. A pipeline is 95% parallelizable. Marketing wants "50× faster with our 64-core box!" on the slide. What's the honest ceiling, and what SINGLE change to the workload could make the slide almost true?</div>
+  <button class="opt">50× is fine — 64 &gt; 50</button>
+  <button class="opt" data-c="1">Amdahl caps it at 1/(0.05 + 0.95/64) ≈ 15.4× (∞ cores: 20×). The rescue is Gustafson's: grow the parallel work per run (bigger batches/resolution) so the serial 5% shrinks as a FRACTION — then 40–50× effective throughput at fixed time is honest</button>
+  <button class="opt">The ceiling is exactly 64× minus 5%: 60.8×</button>
+  <button class="opt">No ceiling — caches make it superlinear</button>
+  <div class="expl">1/(0.05+0.95/64) = 15.4 — the law is merciless at fixed work. But scale the problem (more items per batch) and the serial setup amortizes: throughput-per-hour scales near-linearly. Same hardware, both claims 'true' — knowing WHICH question each law answers is the difference between engineering and marketing. (Superlinear speedups DO occur when per-core working sets start fitting cache — real, occasional, and worth recognizing rather than worshipping.)</div>
+</div>
+<div class="quiz">
+  <div class="q">2. Inside one warp, <code>if (x[i] &gt; 0) f(); else g();</code> where the condition is a coin flip per thread. SIMD, SIMT, and MIMD each handle this differently — rank the cost and name the mechanism per shape.</div>
+  <button class="opt">All three pay the same — branching is branching</button>
+  <button class="opt" data-c="1">MIMD: free-ish (each core takes its own path). SIMT: runs BOTH f and g serially with masks — ~2× the work every time. SIMD: no branching exists — you compute both and blend (also ~2×) but with zero flush risk. The predictor-flush cost of 4.1 applies per-CORE (MIMD/scalar), not per-lane</button>
+  <button class="opt">SIMT is free because threads are independent</button>
+  <button class="opt">SIMD crashes on divergent data</button>
+  <div class="expl">The taxonomy's cash value: divergence is a SHAPE property. MIMD cores go their own ways (4.1's predictor handles each). A warp has ONE program counter — split opinions mean executing f (half masked off) THEN g (other half masked): the 4.4 divergence bill. SIMD never branches — 4.1 Ex.2's select/blend IS the only option. Corollary you'll use weekly: sort/partition your data so warps agree (M1 L7's sorted-data trick becomes a GPU performance pattern).</div>
+</div>
+
+<h2>Exercises</h2>
+<details><summary>Exercise 1 — Measure your own Amdahl curve: take 3.9's OpenMP matmul and add a DELIBERATE serial section (a single-threaded checksum of C after each run, sized to ~10% of runtime). Measure speedup at 1/2/4/8 threads, fit p from the 8-thread point, and check the fit predicts the 2- and 4-thread points. Then remove the checksum and re-fit — what p do you recover, and which suspect from the worked example is left?</summary><div class="body">
+<p>With the 10%-serial checksum: expect ≈ 1/(0.1+0.9/N): 1.8×, 3.1×, 4.7× at 2/4/8 — fit p from N=8 (solve p = (1−1/S)/(1−1/N)), then verify N=2,4 land within a few percent: Amdahl's one-parameter model FITS when serialism is the real story (satisfying!). Without the checksum: measured 5.6× → fitted "p" ≈ 0.92 — but the worked example PROVED true p ≈ 0.996 by direct timing. The residual isn't serial fraction — it's the bandwidth roof + clocks wearing Amdahl's clothes. Lesson: a good fit is not an identified mechanism (M1 L7's correlation caution, performance edition); fit parameters lie unless you've measured the mechanism independently. This trap — "fitted Amdahl p" reported as architecture truth — appears in real papers. You're now immune.</p>
+</div></details>
+<details><summary>Exercise 2 — The three shapes, one problem: implement "count elements &gt; threshold" three ways — (a) scalar branchy loop, (b) SIMD-style branchless mask sum (4.1 Ex.2's arithmetic form, -O3), (c) MIMD: OpenMP with per-thread counts reduced at the end. Measure on shuffled data; predict the SIMT (GPU) version's story without hardware, using quiz 2's model.</summary><div class="body">
+<pre><code>(a) if (x[i] &gt; t) c++;                  /* predictor-hostile on shuffled: 4.1 */
+(b) c += x[i] &gt; t;                       /* comparison-as-data: vectorizes    */
+(c) #pragma omp parallel for reduction(+:c)   /* MIMD + the privatize-reduce  */
+                                              /* of 4.2 quiz 2, built-in       */</code></pre>
+<p>Typical: (a) 300 ms, (b) 45 ms (SIMD lanes, no flushes), (c-on-b) ~8 ms at 8 threads (bandwidth-limited by then). The SIMT prediction: a warp runs (b)'s shape natively — the comparison result is per-thread data, the += becomes a warp/block reduction tree (5.8); NO divergence because there's no branch. If you'd ported (a) instead: coin-flip divergence, both paths, ~2× tax on top of everything. The design rule this hands Module 5: arrive at the GPU with branchless formulations already in hand — the CPU rehearsal (b) IS the kernel body.</p>
+</div></details>
+
+<hr>
+<h1>Go deeper — the complete guide</h1>
+<p>Task vs data parallelism, work-span (the third law), superlinear speedups honestly, energy as the real currency, and the decision framework for "CPU or GPU?" that Track A/B/C/D all inherit.</p>
+
+<h2>1. Task vs data parallelism (and why GPUs chose data)</h2>
+<p><strong>Data parallel:</strong> same operation, many elements (map, stencil, matmul) — divergence-free by construction, the GPU's home turf, and everything M2 L5 vectorized. <strong>Task parallel:</strong> different operations concurrently (parse THIS while compressing THAT) — MIMD's home, thread pools, your OS. The boundary blurs (a render frame is tasks OF data-parallel stages), but the design instinct holds: <em>express work as data parallelism as early as possible</em> — it ports to every shape in the taxonomy, while task graphs port only to MIMD. Batch-of-independent-tasks (3.5's arena per item, M2 L8's images) converts task- INTO data-parallelism — the single most reusable trick in production ML serving (batching requests = manufacturing data parallelism — Track A8's economics, taxonomy edition).</p>
+
+<h2>2. Work and span: the law for trees and pipelines</h2>
+<pre><code>work  W = total operations            span S = longest DEPENDENT chain
+max parallel speedup ≤ W / S          time(N) ≈ W/N + S   (greedy scheduling)
+reduction of n values: W = n−1 adds, S = log₂ n  →  speedup ceiling n/log n
+prefix-sum (scan):     W ≈ 2n,        S = log n   →  the 5.8 sibling's law</code></pre>
+<p>Amdahl models a serial FRACTION; work-span models serial STRUCTURE — dependency chains (4.1's ILP limit, promoted to algorithm scale). A reduction isn't "1% serial": every level of the tree depends on the previous — span log n — yet parallelizes beautifully because W/S = n/log n is huge (M1 L3's staircase, formalized at last). When someone says "inherently sequential," ask for the span: often it's log-shaped and the "inherent" evaporates (scan, reductions, FFTs); sometimes it's genuinely linear (iterating a chaotic map) and no hardware helps. This one distinction sorts real algorithm-parallelization arguments in seconds.</p>
+
+<h2>3. Superlinear speedups: real, explainable, non-magical</h2>
+<p>Occasionally 8 threads give 9.3×. Three honest mechanisms: <strong>(a)</strong> aggregate cache: 8 cores bring 8× L1/L2 — per-core working sets that missed now fit (the 4.2 staircase moving under you); <strong>(b)</strong> NUMA bandwidth: threads on 2 sockets tap 2 memory systems (3.9's first-touch gotcha, upside); <strong>(c)</strong> algorithmic: parallel search finds the answer earlier (speculative luck). None violate Amdahl — the single-thread BASELINE was handicapped (small cache, one channel). Report them with the mechanism named, or a reviewer will (correctly) suspect your baseline. Corollary for honest ladders (3.9's): pin baselines' environments as carefully as the contenders'.</p>
+
+<h2>4. The real currency: joules per result</h2>
+<pre><code>RTX 5090: ~105 fp32 TFLOP/s @ 575 W  ≈ 183 GFLOP/J
+8-core CPU: ~0.4 TFLOP/s @ 150 W     ≈  2.7 GFLOP/J     → ~70× perf/W for
+                                        data-parallel work — THE datacenter number</code></pre>
+<p>Latency-optimized silicon spends most energy on NOT-math: prediction, reordering, cache tags (4.1's tricks all burn watts). Lane-optimized silicon spends on ALUs. At datacenter scale, power is the budget (the B200's 1000 W is a cooling problem before it's anything else), so perf/W — not peak — decides deployments (4.7's spec-sheet row). Your defensible sentence: "GPUs win data-parallel work by ~an order of magnitude in energy, which is why the economics are one-way even where raw speedups look modest."</p>
+
+<h2>5. CPU or GPU? The four-question gate</h2>
+<table>
+<tr><th>Question</th><th>GPU-favorable answer</th><th>Course tool that answers it</th></tr>
+<tr><td>Is the parallelism ≥ ~10⁴ independent items?</td><td>yes (pixels, tokens, particles, matrix cells)</td><td>work-span (§2), the guard-grid arithmetic (M1 L2)</td></tr>
+<tr><td>Is the arithmetic intensity decent OR the data resident?</td><td>AI &gt; ~1 with reuse, or data stays on-device</td><td>M1 L3 §4, 4.6's transfer economics</td></tr>
+<tr><td>Is control flow warp-coherent?</td><td>branch-light or sortable (quiz 2's corollary)</td><td>4.1 Ex.2's branchless kit, divergence model</td></tr>
+<tr><td>Does the serial residue stay tiny at N = 10⁴?</td><td>reductions tree-shaped, setup amortized</td><td>Amdahl at GPU scale, §2's span audit</td></tr>
+</table>
+<p>Four yeses: port it (Module 5 awaits). Mixed: hybrid — CPU orchestrates, GPU does the data-parallel organs (the actual architecture of every ML system you'll touch). Four nos: the fastest GPU code is the code you didn't write; buy the better CPU (4.1's bake-off logic).</p>
+
+<h2>6. Gotchas</h2>
+<div class="gotcha"><strong>Quoting Amdahl with a fitted p (Ex.1's trap).</strong> A fit is not a mechanism — bandwidth roofs and clock negotiation cosplay as serial fraction. Measure the serial region directly or say "effective p," never "p."</div>
+<div class="gotcha"><strong>Ignoring the roof term entirely.</strong> "We're 99% parallel, 64 cores = 40×!" — not if 8 cores already drink the DRAM straw dry (4.2 P4's Little's-law arithmetic). Ceiling = min of ALL laws.</div>
+<div class="gotcha"><strong>Porting task-shaped code to a data-shaped machine.</strong> A GPU running 32 different jobs per warp runs them serially (quiz 2). Reshape (batch, sort, partition) BEFORE porting, or the port "proves GPUs are overhyped."</div>
+<div class="gotcha"><strong>Serial finishers.</strong> Beautiful parallel phase + one-thread aggregation/IO tail = Amdahl eats the win at scale. Tree the reductions (§2), overlap the IO (4.6) — audit the LAST 5% of the timeline, that's where ceilings hide.</div>
+<div class="gotcha"><strong>Benchmarking scaling with frequency unpinned.</strong> 1-thread turbo vs 8-thread all-core bakes a 1.2× lie into every "efficiency" number (worked example, suspect 3). Lock clocks or report both frequencies (3.9's provenance row).</div>
+<div class="gotcha"><strong>Superlinear pride.</strong> 9× on 8 cores means your baseline was starved, not that you broke mathematics (§3). Name the mechanism in the report or lose the room's trust when someone else does.</div>
+
+<h2>Scenario — the "GPU-ready" pipeline that wasn't (and then was)</h2>
+<p>A robotics lab wants their perception pipeline "moved to GPU — we bought an RTX 5090, make it 50× faster." You run the four-question gate before writing a line. Q1: the hot loop processes ONE camera frame's detections sequentially through a chain of filters — parallelism ≈ 40 items. Fail. Q2: each stage re-reads config from disk. Q3: per-detection branching everywhere. Q4: a serial Kalman update finishes every frame. As-is verdict: the honest projection is 1.5–3×, dominated by transfer and divergence — you present the four-question audit INSTEAD of a failed port, which itself builds credibility. Then the reshape (each fix is a lesson): batch 8 cameras × 3 frames = 960 items (Q1 ✓ — manufacturing data parallelism, §1); load config once, keep tensors resident (Q2 ✓ — 4.6 economics); sort detections by class so branches cohere within batches (Q3 ✓ — quiz 2's corollary, M1 L7's sort trick); the Kalman chain stays on CPU — hybrid by design, overlapped with the GPU stage (Q4 handled by architecture, not denial — §5's real answer). Port THEN done: measured 23× end-to-end, 60× on the GPU-resident stages, with the gap to "50×" explained in one Amdahl line the PI can repeat to the funders. The final slide's title is the lesson: <em>"We didn't port the code; we reshaped the problem until porting was trivial."</em></p>
+
+<h2>Practice</h2>
+<details><summary>1. Compute ceilings: p = 97%, N = 8, 128, ∞; then the N needed to reach HALF the infinite-N speedup. (The half-point formula is worth deriving once.)</summary><div class="body">1/(0.03+0.97/N): N=8 → 6.6×; N=128 → 26.6×; ∞ → 33.3×. Half of 33.3 = 16.7× → solve: N = p/( (1/S) − (1−p) ) = 0.97/(0.06−0.03) ≈ 32. General result: half the asymptote arrives at N ≈ p/(1−p) — 32 workers for 97%. Beyond that, doubling hardware buys crumbs — the capacity-planning number executives never see coming.</div></details>
+<details><summary>2. Classify by taxonomy shape and justify: (a) applying gamma LUT to 2M pixels (M2 L8); (b) compiling 90 .c files (3.6); (c) one warp evaluating <code>x[i] = w[i] &gt; 0 ? a[i] : b[i]</code>; (d) 8 threads building one shared histogram.</summary><div class="body">(a) data-parallel, SIMD/SIMT heaven — identical op, no divergence (the LUT gather coalesces if indices cluster). (b) task-parallel MIMD — make -j90 is a thread pool over independent tasks (with a span: the link step is the serial finisher!). (c) SIMT with a SELECT, not a branch — compiles to predication, divergence-free (quiz 2's third row). (d) MIMD with a shared-write hazard → privatize-reduce (4.2 quiz 2) — and note (d) becomes (c)+reduction when ported right. Shape-spotting from one line of code is the skill; you just did four.</div></details>
+<details><summary>3. Work-span audit: give W, S, and the parallelism W/S for (a) summing n numbers; (b) prefix-sum; (c) n iterations of x = f(x) (chaotic map); (d) matmul n³ (hint: each output cell's chain). Which is the imposter "sequential" and which the genuine one?</summary><div class="body">(a) W=n−1, S=log n → n/log n: massive. (b) W≈2n, S≈log n (the up/down sweep): massive, despite feeling sequential — THE imposter unmasked (scan parallelizes; 5.8's sibling). (c) W=n, S=n → parallelism 1: GENUINELY sequential, no machine helps (each x needs the last). (d) W=2n³; each C[i][j] is an independent dot with S=log n (tree-summed) → S=log n overall, W/S ≈ n³/log n: the most parallel object in this course, which is why it's the GPU's favorite food. The c-vs-b contrast is the interview question: "sequential-LOOKING vs sequential-BEING is decided by the span, not the syntax."</div></details>
+<details><summary>4. Energy math: a serious nightly batch job does 10¹⁸ FLOPs (≈ 3 GPU-hours at 100 TF sustained — sanity-check that yourself first). Cost it on the §4 numbers (CPU 2.7 GFLOP/J vs GPU 183 GFLOP/J) at $0.15/kWh, including a 3× GPU utilization penalty for a lazy port (MFU 33% — 4.7's ladder). Does the GPU still win? What does the answer say about "optimize before porting"?</summary><div class="body">Sanity: 10¹⁸/100e12 ≈ 10⁴ s ≈ 2.8 h ✓. CPU: 10¹⁸/2.7e9 = 370 MJ ≈ 103 kWh ≈ $15.40/night (and ~29 DAYS of wall time — energy is the polite way to say 'impossible'). GPU at MFU 100%: 5.5 MJ ≈ 1.5 kWh ≈ $0.23; at 33% MFU: ~$0.69/night. GPU wins 22× on joules even lazily ported — energy dominance survives sloppy code, which is precisely WHY the industry ports first and optimizes later (economically rational, pedagogically tragic). Your edge from this course: the further 3× (MFU 33→90%+) is pure skill, compounding at fleet scale — $0.69→$0.25 × 10,000 GPUs × 365 nights is someone's salary. Twice.</div></details>
+<details><summary>5. A colleague's plot shows speedup 11.2× on 8 cores for their graph algorithm and they're drafting the "superlinear breakthrough" tweet. List the three §3 mechanisms in the order you'd check, each with its 5-minute test.</summary><div class="body">(1) Cache aggregation: run the 1-thread baseline on a dataset 1/8th the size (per-core share) — if per-item time collapses to match, the baseline was cache-starved, not the algorithm brilliant. (2) NUMA: pin all 8 threads to ONE socket — superlinearity vanishing implicates the second memory system. (3) Early-exit luck: check whether parallel search ORDER finds solutions sooner (fix the visit order/seed — M1 L7 — and re-measure). Usually it's (1). The kind reframe for the tweet: "8× compute + 8× cache is 16× of RESOURCES — 11.2× is a great, sub-linear result." Same data, honest headline, reputation intact.</div></details>
+<details><summary>6. Divergence pre-audit (no GPU needed): for M2 L8's pipeline ops — grayscale, threshold, blur, histogram, autocontrast — predict each kernel's warp-coherence on real photos, and propose the reshaping (if any) each needs before Module 5 ports them. (Quiz 2 + §1 are your instruments.)</summary><div class="body">Grayscale: pure map, zero branches — perfect SIMT. Threshold: written branchless already (M2 L8 P1 used comparison-as-data) — perfect. Blur: uniform stencil — perfect; edge-pixels-policy should be handled by padding, not per-thread ifs (crop/pad decisions from M2 L8 quiz 2 become DIVERGENCE decisions!). Histogram: the hazard child — 32 threads scattering to 256 bins = atomics contention (4.2 quiz 2's GPU cousin): reshape to per-block privatized bins + tree merge (the pattern you already own). Autocontrast: two phases — a reduction (percentiles: sort or histogram-based, tree-shaped ✓) then a map ✓; keep the phases as two kernels rather than one divergent monster. You've just written 5.x's kernel-design review for your own capstone, one module early — which was the plan all along.</div></details>
+<details><summary>7. Design: the "Scaling Report" template for the course repo (used by 3.9 retroactively and 5.11 natively): required sections — measured curve (1/2/4/8/N threads, median±IQR), the three-law decomposition table (Amdahl-measured-not-fitted / roof-with-byte-counts / clock-negotiation), superlinearity checklist if S(N) &gt; N anywhere, the Gustafson companion number (throughput at fixed time on scaled input), and the one-line honest headline rule. Justify each section with the lesson/incident that demanded it.</summary><div class="body">Curve with spreads: M1 L7 (single-run scaling claims are noise). Decomposition table: this lesson's worked example — each row needs its own MEASUREMENT (serial-region timing; aggregate GB/s vs the machine's measured roof from 4.2 Ex.1; reported clocks per N) — bans fitted-p masquerade (Ex.1's trap). Superlinearity checklist: §3's three tests, pre-committed so excitement can't skip them (P5's tweet, prevented by template). Gustafson row: the fixed-time throughput number on 4× input — because capacity decisions need it and marketing will quote SOMETHING; better it be computed by you (quiz 1). Headline rule: "X× on N cores, ceiling Y× by [named law], next lever: [term]" — a headline that contains its own ceiling and next action. This template is the difference between a benchmark and an argument; 5.11's GPU report will add two rows (occupancy, transfer share) and change nothing else — the strongest possible evidence the model is right.</div></details>
+
+<div class="pager">
+  <a href="lesson-02.html">← The memory hierarchy</a>
+  <a href="lesson-04.html">Next: Inside the GPU — SMs, warps & latency hiding →</a>
+</div>
+<div class="footer">GPU Mastery · Module 4 · Lesson 3 — works offline · progress saved in your browser</div>
+</div>
+<script src="../assets/diagrams4.js"></script>
+<script src="../assets/app.js"></script>
+</body>
+</html>

@@ -1,0 +1,178 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>C11 Capstone — A Small Renderer with a Ray-Traced Effect — GPU Mastery</title>
+<link rel="stylesheet" href="../assets/style.css">
+</head>
+<body data-lesson="cl11">
+<nav><div class="inner">
+  <a class="logo" href="../index.html">GPU<span>Mastery</span></a>
+  <a class="item" href="../index.html">Home</a>
+  <a class="item on" href="../curriculum.html">Curriculum</a>
+  <a class="item" href="../labs.html">Labs</a>
+  <a class="item" href="../setup.html">Lab setup</a>
+  <a class="item" href="../prompt.html">Generator prompt</a>
+</div></nav>
+<div class="wrap">
+
+<div class="lesson-top">
+  <div><span class="badge">Track C · Lesson 11 · Capstone</span><span class="badge dim">≈ 6 h</span></div>
+  <button id="donebtn" class="donebtn">Mark lesson complete</button>
+</div>
+<h1>Capstone — A Small Renderer, Budgeted and Tested, with One Ray-Traced Effect</h1>
+<p class="lead">Everything in Track C converges into one deliverable: a Vulkan renderer that loads a glTF model, lights it with PBR, casts a shadow, adds one ray-traced effect, and — crucially — is budgeted per pass and tested against reference images. Mirroring 5.11's ship standard: a spec, a trust stack, a per-pass frame budget, and a defense bank. Build this, put it on GitHub, and you can walk an interviewer through a real frame you shipped.</p>
+
+<p class="small dim">Lab note: the renderer targets your machine (Vulkan 1.4 SDK; the RT effect needs an RTX/RDNA2+ GPU — or make it toggleable so the rasterized path runs anywhere). The PSNR test harness and the budget math run in NumPy/Python. This is the portfolio piece — build it for real.</p>
+
+<h2>Concept</h2>
+
+<h3>The spec: glTF in, a shadowed PBR frame with an RT effect out</h3>
+<div class="diagram" data-diagram="c11-renderer" data-caption="The capstone pipeline: load glTF (meshes + PBR materials) → shadow map (depth from the light) → PBR forward pass (GGX + shadows) → one ray-traced effect (shadows or reflections, toggleable) → present."></div>
+<p>The renderer is deliberately small but complete, exercising the whole track. <strong>Load glTF</strong> (C6): parse the industry-standard asset — meshes plus metallic-roughness PBR materials (base color sRGB, metallic/roughness linear, per C5). <strong>Shadow map</strong>: render depth from the light's viewpoint, so the PBR pass can test whether each pixel is lit or shadowed. <strong>PBR forward pass</strong> (C6): light each surface with the GGX/Smith/Schlick BRDF in linear space (C5), applying the shadow map. <strong>One ray-traced effect</strong> (C9): add ray-traced shadows OR reflections, toggleable so the rasterized path runs on any GPU. <strong>Present</strong> (C8): the swapchain dance with correct synchronization. Every pass is a lesson: C6 lighting, C8 sync and present, C9 the ray-traced effect, C10 the per-pass budget, C1/C2 the underlying math. The point of a capstone is integration — not any single technique, but making all of them cooperate in one frame that runs in budget and looks right.</p>
+
+<h3>The trust stack: how you KNOW the frame is correct AND fast</h3>
+<div class="diagram" data-diagram="c11-psnr" data-caption="Correctness is 'measurably plausible': render your frame and compare it to a trusted golden image with PSNR — a perceptual budget a CI job can enforce, the fixture doctrine (M2 L6) adapted to eyeballs."></div>
+<p>5.11 taught that shipping means a trust stack — layered evidence the thing is correct — not just "it renders." For graphics the top layer is new, because the consumer is an eyeball: correctness is <em>measurably plausible</em>, not bitwise. So the harness is a <strong>reference-image test</strong>: render your frame for a fixed camera and scene, compare it to a trusted "golden" image (rendered carefully, or offline with many samples), and compute <strong>PSNR</strong> (or SSIM) — if it exceeds a threshold (say 40 dB), the frame passes. This is M2 L6's fixture doctrine adapted to pixels: a threshold a CI job can enforce, so a refactor that quietly darkens the scene or breaks a material fails the build instead of shipping. The full trust stack: numeric correctness (the C1–C6 math, verified in NumPy), perceptual correctness (PSNR vs golden), performance (the per-pass budget below), and reproducibility (machine files — GPU, driver, SDK version, per 5.1). Not bitwise, because ray tracing reorders and denoising approximates (C9) — but bounded, enforceable, and honest.</p>
+
+<h3>The frame budget: 16.6 ms, spent per pass</h3>
+<div class="diagram" data-diagram="c11-budget" data-caption="The 16.6 ms frame budget spent per pass — shadow 2, geometry 4, lighting 5, RT reflections 3, post 2 = 16 ms — measured in RenderDoc (C10). The slowest pass sets the frame time (5.9)."></div>
+<p>A capstone that renders but doesn't fit a budget isn't shippable, so you measure and account for every pass (C10). A representative target table:</p>
+<pre><code>pass                budget    what it is
+──────────────────  ────────  ────────────────────────────────
+shadow map          2.0 ms    depth from the light
+geometry / G-buffer 4.0 ms    transform + rasterize the glTF (C1/C2)
+PBR lighting        5.0 ms    GGX in linear space + shadow test (C5/C6)
+RT reflections      3.0 ms    1 ray/pixel, denoised (C9)
+post + UI           2.0 ms    tone-map (sRGB encode, C5) + present (C8)
+                   ─────────
+total               16.0 ms   ≤ 16.6 ms budget (60 fps) ✓
+</code></pre>
+<p>These come from a RenderDoc capture (C10), not a guess — and 5.9's max-lane law governs: the frame time is the sum along the critical path, and the slowest pass is where optimization pays. Every number in the table is a claim you can defend ("why is lighting 5 ms?" — because it's the GGX BRDF per pixel with a shadow lookup, fragment-bound, and here's the capture). A budget table you measured and can defend is the difference between "I made a renderer" and "I made a renderer that ships."</p>
+
+<h2>Worked example</h2>
+<div class="card">
+<p><strong>Task:</strong> Build the trust stack for the capstone — the three artifacts that prove it's correct, fast, and reproducible — and see why the report, not the renderer, is the portfolio piece. Prediction first: which single artifact most convinces an interviewer you can ship graphics, and why?</p>
+<pre><code>THE THREE ARTIFACTS:
+1. PSNR reference test (correctness): render vs golden image, PSNR > 40 dB → PASS.
+   run in CI: a commit that darkens the scene (e.g. breaks linear-space lighting, C5)
+   drops PSNR below threshold → build FAILS. Correctness is enforced, not hoped.
+2. Per-pass budget table (performance): measured in RenderDoc (C10), each pass's ms
+   and what it does, summing ≤ 16.6 ms. Every number defensible from a capture.
+3. Machine file (reproducibility): GPU, driver, Vulkan SDK version, RT on/off, the
+   golden-image seed/camera (5.1) — so a stranger reruns it and gets your numbers.
+
+Prediction: the PSNR-in-CI test convinces most — anyone can make a renderer that
+  looks right once; enforcing "looks right" as a build gate shows engineering maturity.
+Result: the report (these three artifacts) is the deliverable; the renderer is the
+  setup. It demonstrates JUDGMENT — budgeting, testing, reproducibility — the rare skill.</code></pre>
+<p><strong>What to internalize:</strong> the capstone's real output is not the renderer — plenty of people can follow a tutorial to a shaded triangle — it's the <em>trust stack</em> around it: a correctness test that runs in CI and fails the build when a refactor breaks a material, a per-pass budget you measured and can defend line by line, and a machine file that makes it reproducible. That stack is what an interviewer actually wants to see, because it demonstrates the judgment that separates a hobby renderer from a shippable one: you know that correctness for pixels is a perceptual budget (PSNR), not a bitwise match (because RT and denoising approximate, C9); you know that performance is a per-pass budget measured with a capture (C10), not a vibe; and you know that a result nobody can reproduce is an anecdote (5.1). Mirror 5.11 and D9: spec, trust stack, defensible numbers, and a defense bank you can speak. Build the renderer to have something real to profile and test — then build the report, because the report is the thing that says you can be trusted with a frame, not just write one.</p>
+</div>
+
+<h2>Key points</h2>
+<ul class="keypoints">
+<li>The capstone integrates the track: load glTF (C6) → shadow map → PBR forward pass (GGX in linear space, C5/C6) → one toggleable ray-traced effect (C9) → present (C8) — every pass is a lesson made to cooperate.</li>
+<li>Correctness is "measurably plausible": a PSNR (or SSIM) reference-image test against a golden render, thresholded so CI fails a commit that breaks a material — M2 L6's fixture doctrine adapted to eyeballs (not bitwise, because RT/denoising approximate).</li>
+<li>The trust stack has four layers: numeric (C1–C6 math in NumPy), perceptual (PSNR vs golden), performance (per-pass budget), reproducibility (machine file, 5.1).</li>
+<li>The per-pass frame budget (measured in RenderDoc, C10) accounts for every pass's ms summing ≤ 16.6 ms — every number defensible from a capture, governed by 5.9's max-lane law.</li>
+<li>The deliverable is the REPORT (PSNR test in CI + budget table + machine file), not the renderer — it demonstrates judgment (testing, budgeting, reproducibility), the rare and hireable skill.</li>
+<li>Mirror 5.11 and D9: spec → trust stack → defensible numbers → defense bank; build it, put it on GitHub, and it's one of the three portfolio capstones (with 5.11 and A11/D9) that prove you can ship.</li>
+</ul>
+
+<h2>Quiz</h2>
+<div class="quiz">
+  <div class="q">1. Two candidates submit a Vulkan renderer capstone. Candidate A's "looks great" in a screenshot. Candidate B's comes with a PSNR test that runs in CI, a per-pass budget table measured in RenderDoc, and a machine file. Why is B's substantially stronger even if the renders look identical?</div>
+  <button class="opt">They're equivalent; a renderer is a renderer and the screenshot proves it works</button>
+  <button class="opt" data-c="1">B demonstrates the engineering judgment that separates a hobby project from a shippable one: the PSNR-in-CI test enforces correctness as a build gate (a refactor that breaks a material fails the build, not the demo), the measured per-pass budget proves B can profile and account for a frame's time rather than hope it's fast, and the machine file makes the results reproducible by a stranger. A screenshot proves it rendered once on one machine; B's trust stack proves B can keep it correct, fast, and reproducible — which is what shipping actually requires. The renderer is the setup; the report is the deliverable</button>
+  <button class="opt">B used more advanced graphics techniques than A</button>
+  <button class="opt">A is stronger because a clean screenshot is what matters most</button>
+  <div class="expl">Options 1 and 4 mistake the artifact (a render) for the skill (shipping a render reliably). Option 3 assumes technique when the difference is process. The correct answer is the capstone's thesis, shared with 5.11 and D9: the report — enforced correctness, measured performance, reproducibility — is the portfolio piece, because it demonstrates the judgment that a screenshot can't. Anyone can produce a nice image once; proving you can keep it correct under refactors (PSNR in CI), fit it in a budget you measured (RenderDoc table), and let a stranger reproduce it (machine file) is the rare skill an interviewer is buying. B shows they can be trusted with a frame.</div>
+</div>
+<div class="quiz">
+  <div class="q">2. For the capstone's correctness test, a teammate proposes checking that the rendered frame matches the golden image bit-for-bit. Why is that the wrong test, and what's right?</div>
+  <button class="opt">Bitwise is correct and strict; use it</button>
+  <button class="opt" data-c="1">Bitwise equality will fail a correct renderer: ray tracing and denoising reorder and approximate (C9), floating-point reduces in different orders (M1 L8), and even driver/GPU differences change the last bits — so a bitwise test rejects images that are perceptually identical and correct. The right test is a perceptual budget: PSNR (or SSIM) against the golden image above a threshold (e.g. 40 dB), which passes perceptually-identical frames and fails ones that actually look wrong (a broken material, a darkened scene). It's the fixture doctrine (M2 L6) adapted to eyeballs — bounded and enforceable, not bitwise, because the consumer is a human</button>
+  <button class="opt">Don't test the image at all; just check it doesn't crash</button>
+  <button class="opt">Compare only the center pixel to save time</button>
+  <div class="expl">Option 1 is the trap — bitwise sounds rigorous but fails correct renders because RT, denoising, and floating-point all legitimately vary the exact bits (the same lesson as every reduction in the course: budget, not bitwise). Option 3 tests nothing about correctness; option 4 tests almost nothing. The correct answer applies M1 L8 and C9 to the test itself: the image varies at the bit level for legitimate reasons, so correctness is a perceptual threshold (PSNR/SSIM), which passes what looks right and fails what doesn't. This is the track's thesis in the test harness — the eye is the consumer, so "measurably plausible" is the correctness standard.</div>
+</div>
+
+<h2>Exercises</h2>
+<details><summary>Exercise 1 — Build the renderer incrementally, testing at each stage: (1) load and display a glTF mesh; (2) add PBR lighting in linear space; (3) add a shadow map; (4) add one ray-traced effect (or a rasterized fallback). At each stage, capture a frame in RenderDoc, record the per-pass time, and save a golden image. This IS the trust stack, built as you go.</summary><div class="body">
+<p>Expected: a working renderer where each added pass is measured and has a golden reference. The incremental discipline matters — adding lighting, then shadows, then RT one at a time, capturing after each, means you always know which addition cost what (C10's one-thing-at-a-time) and you catch a regression the moment it appears (the PSNR test on the previous golden). By the end you have the budget table (each pass's measured ms) and a set of golden images — the trust stack, assembled naturally. Deliverable: the renderer, the per-pass budget table from your captures, and the golden images. If the RT effect needs hardware you lack, build the rasterized path and note the RT design (toggleable) — the trust-stack discipline is the graded part, not which GPU you own.</p>
+</div></details>
+<details><summary>Exercise 2 — Build the PSNR test harness and wire it into a check: write a script that renders a fixed camera/scene, compares to the golden image via PSNR, and passes/fails against a threshold. Then deliberately break something (disable linear-space lighting, or corrupt a material's std140 layout) and confirm the PSNR test catches it. Write the machine file.</summary><div class="body">
+<p>Expected: the harness renders, computes PSNR against the golden, and returns pass/fail. When you break linear-space lighting (C5) the whole image darkens/shifts and PSNR drops well below threshold → FAIL; when you corrupt a UBO layout (C4) a material renders wrong and PSNR drops → FAIL. This proves the test has teeth — it catches exactly the subtle, image-wide bugs that a "does it crash" check misses and that are hard to spot by eye. The machine file records GPU, driver, Vulkan SDK version, RT on/off, and the golden's camera/seed (5.1) so a stranger reproduces your PSNR numbers. Deliverable: the harness, a demonstration of it catching a real break, and the machine file. This is the capstone's most important artifact — enforced correctness — and the thing that most convinces an interviewer (the worked example).</p>
+</div></details>
+
+<hr>
+<h1>Go deeper — shipping the renderer (5.11's standard, for pixels)</h1>
+
+<h2>1. The trust stack, layer by layer</h2>
+<pre><code>layer            evidence                              the lesson
+───────────────  ────────────────────────────────────  ──────────────────
+numeric          C1–C6 math verified in NumPy          (inverse-transpose, GGX, barycentric...)
+perceptual       PSNR/SSIM vs golden image, > threshold M2 L6 fixture, for eyeballs
+                 → RUN IN CI (fail the build on regress)
+performance      per-pass budget, measured (RenderDoc)  C10, ≤ 16.6 ms, defensible
+reproducibility  machine file: GPU/driver/SDK/RT/camera 5.1's "know your machine"
+correctness is 'measurably plausible' (PSNR), NOT bitwise — because RT reorders and
+denoising approximates (C9) and floats reduce differently (M1 L8). Bounded + enforced.</code></pre>
+
+<h2>2. The per-pass budget as an engineering contract</h2>
+<pre><code>pass                budget   defend it with...
+──────────────────  ──────   ──────────────────────────────────────────
+shadow map          2.0 ms   depth-only, one light; RenderDoc capture
+geometry            4.0 ms   vertex + rasterize glTF (C1/C2); draw count
+PBR lighting        5.0 ms   GGX per pixel + shadow lookup (C5/C6); fragment-bound
+RT reflections      3.0 ms   1 ray/pixel + denoise (C9); RT-core time
+post + present      2.0 ms   tone-map/sRGB encode (C5) + swapchain (C8)
+each row is a CLAIM you can defend from a capture (C10) — "why 5 ms?" → "GGX BRDF
+per pixel with a shadow test, fragment-bound, here's the Nsight counter." A budget you
+measured and can defend line-by-line is the difference between "a renderer" and "a
+renderer that ships." 5.9's max-lane law: the critical path sets the frame time.</code></pre>
+
+<h2>3. The defense bank (rehearse; #7 is the closer)</h2>
+<pre><code>1. "Walk me through your frame." → glTF load → shadow map → PBR forward (GGX, linear,
+   C5/C6) → RT effect (C9) → present (C8). Each pass, its job, its budget.
+2. "Why is your lighting pass 5 ms?" → GGX BRDF per pixel + shadow lookup, fragment-
+   bound; here's the RenderDoc capture and the Nsight counter (C10).
+3. "How do you know it's correct?" → PSNR vs golden in CI (> threshold); a break in
+   linear lighting or a material drops PSNR and fails the build (M2 L6, C5).
+4. "Why not bitwise?" → RT reorders, denoising approximates (C9), floats reduce
+   differently (M1 L8) — perceptual budget, not bitwise (the track's thesis).
+5. "Why inverse-transpose for normals / linear-space lighting?" → C1 / C5, executed.
+6. "How would you make it faster?" → capture, sort passes, fix the top one (C10's
+   runbook); the bottleneck is rarely the pass I'd guess.
+7. "Why ray-trace that effect and not the whole frame?" → THE closer, below.</code></pre>
+
+<h2>Gotchas</h2>
+<div class="gotcha"><strong>Bitwise image comparison.</strong> Fails correct renders (RT/denoising/floats vary the bits, C9/M1 L8). Use PSNR/SSIM against a threshold — perceptual, bounded, enforceable (quiz 2).</div>
+<div class="gotcha"><strong>A budget table you didn't measure.</strong> Guessed per-pass times are indefensible. Measure in RenderDoc (C10); every number must be backed by a capture you can show.</div>
+<div class="gotcha"><strong>Presenting the renderer as the deliverable.</strong> The renderer is the setup; the trust stack (PSNR-in-CI + budget + machine file) is the portfolio piece — it shows judgment, which is what's being hired (quiz 1).</div>
+<div class="gotcha"><strong>RT effect with no rasterized fallback.</strong> RT needs RTX/RDNA2+; make the effect toggleable so the frame runs (and the PSNR test passes) on any GPU. Gate features on capability (C9).</div>
+<div class="gotcha"><strong>Forgetting linear-space lighting / std140 (C4/C5).</strong> The two silent-corruption bugs of the track — light in linear, verify UBO offsets. Your PSNR test should catch both; make sure it does (Exercise 2).</div>
+<div class="gotcha"><strong>No machine file.</strong> Without GPU/driver/SDK/camera, nobody reproduces your PSNR or budget numbers — it's an anecdote (5.1). Reproducibility is a trust-stack layer, not optional.</div>
+
+<h2>Scenario — the capstone that got the interview to say yes</h2>
+<p>A graphics-engineer candidate brings this capstone to an interview: a small Vulkan renderer that loads a glTF scene, lights it with a PBR forward pass in linear space, casts a shadow, and adds ray-traced reflections toggleable against a rasterized fallback. But what the panel fixes on isn't the render — it's the repository around it. There's a PSNR test that runs in CI against a set of golden images, and the candidate demonstrates a commit that broke linear-space lighting dropping the PSNR below threshold and failing the build, then a commit that corrupted a material's std140 layout doing the same — enforced correctness, catching exactly the silent image-wide bugs the track warned about (C4/C5). There's a per-pass budget table with every pass's millisecond cost measured in RenderDoc, and when a panelist asks "why is your lighting pass five milliseconds?" the candidate pulls up the capture and the counter and explains it's the GGX BRDF per pixel with a shadow lookup, fragment-bound — a number defended from evidence, not asserted. There's a machine file so the panel could reproduce the numbers. And when asked the closer — "why did you ray-trace only the reflections and not the whole frame?" — the candidate gives the C9 answer: full-frame RT blows a 16.6 ms budget, so you rasterize the bulk (cheap, exact) and spend a tiny ray budget on the one effect rasterization does poorly, denoised, à la carte. The panel has interviewed many candidates with renderers that produce a nice screenshot; this candidate produced a renderer plus the evidence that it stays correct under refactors, fits a budget they measured, and reproduces on another machine — the trust stack of someone who has shipped, not just built. They make the offer. The morals close Track C and echo 5.11 and D9. First, the deliverable of a capstone is the report, not the artifact: correctness enforced in CI, performance measured per pass, reproducibility in a machine file — that stack demonstrates the judgment that a screenshot never can, and it's the rare skill an interviewer is actually buying. Second, correctness for graphics is measurably plausible, not exact, because the consumer is an eyeball and the tools (RT, denoising, floating-point) approximate — so the discipline is a perceptual budget you enforce, the fixture doctrine adapted to pixels. Build the renderer to have something real to profile and test; build the trust stack because it is the thing that says you can be trusted with a frame. Put it on GitHub next to your 5.11 matmul capstone and your D9 portability report — those three are the portfolio that says you understand the GPU from the math to the shipped frame.</p>
+
+<h2>Practice</h2>
+<details><summary>1. List the passes of the capstone renderer in order and the core lesson each exercises.</summary><div class="body">(1) Load glTF — the metallic-roughness PBR asset (C6), with base color sRGB and metallic/roughness linear (C5). (2) Shadow map — render depth from the light's view (uses C1's transforms). (3) PBR forward pass — light each surface with the GGX/Smith/Schlick BRDF in linear space and apply the shadow test (C6 lighting, C5 color space, C2 interpolation of surface attributes). (4) One ray-traced effect — RT shadows or reflections at ~1 ray/pixel, denoised, toggleable (C9), against a rasterized fallback. (5) Present — tone-map (sRGB encode, C5) and the swapchain dance with correct synchronization (C8). The whole frame is budgeted per pass (C10) and tested against golden images (M2 L6). It's the track integrated into one cooperating frame.</div></details>
+<details><summary>2. Why is the capstone's correctness test PSNR-against-a-golden rather than bitwise, and what should it catch?</summary><div class="body">Bitwise equality would fail a correct renderer, because ray tracing and denoising reorder and approximate (C9), floating-point reduces in different orders (M1 L8), and driver/GPU differences change the last bits — all legitimately, without changing what the image looks like. So bitwise rejects perceptually-identical correct frames. PSNR (or SSIM) against a golden image with a threshold (e.g. 40 dB) is the right test: it passes frames that look the same as the reference and fails ones that actually look wrong. It should catch the track's silent image-wide bugs — lighting done on sRGB instead of linear (C5), a corrupted std140 material layout (C4), a broken normal transform (C1) — which darken or distort the whole image and drop PSNR below threshold, failing CI. It's M2 L6's fixture doctrine adapted to eyeballs: measurably plausible, enforced, not bitwise.</div></details>
+<details><summary>3. Your lighting pass is 5 ms in the budget. How do you defend that number to an interviewer?</summary><div class="body">By showing the evidence, not asserting it. I'd pull up the RenderDoc capture that sorts passes by GPU time and shows the lighting pass at 5 ms (C10), then the Nsight/RGP counters on that pass showing it's fragment-bound — it's running the GGX/Smith/Schlick BRDF per pixel plus a shadow-map lookup and the light loop, over the full-resolution framebuffer, which is a realistic per-pixel cost for PBR lighting. I'd note what it's NOT (not bandwidth-bound, so the cost is the BRDF math per fragment) and, if asked to reduce it, how I'd approach it (fewer lights, a tiled/clustered light culling pass, or moving to a depth pre-pass to avoid overdraw). The point is every budget number is a claim backed by a capture I can show and a counter that explains WHY it costs what it does — a defended number, which is what separates a measured budget from a guessed one (C10). "It's 5 ms because X, here's the capture" is the answer; "about 5 ms, I think" is not.</div></details>
+<details><summary>4. What are the four layers of the capstone's trust stack, and which is most convincing to an interviewer?</summary><div class="body">(1) Numeric correctness — the C1–C6 math (inverse-transpose normals, GGX terms, barycentrics) verified in NumPy. (2) Perceptual correctness — a PSNR/SSIM test against golden images above a threshold, run in CI so a regression fails the build. (3) Performance — a per-pass budget measured in RenderDoc summing ≤ 16.6 ms, each number defensible. (4) Reproducibility — a machine file (GPU, driver, Vulkan SDK, RT on/off, golden camera/seed) so a stranger reproduces the results. The most convincing is usually the PSNR test running in CI: anyone can produce a renderer that looks right once, but enforcing "looks right" as a build gate — demonstrating it fail on a real break — shows the engineering maturity of someone who ships and maintains, not just builds. The trust stack as a whole is the deliverable; the CI-enforced correctness is its sharpest edge.</div></details>
+<details><summary>5. Why make the ray-traced effect toggleable with a rasterized fallback?</summary><div class="body">Two reasons. Hardware reach: real-time ray tracing needs RT-core hardware (NVIDIA RTX, AMD RDNA2+) and the KHR extensions; older or low-end GPUs lack the traversal silicon, so an RT-only renderer simply won't run for many users (C9). A toggleable effect with a rasterized fallback (e.g. shadow maps instead of RT shadows, screen-space or cubemap reflections instead of RT reflections) means the frame runs — and the PSNR test passes — on any GPU, with RT as an enhancement where available. Second, budget and correctness testing: a toggle lets you profile and A/B the RT vs rasterized cost (C10) and keep a golden image for the rasterized path that runs in CI regardless of the test machine's GPU. It's the hybrid-rendering and capability-gating discipline (C9) applied to your own capstone: gate the expensive feature on hardware, always have a path that runs everywhere.</div></details>
+<details><summary>6. How does this capstone relate to the 5.11 and D9 capstones as a portfolio?</summary><div class="body">All three share the same ship standard — spec, trust stack, defensible numbers, defense bank — applied to different domains, and together they demonstrate the full range of GPU competence. 5.11 (the matmul ladder) proves you can take one kernel from naive to near-peak and defend the optimization with the roofline and measured GFLOP/s — depth in compute performance. D9 (one reduction, four backends, one report) proves you can carry an algorithm across vendors with a shared fixture and honest cross-vendor benchmarking — breadth in portability. C11 (this renderer) proves you can integrate a whole graphics frame — math, lighting, sync, ray tracing — and ship it with a perceptual correctness test, a measured per-pass budget, and reproducibility — integration in graphics. Each is a portfolio piece on its own; together they say you understand the GPU from the arithmetic to the shipped frame, in compute, across vendors, and in graphics. Put all three on GitHub — they're the concrete evidence behind "I can be trusted with the whole problem."</div></details>
+<details><summary>7. THE closer: "Walk me through your renderer, and why did you ray-trace that one effect instead of the whole frame?" Deliver the full spoken answer.</summary><div class="body">"My frame is five passes. First I load a glTF scene — meshes and metallic-roughness PBR materials, with base color as sRGB and roughness and metallic as linear data. Then a shadow-map pass renders depth from the light's view. Then the PBR forward pass lights each surface with the GGX microfacet BRDF in linear space and tests the shadow map — that's my biggest pass at about five milliseconds, fragment-bound, and I can show you the RenderDoc capture and the counter. Then one ray-traced effect — reflections — at one ray per pixel, denoised, toggleable against a rasterized fallback so it runs on any GPU. Then present, with tone-mapping to sRGB and the swapchain synchronization. The whole thing is budgeted per pass from a RenderDoc capture, summing to about sixteen milliseconds under the 16.6 budget, and it's tested with a PSNR check against golden images that runs in CI — I can show you a commit that broke linear-space lighting dropping the PSNR and failing the build. Now, why ray-trace only the reflections and not the whole frame: because a real-time budget can't afford full-frame ray tracing on anything but the highest-end hardware. Rasterization gives me cheap, exact primary visibility for the bulk of the frame, so I spend my tiny ray budget only on the effect rasterization does poorly — reflections of off-screen geometry and grazing angles that screen-space methods miss — and I denoise that one effect with temporal accumulation to get away with one sample per pixel. The BVH makes each ray about log-N cheap and the RT cores do the traversal in silicon, so one reflection ray per pixel fits in about three milliseconds. It's à-la-carte hybrid rendering: rasterize what's cheap and exact, ray-trace only what visibly pays, denoise it, and keep it toggleable for hardware that can't do RT. And the correctness standard for all of it is measurably plausible — PSNR against a golden, not bitwise — because ray tracing and denoising and floating-point all approximate, and the consumer is an eyeball. So the deliverable isn't really the renderer; it's the trust stack around it — enforced correctness, a measured budget, and a machine file — which is what proves I can ship a frame, not just render one.' Walking the frame with defended numbers, then giving the hybrid-budget reason for the ray-tracing choice, then landing on 'the trust stack is the deliverable' is the answer that ends the interview well."</div></details>
+
+<div class="pager">
+  <a href="lesson-10.html">← Frame Profiling</a>
+  <a href="../curriculum.html">Finish Track C — back to curriculum →</a>
+</div>
+<div class="footer">GPU Mastery · Track C · Lesson 11 · Capstone — works offline · progress saved in your browser</div>
+</div>
+<script src="../assets/diagramsC.js"></script>
+<script src="../assets/app.js"></script>
+</body>
+</html>

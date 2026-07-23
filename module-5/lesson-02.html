@@ -1,0 +1,195 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>5.2 Your First Real Kernel — GPU Mastery</title>
+<link rel="stylesheet" href="../assets/style.css">
+</head>
+<body data-lesson="m5l2">
+<nav><div class="inner">
+  <a class="logo" href="../index.html">GPU<span>Mastery</span></a>
+  <a class="item" href="../index.html">Home</a>
+  <a class="item on" href="../curriculum.html">Curriculum</a>
+  <a class="item" href="../labs.html">Labs</a>
+  <a class="item" href="../setup.html">Lab setup</a>
+  <a class="item" href="../prompt.html">Generator prompt</a>
+</div></nav>
+<div class="wrap">
+
+<div class="lesson-top">
+  <div><span class="badge">Module 5 · Lesson 2</span><span class="badge dim">≈ 3 h</span></div>
+  <button id="donebtn" class="donebtn">Mark lesson complete</button>
+</div>
+<h1>Your First Real Kernel — threads, blocks & the formula</h1>
+<p class="lead">saxpy on a million floats, for real. The kernel body you wrote in 3.4, the launch arithmetic from M1 L2, the guard from M2 L2, the hardware from 4.4 — today they compile together. One new skill: thinking "my index" instead of "the loop."</p>
+
+<h2>Concept</h2>
+
+<h3>The inversion: from loop to identity</h3>
+<pre><code>/* CPU (3.4):                        GPU (today):                              */
+for (i = 0; i &lt; n; i++)              __global__ void saxpy(int n, float a,
+    y[i] = a*x[i] + y[i];                const float *x, float *y) {
+                                         int i = blockIdx.x*blockDim.x + threadIdx.x;
+                                         if (i &lt; n) y[i] = a*x[i] + y[i];
+                                     }</code></pre>
+<p>The loop didn't vanish — it became the <em>grid</em>. Each thread computes its identity from coordinates and does exactly one element's work. Everything you know about the body still applies (const contract 3.3, fp32 literals 3.2, the FMA within M1 L8); the new mental muscle is the identity line — and you've owned its algebra since M1 L2.</p>
+<div class="diagram" data-diagram="m5l2-hierarchy" data-caption="The formula that binds coordinates to data. Say it in your sleep."></div>
+
+<h3>Launch geometry: ceil-divide, then guard</h3>
+<div class="diagram" data-diagram="m5l2-guard" data-caption="Whole blocks launch; the guard idles the ragged tail. M1 L2 → M2 L2/L3 → silicon."></div>
+<pre><code>int block = 256;                              // multiple of 32, always (4.4 gotcha)
+int grid  = (n + block - 1) / block;          // the eternal formula
+saxpy&lt;&lt;&lt;grid, block&gt;&gt;&gt;(n, 2.0f, d_x, d_y);   // note: DEVICE pointers (5.3)</code></pre>
+
+<h3>2D grids: images get coordinates</h3>
+<div class="diagram" data-diagram="m5l2-2d" data-caption="dim3 in both slots; .x is the fast axis or every warp pays 32 sectors (4.5)."></div>
+<pre><code>dim3 block(16, 16);                                    // 256 threads, 2D-shaped
+dim3 grid((W + 15)/16, (H + 15)/16);                   // two ceil-divisions
+grayscale&lt;&lt;&lt;grid, block&gt;&gt;&gt;(d_in, d_out, W, H);
+// inside: x = blockIdx.x*16 + threadIdx.x;  y = ...y...;  if (x&lt;W && y&lt;H) ...
+// threadIdx.x MUST drive the row/column-contiguous index — 4.5's coalescing law.</code></pre>
+
+<h3>Grid-stride loops: one launch shape for any n</h3>
+<pre><code>__global__ void saxpy_gs(int n, float a, const float *x, float *y) {
+    for (int i = blockIdx.x*blockDim.x + threadIdx.x;
+         i &lt; n;
+         i += gridDim.x * blockDim.x)          // stride = the whole grid's width
+        y[i] = a*x[i] + y[i];
+}
+// launch with a FIXED grid (e.g. SMs × blocks-per-SM); each thread handles
+// elements i, i+stride, ... — M1 L2 §5's pattern, and NVIDIA's own recommended
+// default: decouples launch shape from n, keeps full waves (4.4 §5), amortizes
+// per-thread setup. The plain form first (clarity); this form for libraries.</code></pre>
+
+<h2>Worked example</h2>
+<div class="card">
+<p><strong>Task:</strong> saxpy end-to-end with the 4.4 P7 launch ritual — predict, run, compare. (Memory plumbing is next lesson; today's harness uses cudaMallocManaged to defer it honestly.)</p>
+<pre><code>// saxpy.cu — first real kernel, ritual included
+#include &lt;cstdio&gt;
+__global__ void saxpy(int n, float a, const float *x, float *y) {
+    int i = blockIdx.x*blockDim.x + threadIdx.x;
+    if (i &lt; n) y[i] = a*x[i] + y[i];
+}
+int main() {
+    int n = 1&lt;&lt;20;                             // 1M floats
+    float *x, *y;
+    cudaMallocManaged(&amp;x, n*sizeof *x);        // 5.3 explains; today it just works
+    cudaMallocManaged(&amp;y, n*sizeof *y);
+    for (int i = 0; i &lt; n; i++) { x[i] = 1.0f; y[i] = 2.0f; }
+    int block = 256, grid = (n + block - 1)/block;   // 4096 blocks
+    saxpy&lt;&lt;&lt;grid, block&gt;&gt;&gt;(n, 2.0f, x, y);
+    cudaDeviceSynchronize();
+    float maxerr = 0;                          // VERIFY before admiring (M2 L6)
+    for (int i = 0; i &lt; n; i++) maxerr = fmaxf(maxerr, fabsf(y[i] - 4.0f));
+    printf("max error: %f\n", maxerr);         // 0.000000
+    cudaFree(x); cudaFree(y);
+    return 0;
+}</code></pre>
+<p><strong>The ritual, filled in (4.4 P7):</strong> block 256 ✓ multiple of 32; occupancy — saxpy needs ~16 regs: threads-bound, 100% available ✓; waves = 4096/(8×40 SMs on T4) ≈ 12.8 — deep queue ✓; divergence — only the guard's final warp ✓; coalescing — <code>i</code> maps thread→consecutive floats: 4 sectors/warp ✓; <strong>prediction</strong> — AI = 0.167 → memory-roof: 12 MB ÷ 320 GB/s ≈ <strong>37 µs</strong> on the T4. Measured (5.9's events, once you have them): ~40–45 µs. Within 20% — <em>the 4.4 P7 certificate: your model of the machine is calibrated on day one.</em> <strong>Decision made:</strong> we verified all 1M outputs before caring about speed (exact 4.0f — integer-valued fp32 arithmetic is exact, M1 L8), and printed the error, not "OK": evidence over vibes, as always.</p>
+</div>
+
+<h2>Key points</h2>
+<ul class="keypoints">
+<li>Kernel = loop body + identity: i = blockIdx.x·blockDim.x + threadIdx.x, guarded by i &lt; n — the M1 L2 formula employed at last.</li>
+<li>Launch geometry is ceil-division; blocks are multiples of 32; the ragged tail is the guard's job (and the only divergence a map kernel should have).</li>
+<li>2D grids use dim3 for both slots with per-axis guards — and threadIdx.x must index the memory-contiguous direction (coalescing law).</li>
+<li>Grid-stride loops decouple launch shape from n — the library-grade default once the plain form is second nature.</li>
+<li>Scalars pass by value into kernels (copied to the device at launch); arrays pass as device pointers — the 3.3/5.3 contract.</li>
+<li>Run the 4.4 P7 ritual before every first launch: a prediction within 20% certifies your model; a miss localizes your misunderstanding — both are wins.</li>
+</ul>
+
+<h2>Quiz</h2>
+<div class="quiz">
+  <div class="q">1. A teammate writes <code>int i = threadIdx.x + blockIdx.x;</code> (plus instead of times-plus). For <<<4, 256>>>, describe exactly what the kernel computes and what the output looks like.</div>
+  <button class="opt">Crash — invalid index arithmetic</button>
+  <button class="opt" data-c="1">Threads collide: block 0 covers i=0..255, block 1 covers i=1..256, etc. — elements 0..258 get processed (many multiple times, racing), elements 259..n-1 NEVER touched: mostly-stale output with a plausible-looking head — the classic silent indexing bug</button>
+  <button class="opt">Works but 4× slower</button>
+  <button class="opt">Compiler warning catches it</button>
+  <div class="expl">i ranges only 0..(255+3): four overlapping windows. The races on shared elements are UB-ish (last-writer wins per element, fine for idempotent saxpy... but wrong coverage regardless); the tail is untouched memory (3.2's ghosts). Defense: the fixture test on RAGGED sizes (3.9's discipline) catches coverage bugs instantly — the head-looks-right trap is exactly why tests check the TAIL. This typo ships weekly somewhere; your test suite is why not from you.</div>
+</div>
+<div class="quiz">
+  <div class="q">2. For a 1920×1080 image with block(16,16), compute the grid, the total threads, the wasted threads, and identify which threads waste — then say why block(32,8) might beat block(16,16) for a row-major image op even at identical occupancy.</div>
+  <button class="opt">grid(120,68); zero waste — 1920 and 1080 divide evenly... don't they?</button>
+  <button class="opt" data-c="1">grid(120, 68): 1920/16=120 exact, but 1080/16=67.5→68 rows of blocks; threads = 120·68·256 = 2,088,960 vs 2,073,600 pixels → 15,360 idle, all in the bottom block-row's y≥1080 lanes (the 2D guard's job). block(32,8): a warp = one 32-wide row segment → fully coalesced rows AND fewer partially-idle warps at the bottom edge (8-row tail vs 16)</button>
+  <button class="opt">grid(120,67) — round down and skip the edge</button>
+  <button class="opt">Waste is illegal; resize the image</button>
+  <div class="expl">One dimension divides, the other doesn't — per-axis ceil + per-axis guards (M1 L2 twice over). The block(32,8) insight: warp shape follows threadIdx.x-major order, so a 32-wide block makes each warp exactly one contiguous 128-B row run (4.5's perfect sector story) — shape the BLOCK so warps align with memory, not just the occupancy math. Rounding down (option 3) silently crops 8 pixel rows: M2 L8's edge-policy sin, GPU edition.</div>
+</div>
+
+<h2>Exercises</h2>
+<details><summary>Exercise 1 — Port pixelforge's grayscale (M2 L8) as your first 2D kernel: uint8 RGB in, uint8 gray out, luma weights, the dtype dance ON DEVICE (widen to float, round, narrow). Verify against a CPU reference on a ragged 1023×517 synthetic image with EXACT equality — and justify why exact (not allclose) is correct here.</summary><div class="body">
+<pre><code>__global__ void grayscale(const unsigned char *rgb, unsigned char *gray, int W, int H) {
+    int x = blockIdx.x*blockDim.x + threadIdx.x;
+    int y = blockIdx.y*blockDim.y + threadIdx.y;
+    if (x &lt; W &amp;&amp; y &lt; H) {
+        int i = (y*W + x) * 3;                              // M1 L2's channel-last decode
+        float g = 0.299f*rgb[i] + 0.587f*rgb[i+1] + 0.114f*rgb[i+2];
+        gray[y*W + x] = (unsigned char)fminf(g + 0.5f, 255.0f);   // round + clamp
+    }
+}</code></pre>
+<p>Exact equality is right because both sides run the SAME fp32 expression per pixel (three FMAs, one order — no reductions, no reordering: M1 L8's legitimate-== case, kernel edition), provided the CPU reference also computes in fp32 (float g, f-suffixed constants — 3.2's promotion audit; an fp64 CPU reference WILL differ by a ulp on ~1/10⁶ pixels and teach you the lesson the noisy way). Ragged 1023×517 exercises both guards. The kernel's memory story is imperfect (3-byte RGB strides — 4.5 Ex.1e's AoS tax) — noted, measured in 5.7, accepted today: correctness first, always first.</p>
+</div></details>
+<details><summary>Exercise 2 — The coverage test-kit: write check_coverage.cu — a kernel that does out[i] = i (identity stamp), plus host verification that every slot got its stamp exactly once. Run it against (a) the correct index formula, (b) quiz 1's plus-typo, (c) a grid one block SHORT. This 30-line kit is your indexing oracle for every kernel this module.</summary><div class="body">
+<pre><code>__global__ void stamp(int n, int *out) {
+    int i = blockIdx.x*blockDim.x + threadIdx.x;
+    if (i &lt; n) out[i] = i;
+}
+/* host: fill out[] with -1 · launch · sync · then:
+   errors = Σ (out[i] != i)  — report FIRST bad index and its value.        */
+(a) 0 errors.
+(b) plus-typo: out[0..258] stamped (values collide but equal i by luck? NO —
+    block1 thread0 writes out[1]=1 ✓ same value! IDENTITY hides races!) —
+    first failure appears at i=259: out[259]=-1. Lesson within the lesson:
+    the stamp must be i so coverage shows, but collisions on CORRECT values
+    are invisible — add an atomicAdd(&amp;hits[i],1) variant when you suspect
+    double-writes (5.8 teaches the tool). The kit evolves with you.
+(c) short grid: clean -1 band at the tail: [n-block, n) unstamped — instantly
+    visible, instantly diagnostic (ceil-division regression = the M1 L2 bug).</code></pre>
+<p>The kit's deeper point: indexing bugs have SIGNATURES (head-ok/tail-dead = coverage; scattered wrong = formula; bands = stride confusion), and a purpose-built oracle reads them at a glance — M2 L6's fixture philosophy, specialized for the one bug class that dominates week-one CUDA. It rides shotgun through 5.11.</p>
+</div></details>
+
+<hr>
+<h1>Go deeper — the details that finish the picture</h1>
+
+<h2>1. What <<<>>> actually passes (and how scalars travel)</h2>
+<p>Launch parameters (grid, block, shared-bytes, stream — you've now seen slots 1, 2; 5.5 uses 3; 5.9 uses 4) go to the driver; kernel <em>arguments</em> are copied by value into constant space the device reads — which is why scalars (n, a) just work, pointers must be DEVICE pointers (5.3's whole subject), and passing a big struct by value is legal but copies it per-launch (pass a device pointer instead — the 3.6 by-value/by-pointer judgment, relocated). And dim3 is just a struct{x,y,z} with 1-defaults: <<<256, 64>>> is shorthand for dim3(256,1,1), dim3(64,1,1).</p>
+
+<h2>2. Index dialects you'll read in the wild</h2>
+<pre><code>int i = blockIdx.x*blockDim.x + threadIdx.x;          // canonical (this course)
+int i = threadIdx.x + blockDim.x*blockIdx.x;          // same thing, reordered
+auto g = cg::this_grid(); i = g.thread_rank();        // cooperative-groups dialect
+int tid = threadIdx.x, lane = tid % 32, warp = tid/32; // intra-block roles (5.8's cast)
+// 2D-flattened: i = (blockIdx.y*gridDim.x + blockIdx.x)*blockDim.x + threadIdx.x
+//   — when a 1D problem exceeds gridDim.x limits (2³¹-1 blocks... rarely) or for
+//   grid-layout control. All are M1 L2 linearizations; read for the STRIDE story.</code></pre>
+
+<h2>3. Gotchas</h2>
+<div class="gotcha"><strong>The plus-typo family.</strong> +, swapped Idx/Dim, y-for-x: all compile, all produce head-plausible output. The coverage kit (Ex.2) is the 30-second immunization — run it on every new index formula.</div>
+<div class="gotcha"><strong>int overflow in the identity.</strong> blockIdx.x·blockDim.x in int wraps past 2³¹ elements — M1 L1's 3-billion bug, kernel edition. size_t/long long for big-n kernels (the M3 types.h idx_t discipline ports).</div>
+<div class="gotcha"><strong>Guard omitted "because n divides evenly today."</strong> Tomorrow's n doesn't; the write lands in the next allocation (5.4's sanitizer names it). The guard is unconditional house style.</div>
+<div class="gotcha"><strong>blockDim confused with gridDim.</strong> The stride in grid-stride loops is gridDim.x·blockDim.x (total threads); using blockDim alone makes each block redo the same elements — races that idempotent test kernels hide (Ex.2b's lesson).</div>
+<div class="gotcha"><strong>dim3 y/z silently 1.</strong> Launching block(1024) then indexing threadIdx.y expecting spread: everything lands on y=0. Print the config in debug builds; asserts on blockDim inside kernels are legal and cheap.</div>
+<div class="gotcha"><strong>Copy-pasting the 2D template with x/y swapped.</strong> Compiles, correct output, 8–30× slow (every warp column-walks — 4.5). The 5.7 sector drill on every index expression, even "obviously correct" ones.</div>
+
+<h2>Scenario — the review you can now give</h2>
+<p>A friend one week behind you posts their first image kernel: correct output, "but the GPU is barely faster than my laptop's NumPy." You review by ritual, not vibes. Block (13, 13) — "unlucky prime, 169 threads = 5.28 warps: fractional-warp tax plus scheduler slots wasted; use (32, 8)" (quiz 2's reasoning, cited). Index: <code>idx = (x*H + y)</code> — x from threadIdx.x striding by H: "every warp column-walks; swap the roles — this alone is your 8×" (4.5 via 5.2's law). Grid: computed with integer division, no ceil — "your bottom 7 rows are unprocessed; here's my coverage kit" (Ex.2c's signature, recognized from the description alone). Guard: present ✓ — "keep that." Launch: no sync before the timer stops — "you're timing the queue, not the kernel" (5.3's async, previewed via 5.1). Four line-level comments, each with a lesson number attached, forecast: ~15× combined. The reply after they apply them — "17.2×, and I understand every one" — is the module working as designed: the checklist is transferable, and so, now, are you.</p>
+
+<h2>Practice</h2>
+<details><summary>1. Compute launch configs (grid, total threads, idle): n=1e6 @ block 256; n=1e6 @ block 1024; 4096×4096 image @ (32,8); n=33 @ block 256.</summary><div class="body">3907 blocks / 1,000,192 threads / 192 idle (M2 L3's launch_shape, forever); 977 / 1,000,448 / 448; grid(128, 512) = 65,536 blocks, 16.78M threads, 0 idle (both divide); 1 block / 256 threads / 223 idle — tiny-n kernels waste by design, and that's fine: correctness of the general formula beats special-casing (the launch cost dwarfs 223 lanes anyway — 4.6 tolls).</div></details>
+<details><summary>2. Write the identity line for: (a) processing every OTHER element (even i only); (b) each thread handling a contiguous CHUNK of 4; (c) 3D volume (D,H,W) with dim3 blocks. State each one's warp-level memory pattern verdict (4.5 drill).</summary><div class="body">(a) <code>i = 2*(blockIdx.x*blockDim.x + threadIdx.x)</code> — stride-2 warps: 8 sectors, 50% (better: process pairs per thread, or compact the data). (b) <code>base = 4*(bid*bdim + tid); for k in 0..3: y[base+k]...</code> — each thread walks 4 consecutive: warp spans 128 floats = 512B = 16 sectors for 512B: 100% BUT four separate transactions; the float4 form (5.7) does it in one. (c) x/y/z each = blockIdx.*blockDim + threadIdx; linear = (z*H + y)*W + x (M1 L2's 3D) — coalescing rides on x = threadIdx.x, as always. Three formulas, three verdicts, one drill.</div></details>
+<details><summary>3. Predict before running: saxpy correct at n=256 with grid=1, block=256 and NO guard. Your teammate ships it. List the three inputs that break it and the failure each produces.</summary><div class="body">n=255 (n &lt; launched): thread 255 writes y[255] — past the array: OOB (sanitizer catches; production corrupts — 3.4's law). n=257: element 256 never computed — stale output (the silent quadrant). n=10⁹ with the same one-block launch: 255 elements done, the rest untouched AND nobody noticed because the head looked right (quiz 1's trap at scale). The guard + ceil-division handle all three; "it worked for my n" is 3.2's UB-luck epistemology wearing launch-config clothes.</div></details>
+<details><summary>4. The grid-stride version processes n=1M with grid=80, block=256 (20,480 threads). How many elements per thread? Why might this BEAT the 3907-block plain launch on a 40-SM GPU, and which two 4.x concepts price the answer?</summary><div class="body">⌈10⁶/20480⌉ ≈ 49 elements per thread (a for-loop per thread — amortizing the identity computation and setup across 49 items). Potential win: (1) wave arithmetic (4.4 §5) — 80 blocks = exactly 2 blocks/SM × 40 SMs: one clean resident set, zero tail waves, vs 3907 blocks' scheduling churn; (2) instruction economy (4.4 §1) — one guard evaluation per 49 elements instead of per element. Usually a few percent on saxpy (memory-bound anyway — 4.7 caps everything), more on setup-heavy kernels. Measure per 3.9's rules; the POINT is you can now argue both sides with named laws.</div></details>
+<details><summary>5. A kernel needs each thread's WARP id and LANE id for 5.8's shuffles. Write the two lines, then explain why lane = threadIdx.x & 31 works and when tid % 32 ≠ lane semantics could bite (hint: 2D blocks).</summary><div class="body"><code>int lane = threadIdx.x &amp; 31; int warp = threadIdx.x &gt;&gt; 5;</code> — M1 L1's power-of-two mask/shift, live in a kernel. The bite: in 2D blocks, warps are formed from the LINEARIZED thread id (tid = threadIdx.y*blockDim.x + threadIdx.x) — threadIdx.x alone misidentifies lanes when blockDim.x isn't a multiple of 32 (a (16,16) block's warps SPAN two y-rows!). Correct general form: linearize first, then mask. This subtlety decides whether 5.5's (16,16) tiles have clean warp geometry — file it now, cash it there.</div></details>
+<details><summary>6. Port M2 L2's Monte-Carlo π as a kernel skeleton (no RNG yet — Track B4 brings curand; use x[i], y[i] arrays of pre-generated uniforms): each thread tests one dart, writes hit[i] = 0/1. What's deliberately UNFINISHED about this design, and which lesson completes it?</summary><div class="body"><code>i = bid*bdim+tid; if (i&lt;n) hit[i] = (x[i]*x[i] + y[i]*y[i] &lt;= 1.0f);</code> — branchless by construction (M1 L4's squared-distance + 4.1 Ex.2's comparison-as-data: no divergence). Unfinished: a MILLION hit flags need summing — writing them out and summing on CPU ships 4 MB across the bridge to compute one number (4.6's audit fails it). The completion is the on-device reduction — 5.8's tree + shuffles — turning output from n bytes to 8. Recognizing "this kernel's real output is a reduction" at design time is the instinct; the machinery is two lessons away.</div></details>
+<details><summary>7. Design: the "kernel PR checklist" your study group adopts for all Module-5 code review — ten lines max, each item citing its lesson: identity formula + coverage-kit run, guard, block shape vs warp geometry, int width, coalescing drill per index, divergence audit per if, occupancy back-of-envelope, prediction written before first run, verification against fixture chain, provenance fields. (You'll recognize this as 4.4 P7 + M2 L6 fused — write the actual checklist text.)</summary><div class="body">1. Identity formula stated in a comment + coverage kit green on ragged n [5.2 Ex.2]. 2. Guard present, unconditional [M1 L2→5.2]. 3. Block ∈ {128,256,512}, shape aligns warps with fast axis [5.2 q2/4.4]. 4. Index math width audited for max n [M1 L1/5.2 gotcha]. 5. Sector verdict per load/store line [4.5/5.7 drill]. 6. Divergence verdict per if [4.4 P6/5.6]. 7. occ.py on (tpb, regs, smem): binding budget named [4.4 Ex.1/5.6]. 8. Roof + time PREDICTION in the PR description [4.7/4.4 P7]. 9. Fixture-chain pass (exact or budgeted, budget shown) BEFORE numbers [M2 L6/3.9/5.11]. 10. Provenance: gpu/cc/driver/toolkit/flags in the results JSON [5.1 P6]. Ten lines that make week-one CUDA code reviewable by week-forty standards — and they're all recycled, which is the course's whole claim: nothing here was new except the hardware.</div></details>
+
+<div class="pager">
+  <a href="lesson-01.html">← Lab setup & first compile</a>
+  <a href="lesson-03.html">Next: Memory management →</a>
+</div>
+<div class="footer">GPU Mastery · Module 5 · Lesson 2 — works offline · progress saved in your browser</div>
+</div>
+<script src="../assets/diagrams5.js"></script>
+<script src="../assets/app.js"></script>
+</body>
+</html>

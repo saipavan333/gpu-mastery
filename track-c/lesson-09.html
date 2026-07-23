@@ -1,0 +1,173 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>C9 Ray Tracing — GPU Mastery</title>
+<link rel="stylesheet" href="../assets/style.css">
+</head>
+<body data-lesson="cl9">
+<nav><div class="inner">
+  <a class="logo" href="../index.html">GPU<span>Mastery</span></a>
+  <a class="item" href="../index.html">Home</a>
+  <a class="item on" href="../curriculum.html">Curriculum</a>
+  <a class="item" href="../labs.html">Labs</a>
+  <a class="item" href="../setup.html">Lab setup</a>
+  <a class="item" href="../prompt.html">Generator prompt</a>
+</div></nav>
+<div class="wrap">
+
+<div class="lesson-top">
+  <div><span class="badge">Track C · Lesson 9</span><span class="badge dim">≈ 4 h</span></div>
+  <button id="donebtn" class="donebtn">Mark lesson complete</button>
+</div>
+<h1>Ray Tracing — log-N culling, fixed-function cores, and the denoising bargain</h1>
+<p class="lead">Ray tracing shoots rays into a scene and asks what they hit. Done naively it's O(rays × triangles) — impossible in real time. Three things make it feasible: a BVH that turns the triangle search into O(log N) (M1's log lesson finally cashing in), RT cores that do the traversal in fixed-function silicon (4.4's specialization story), and denoising, because a real-time budget affords only ~1 sample per pixel, which is pure noise. Today: the ray-triangle test executed in NumPy, the RT pipeline as the function-pointer table 3.6 promised, and the temporal-accumulation bargain.</p>
+
+<p class="small dim">Lab note: the ray-triangle MATH runs in NumPy (executed below). But real GPU ray tracing needs an RTX (NVIDIA) or RDNA2+ (AMD) GPU with VK_KHR_ray_tracing_pipeline — so the C9/C11 rendering exercises target that hardware specifically; the algorithms and the pipeline structure you can learn anywhere.</p>
+
+<h2>Concept</h2>
+
+<h3>The BVH: log-N culling, M1's log lesson cashing in</h3>
+<div class="diagram" data-diagram="c9-bvh" data-caption="A bounding-volume hierarchy is a tree of nested boxes; a ray tests a few boxes and skips whole subtrees whose boxes it misses, turning O(N) triangle tests into O(log N)."></div>
+<p>Testing every ray against every triangle is hopeless — millions of rays times millions of triangles. The <strong>bounding volume hierarchy (BVH)</strong> fixes it: wrap the scene in a tree of nested bounding boxes, so a ray tests the root box, descends into children whose boxes it hits, and — crucially — <em>skips entire subtrees</em> whose boxes it misses. A ray that misses the "right half" box skips all the triangles inside it in one test. This turns the per-ray cost from O(N) triangles into roughly O(log N) box tests — M1's logarithm lesson finally paying off in the most literal way: a tree structure converts linear search into logarithmic. The BVH is built once (or refit per frame for dynamic scenes) and is the single data structure that makes ray tracing tractable. Everything else in real-time RT is optimizing around this log-N traversal.</p>
+
+<h3>The RT pipeline: the function-pointer table returns</h3>
+<div class="diagram" data-diagram="c9-rtpipeline" data-caption="The ray-tracing pipeline: a raygen shader shoots rays, fixed-function traversal walks the BVH, and closest-hit or miss shaders run per result — dispatched via the Shader Binding Table, a function-pointer table in hardware."></div>
+<p>Ray tracing has its own pipeline, separate from rasterization (<code>VK_KHR_ray_tracing_pipeline</code>). A <strong>raygen</strong> shader shoots rays (typically one per pixel). Fixed-function <strong>traversal</strong> walks the BVH. Then, per result, the GPU runs a <strong>closest-hit</strong> shader (shade the surface it hit), a <strong>miss</strong> shader (sky/background), or an <strong>any-hit</strong> shader (for transparency). How does the GPU know <em>which</em> hit shader to run for <em>which</em> object? The <strong>Shader Binding Table (SBT)</strong> — a table mapping each object to its shaders, which the GPU indexes per ray. That is exactly the function-pointer table (the vtable) that 3.6 promised would return: a per-object dispatch to code, resolved by indexing a table, now done in hardware per ray. The alternative, <code>VK_KHR_ray_query</code>, lets you trace rays inline from any shader (compute, fragment) without the separate pipeline — handy for adding a single effect (a shadow ray) to an otherwise rasterized frame. Both are final, vendor-supported extensions in 2026.</p>
+
+<h3>Ray-triangle intersection, executed</h3>
+<div class="diagram" data-diagram="c9-moller" data-caption="The Möller-Trumbore test solves the ray-triangle intersection for distance t and barycentrics (u,v) at once, using cross products instead of a matrix inverse — the workhorse of every ray tracer."></div>
+<p>At the leaves of the BVH, a ray tests actual triangles, and the standard method is <strong>Möller-Trumbore</strong>, which solves for the intersection distance <code>t</code> and the barycentric coordinates <code>(u, v)</code> in one shot, using cross products rather than a matrix inverse (the clever, fast part). Executed in NumPy:</p>
+<pre><code>triangle v0(0,0,0) v1(1,0,0) v2(0,1,0), ray O(0.25,0.25,-1) direction (0,0,1):
+  solve O + t·D = v0 + u(v1−v0) + v(v2−v0)  via cross products
+  result: t = 1.000, u = 0.250, v = 0.250
+  hit test: u≥0, v≥0, u+v≤1, t>0  →  HIT at (0.25, 0.25, 0)
+note: (u, v) ARE barycentric coordinates (C2!) — so the same intersection that
+finds the hit also gives you free perspective-correct-style attribute interpolation
+at the hit point. The rasterizer and the ray tracer compute the same barycentrics.</code></pre>
+<p>That last point is the quiet unification: C2's barycentric interpolation and C9's ray-triangle test produce the same weights, because they're solving the same geometry from two directions. RT cores (NVIDIA RTX, AMD RDNA2+) do both the BVH traversal and this triangle intersection in fixed-function silicon — 4.4's specialization story again: just as tensor cores accelerate matmul and RT cores accelerate ray-box and ray-triangle tests, the hardware bakes the hot inner loop into dedicated units, and your shaders orchestrate around them.</p>
+
+<h3>The denoising bargain: 1 spp is noise</h3>
+<div class="diagram" data-diagram="c9-denoise" data-caption="A real-time budget affords ~1 ray sample per pixel, which is grainy noise; temporal accumulation blends reprojected past frames to reach many effective samples — clean, but with a ghosting cost under fast motion."></div>
+<p>Here's the reality that shapes all real-time ray tracing: a frame budget (C11) affords only about <em>one</em> ray sample per pixel, and one sample of a noisy integral (lighting, reflections, shadows) is grainy, unusable noise. Offline renderers fix this with thousands of samples; real-time can't. The bargain is <strong>denoising</strong>, primarily <strong>temporal accumulation</strong>: blend this frame's noisy sample with reprojected samples from previous frames, so over several frames each pixel accumulates many effective samples and converges to a clean image — nearly free, reusing work already done. The catch is motion: when the camera or objects move fast, the reprojection of past frames breaks down (the past pixel no longer corresponds to this one), causing ghosting or smearing. So real-time RT's "correctness" is explicitly the track's thesis — <em>measurably plausible</em>, not exact: you accept a denoised approximation judged by how it looks (PSNR against a reference, C11), because a noise-free exact image is off the table at 60 fps. This is why hybrid pipelines dominate: rasterize the bulk of the frame (cheap, exact), and ray-trace only the effects that need it — shadows, reflections, or global illumination — à la carte, each denoised, keeping the ray budget tiny.</p>
+
+<h2>Worked example</h2>
+<div class="card">
+<p><strong>Task:</strong> Decide how to add ray-traced reflections to a rasterized game within a frame budget, and quantify why the BVH and denoising are non-negotiable. Prediction first: for a 1080p frame, how many ray-triangle tests would naive (no BVH) reflections cost, and what makes it feasible?</p>
+<pre><code>1080p ≈ 2.07M pixels, 1 reflection ray each, scene ≈ 1M triangles:
+  NAIVE (test every ray vs every triangle): 2.07M × 1M ≈ 2.07 × 10^12 tests/frame
+    → utterly impossible in 16.6 ms.
+  WITH BVH (O(log N) ≈ ~20 box tests per ray): 2.07M × ~20 ≈ 41M tests/frame
+    → ~50,000× fewer, now tractable on RT cores.
+  but 1 ray/pixel of reflection = NOISE → temporal accumulation denoises it (many
+    effective samples over frames), at a ghosting cost under fast motion.
+Prediction: BVH is the difference between 10^12 and 10^7-ish (feasible); denoising is
+  the difference between noise and an image. Result: confirmed — you need BOTH, plus
+  the hybrid choice to ray-trace ONLY reflections, not the whole frame.</code></pre>
+<p><strong>What to internalize:</strong> real-time ray tracing is feasible only because three multiplicative wins stack. The BVH turns O(N) into O(log N) — a ~50,000× reduction in this example, the difference between 10¹² and 10⁷ tests, which is what moves it from impossible to merely expensive. RT cores do those traversal and intersection tests in fixed-function silicon (4.4), taking the expensive inner loop off the shader cores. And denoising via temporal accumulation lets you get away with the ~1 sample per pixel a real-time budget allows, converting noise into an image by reusing past frames' work — at the honest cost of ghosting under motion. On top of all three sits the hybrid decision: you don't ray-trace the whole frame, you rasterize the bulk (cheap and exact) and spend your tiny ray budget only on the specific effects — reflections here, or shadows, or GI — that rasterization can't do well. That à-la-carte discipline is the practical art of real-time RT, and it's the frame-budget thinking (C11) applied to the most expensive tool in the box: buy ray tracing only where it visibly pays, denoise what you buy, and let the BVH and RT cores make each ray cheap.</p>
+</div>
+
+<h2>Key points</h2>
+<ul class="keypoints">
+<li>A BVH (tree of nested bounding boxes) turns per-ray cost from O(N) triangles into ~O(log N) box tests by skipping whole subtrees a ray misses — M1's log lesson made literal (~50,000× in the worked example).</li>
+<li>The RT pipeline: raygen shoots rays, fixed-function traversal walks the BVH, closest-hit/miss/any-hit shaders run per result, dispatched via the Shader Binding Table — the function-pointer vtable (3.6) in hardware.</li>
+<li>Möller-Trumbore solves ray-triangle for distance t and barycentrics (u,v) via cross products (executed: t=1.0, u=v=0.25, hit) — and those (u,v) are C2's barycentrics, unifying rasterizer and ray tracer.</li>
+<li>RT cores (NVIDIA RTX, AMD RDNA2+) do BVH traversal and triangle intersection in fixed-function silicon — 4.4's specialization story, like tensor cores for matmul.</li>
+<li>A real-time budget affords ~1 sample/pixel = noise; temporal accumulation blends reprojected past frames into many effective samples (clean, but ghosting under fast motion) — correctness becomes "measurably plausible," not exact.</li>
+<li>Hybrid pipelines dominate: rasterize the bulk (cheap, exact), ray-trace only the effects that need it (shadows/reflections/GI), each denoised — frame-budget discipline (C11) on the most expensive tool.</li>
+</ul>
+
+<h2>Quiz</h2>
+<div class="quiz">
+  <div class="q">1. A student implements a ray tracer that tests every ray against every triangle and concludes "ray tracing is fundamentally too slow for real time." What's the flaw, and what's the actual complexity with the right data structure?</div>
+  <button class="opt">They're right; real-time ray tracing is impossible without a supercomputer</button>
+  <button class="opt" data-c="1">The flaw is the brute-force O(rays × triangles) approach. A bounding-volume hierarchy (BVH) turns each ray's triangle search into ~O(log N) by testing nested bounding boxes and skipping whole subtrees the ray misses — for a 1M-triangle scene that's ~20 box tests instead of 1M triangle tests, roughly 50,000× fewer (executed-style estimate). RT cores then do that traversal in fixed-function silicon. So the complexity is ~O(rays × log triangles), not O(rays × triangles) — the BVH is exactly M1's log-lesson turning linear search into logarithmic, and it's what makes real-time RT feasible</button>
+  <button class="opt">Use fewer rays; cast one ray per 100 pixels</button>
+  <button class="opt">Ray tracing needs a CPU, not a GPU</button>
+  <button class="opt">Reduce the scene to under 1000 triangles</button>
+  <div class="expl">Options 3/5 sacrifice quality/scene to dodge the algorithmic problem; option 4 is backwards (GPUs with RT cores are the target). The correct answer identifies the missing data structure — the BVH — and the complexity it buys: O(log N) per ray instead of O(N), a ~50,000× win on a large scene, plus fixed-function RT cores. This is M1's logarithm lesson in its most literal application: a tree turns linear search into logarithmic, and that single structure is the difference between "impossible" and "shipping in games." Brute-force complexity is the flaw; the BVH is the fix.</div>
+</div>
+<div class="quiz">
+  <div class="q">2. A team ray-traces reflections at 1 sample per pixel and the result is unusably grainy. A programmer says "we need 1000 samples per pixel like offline renderers, so real-time RT is a lie." What's the real solution?</div>
+  <button class="opt">They're right; drop ray tracing, it can't work in real time</button>
+  <button class="opt" data-c="1">Temporal accumulation (denoising): blend this frame's noisy 1-spp sample with reprojected samples from previous frames, so each pixel accumulates many effective samples over several frames and converges to a clean image — nearly free by reusing past work, no 1000-spp needed. The cost is ghosting when the camera or objects move fast (reprojection breaks down), so correctness becomes 'measurably plausible' rather than exact. Combined with a hybrid pipeline (ray-trace only reflections, rasterize the rest), this is how real-time RT actually ships</button>
+  <button class="opt">Increase to 16 samples per pixel; that's enough and affordable</button>
+  <button class="opt">Blur the reflections until the noise is hidden</button>
+  <div class="expl">Option 3's 16 spp is still far too expensive for a real-time budget (which affords ~1). Option 4 (a dumb blur) destroys detail and doesn't converge. The correct answer is the denoising bargain: temporal accumulation reuses past frames to reach many effective samples from 1 spp, cheaply, at a ghosting cost under motion — which is why real-time RT correctness is 'measurably plausible' (PSNR), not exact. The programmer's error is assuming real-time must match offline's brute-force sample count; the real innovation is amortizing samples over time, plus spending rays only where they matter (hybrid). This is the track's thesis — the eye is the customer, so a denoised approximation is the right answer.</div>
+</div>
+
+<h2>Exercises</h2>
+<details><summary>Exercise 1 — Implement Möller-Trumbore ray-triangle intersection in NumPy and verify it: reproduce t=1.0, u=v=0.25 for the executed case, then test a ray that misses (u+v>1), a ray parallel to the triangle (det≈0), and a ray hitting behind the origin (t<0). Confirm the hit test u≥0, v≥0, u+v≤1, t>0 classifies each correctly.</summary><div class="body">
+<p>Expected: the executed case gives t=1.0, u=0.25, v=0.25, hit=True at (0.25,0.25,0). A ray aimed outside the triangle gives u+v>1 (or a negative barycentric) → miss. A ray parallel to the triangle gives a determinant near 0 → no intersection (guard against divide-by-zero). A ray hitting the triangle's plane behind the origin gives t<0 → miss (it's behind the ray). Deliverable: the intersection function and the four classified cases. The key realization to note: the (u,v) it returns are barycentric coordinates (C2), so the same test that finds the hit gives you the interpolation weights for shading the hit point — the rasterizer and ray tracer share this math, approached from opposite directions.</p>
+</div></details>
+<details><summary>Exercise 2 — Estimate the feasibility numbers: for a 1080p frame with 1 primary ray per pixel and a 1M-triangle scene, compute the brute-force test count and the BVH test count (assume ~log2(1M)≈20 box tests per ray). Then estimate how the ray budget changes if you add a second bounce or a shadow ray per hit, and reason about what stays in budget.</summary><div class="body">
+<p>Expected: brute force ≈ 2.07M pixels × 1M triangles ≈ 2.07×10¹² tests (impossible); BVH ≈ 2.07M × 20 ≈ 4.1×10⁷ tests (~50,000× fewer, feasible). Adding a shadow ray per hit roughly doubles the ray count; a second bounce (reflection-of-reflection) roughly doubles again — so ray count grows multiplicatively with bounces, which is why real-time budgets keep bounces low (often 1) and use denoising to compensate. Deliverable: the two test counts and a short analysis of which additions (one shadow ray: yes; many bounces: no) fit a 16.6 ms budget. This makes the BVH's necessity and the hybrid/low-bounce discipline quantitative — you can predict what ray-tracing feature fits the budget from the ray-count arithmetic.</p>
+</div></details>
+
+<hr>
+<h1>Go deeper — the anatomy of a real-time ray</h1>
+
+<h2>1. The two ways to trace: pipeline vs ray query</h2>
+<pre><code>VK_KHR_ray_tracing_pipeline (full RT pipeline):
+  raygen → traversal (fixed-func) → closest-hit / miss / any-hit, dispatched by the SBT
+  best for: full ray-traced renderers, path tracing, many material types (the SBT
+  shines when different objects need different hit shaders — 3.6's vtable, per ray)
+VK_KHR_ray_query (inline):
+  trace a ray from INSIDE a compute or fragment shader; you write the traversal loop's
+  result handling yourself, no separate pipeline / SBT
+  best for: adding ONE effect (a shadow ray, an AO ray) to a mostly-rasterized frame —
+  the hybrid common case, minimal plumbing
+both are final, vendor-supported (NVIDIA RTX, AMD RDNA2+). Pick by how much of your
+frame is ray-traced: mostly-raster + one effect → ray query; full RT → the pipeline.</code></pre>
+
+<h2>2. RT cores: 4.4's specialization, third time</h2>
+<pre><code>the pattern you've now seen thrice:
+  tensor cores  → fixed-function matmul (Track A / 4.4)
+  RT cores      → fixed-function BVH traversal + ray-triangle/ray-box intersection
+  raster/ROP    → fixed-function triangle setup + depth/blend (C2)
+your shaders ORCHESTRATE; the hot inner loop runs in dedicated silicon. RT cores do
+the ~20 box tests and the Möller-Trumbore per ray far faster than shader code could,
+which is why "RT-capable" GPUs (RTX, RDNA2+) exist as a category — the traversal is
+in hardware. Same lesson as tensor cores: identify the hot kernel, bake it into silicon.</code></pre>
+
+<h2>3. Hybrid rendering and the ray budget</h2>
+<pre><code>you almost NEVER ray-trace the whole frame in real time. instead:
+  rasterize the frame (cheap, exact primary visibility) → then ray-trace, à la carte:
+    · RT shadows      (1 shadow ray per pixel toward the light) — crisp, contact-accurate
+    · RT reflections  (1 reflection ray per pixel) — mirror/glossy surfaces
+    · RT global illum (1 bounce, denoised) — soft indirect light
+each effect: ~1 ray/pixel, denoised (temporal accumulation). budget rays like frame
+time (C11) — every ray-traced effect competes for the same tiny budget, so you buy
+the one that visibly matters most for your scene. this à-la-carte discipline IS
+real-time RT in 2026; full path tracing is reserved for the highest-end hardware.</code></pre>
+
+<h2>Gotchas</h2>
+<div class="gotcha"><strong>Brute-force ray-triangle testing.</strong> O(rays × triangles) is impossible in real time; you need a BVH for ~O(log N) per ray (the ~50,000× win). No BVH = no real-time RT (quiz 1).</div>
+<div class="gotcha"><strong>Expecting 1 spp to look clean.</strong> One sample of a noisy integral is grain, not an image. Denoise with temporal accumulation (reproject past frames) — real-time RT is 1 spp + denoising, not brute-force sampling (quiz 2).</div>
+<div class="gotcha"><strong>Ignoring ghosting from temporal accumulation.</strong> Reprojection breaks under fast motion (the past pixel no longer matches), causing smearing/ghosting. Budget for it (motion vectors, clamping) — correctness is "measurably plausible," and motion is where the approximation shows.</div>
+<div class="gotcha"><strong>Ray-tracing the whole frame.</strong> Full-frame RT blows the budget on all but the highest-end hardware. Rasterize the bulk and ray-trace only the effect(s) that need it (hybrid) — buy rays where they visibly pay.</div>
+<div class="gotcha"><strong>Rebuilding the BVH from scratch every frame.</strong> A full BVH rebuild is expensive; dynamic scenes REFIT (update box bounds cheaply) and rebuild only when topology changes a lot. Building the acceleration structure is itself a budget item.</div>
+<div class="gotcha"><strong>Assuming any GPU can ray-trace.</strong> Real-time RT needs RT-core hardware (NVIDIA RTX, AMD RDNA2+) and the KHR extensions; older/low-end GPUs lack the traversal silicon. Gate the feature on capability and provide a rasterized fallback (C-track's hybrid ethos).</div>
+
+<h2>Scenario — the reflections that fit the budget</h2>
+<p>A studio wants ray-traced reflections in their rasterized game for the glossy floors and car paint that screen-space reflections handle poorly. A junior engineer's first attempt ray-traces the whole scene at multiple samples per pixel and gets a slideshow — a few frames per second — and concludes real-time ray tracing "isn't ready." The senior graphics engineer reframes it with exactly this lesson's toolkit. First, the whole frame doesn't need ray tracing: rasterize everything as usual (cheap, exact primary visibility), and spend the ray budget only on reflections — a hybrid pipeline via ray query, tracing one reflection ray per pixel from the fragment shader, no separate RT pipeline. Second, the BVH is non-negotiable: without it, each reflection ray would test a million triangles; with it, ~20 box tests on the RT cores (the ~50,000× win), so the rays are cheap. Third, one reflection ray per pixel is noisy, so temporal accumulation denoises it by reprojecting past frames — clean reflections at nearly no extra cost, with motion vectors to limit ghosting when cars move fast. The result fits the 16.6 ms budget with room to spare, and the reflections look correct where screen-space reflections failed (off-screen geometry, grazing angles). When the junior asks how the senior knew it would fit, the answer is the worked example's arithmetic: the BVH makes each ray ~log-N cheap, RT cores make the traversal fixed-function, denoising makes 1 spp enough, and the hybrid choice keeps the ray count to one effect — multiply those and it fits. The morals close the ray-tracing arc. First, real-time RT isn't brute-force offline rendering sped up; it's a stack of approximations — log-N traversal, fixed-function cores, temporal denoising, hybrid budgeting — each of which the naive approach ignores, which is why the naive approach fails and concludes the technology isn't ready. Second, it's the track's thesis at its sharpest: the eye is the customer, so the goal is measurably-plausible reflections within a frame budget, not exact ones, and the engineer's craft is buying the cheapest approximation the eye accepts. Real-time ray tracing works because clever people refused to do it exactly.</p>
+
+<h2>Practice</h2>
+<details><summary>1. What is a BVH, and what per-ray complexity does it provide versus brute force?</summary><div class="body">A bounding volume hierarchy is a tree of nested bounding boxes wrapping the scene geometry: the root box contains everything, children partition it, and leaves hold small groups of triangles. A ray traverses it by testing box intersections — descending into children whose boxes it hits and skipping entire subtrees whose boxes it misses. Brute force tests a ray against every triangle: O(N). The BVH tests a ray against ~O(log N) boxes (the tree depth), because each miss prunes a whole subtree — for a million triangles, ~20 box tests instead of a million triangle tests, roughly 50,000× fewer. It's M1's logarithm lesson literally applied: a tree structure converts linear search into logarithmic, and it's the single data structure that makes ray tracing tractable.</div></details>
+<details><summary>2. In the RT pipeline, what is the Shader Binding Table and which earlier concept does it realize?</summary><div class="body">The Shader Binding Table (SBT) is a table that maps each object (or geometry) in the scene to the shaders that should run when a ray interacts with it — its closest-hit shader, any-hit shader, etc. When a ray hits something, the GPU indexes the SBT by the hit object to dispatch the correct hit shader. This realizes the function-pointer table / vtable that 3.6 (function pointers and dynamic dispatch) promised would return: instead of a branch, you index a table of code addresses to call the right handler per object — now done in hardware, per ray, at massive parallelism. It's dynamic dispatch for ray hits, and it's why different materials can have different hit shaders in one scene without branching in a megashader.</div></details>
+<details><summary>3. Möller-Trumbore returns t, u, v for a ray-triangle hit. What are u and v, and why is that significant?</summary><div class="body">t is the distance along the ray to the intersection (the hit point is O + t·D). u and v are two of the triangle's barycentric coordinates — the same barycentric weights the rasterizer computes (C2), giving the hit point's position as a weighted blend of the triangle's vertices (the third weight is 1−u−v). The significance: the very test that determines whether and where the ray hits also yields the interpolation weights needed to shade the hit — texture coordinates, normals, colors at the hit point come free from (u,v). So the rasterizer and the ray tracer compute the same barycentrics, approaching the identical geometry from two directions (per-pixel coverage vs per-ray intersection). It's a quiet unification: barycentric interpolation is fundamental to both rendering paradigms.</div></details>
+<details><summary>4. Why does a real-time ray tracer use ~1 sample per pixel plus denoising instead of many samples like an offline renderer?</summary><div class="body">Because the frame budget (16.6 ms at 60 fps) affords only about one ray per pixel per effect — offline renderers spend seconds-to-hours per frame casting thousands of samples, which real-time can't. But one sample of a noisy lighting/reflection/shadow integral is grainy noise. The solution is denoising, primarily temporal accumulation: blend this frame's 1-spp sample with reprojected samples from previous frames, so each pixel accumulates many EFFECTIVE samples over several frames and converges to a clean image, reusing work already done — nearly free. The cost is ghosting when motion breaks the reprojection. So real-time RT amortizes samples over TIME rather than casting them all at once, trading exactness for a "measurably plausible" denoised result — which is acceptable because the eye is the customer.</div></details>
+<details><summary>5. What are RT cores, and which earlier hardware-specialization story do they repeat?</summary><div class="body">RT cores are fixed-function hardware units (on NVIDIA RTX and AMD RDNA2+ GPUs) that accelerate the two hot operations of ray tracing: BVH traversal (the ray-box tests as a ray descends the tree) and ray-triangle/ray-box intersection (Möller-Trumbore). They do these far faster than shader code could, taking the expensive inner loop off the general-purpose cores. This repeats 4.4's specialization story, now for the third time in the course: tensor cores bake matmul into silicon (Track A), raster/ROP bake triangle setup and depth/blend into silicon (C2), and RT cores bake ray traversal/intersection into silicon. The pattern is always the same — identify the hot kernel that dominates a workload, build dedicated hardware for it, and let programmable shaders orchestrate around it. "RT-capable GPU" is a category precisely because the traversal is in hardware.</div></details>
+<details><summary>6. What is hybrid rendering, and how do you decide which effects to ray-trace?</summary><div class="body">Hybrid rendering rasterizes the bulk of the frame (cheap, exact primary visibility) and ray-traces only specific effects that rasterization does poorly — typically shadows, reflections, or a bounce of global illumination — at ~1 ray per pixel each, denoised. You decide which to ray-trace by frame-budget economics (C11): every ray-traced effect competes for the same tiny ray budget, so you buy the one that visibly matters most for your scene. RT shadows give contact-accurate, crisp shadows; RT reflections handle off-screen and grazing-angle reflections that screen-space methods miss; RT GI adds soft indirect light. You rarely afford all three or full-frame path tracing (reserved for top-end hardware), so it's à la carte: spend rays where the eye most notices the improvement, rasterize the rest, and provide a rasterized fallback for GPUs without RT cores. It's frame-budget discipline applied to the most expensive tool.</div></details>
+<details><summary>7. The interview closer: "Ray tracing is O(rays × triangles) naively — how is real-time ray tracing possible?" Deliver the spoken skeleton.</summary><div class="body">"It's possible because several multiplicative optimizations stack on top of the naive brute force. First, the acceleration structure: a bounding volume hierarchy, a tree of nested boxes, turns each ray's search from O(N) triangles into about O(log N) box tests, because a ray that misses a box skips that whole subtree — for a million-triangle scene that's roughly twenty box tests instead of a million triangle tests, tens of thousands of times fewer. That's M1's logarithm lesson made literal. Second, RT cores: dedicated fixed-function silicon on RTX and RDNA2-plus GPUs does the BVH traversal and the ray-triangle intersection — Möller-Trumbore — far faster than shader code, the same specialization story as tensor cores for matmul. Third, sampling: a real-time budget affords only about one ray per pixel, which is noise, so we denoise with temporal accumulation — blending reprojected samples from previous frames to get many effective samples cheaply, at a ghosting cost under fast motion. And fourth, the budget discipline: we don't ray-trace the whole frame, we rasterize the bulk and spend the ray budget à la carte on just the effects that need it — shadows, reflections, or a GI bounce — each denoised. Multiply those together and a 16.6-millisecond frame fits. The deeper point is that real-time ray tracing isn't offline rendering sped up; it's a stack of clever approximations, and the reason a naive implementation concludes 'it's too slow' is that it's missing all four — the BVH, the RT cores, the denoising, and the hybrid budgeting. Correctness becomes measurably-plausible rather than exact, because the eye is the customer.' Naming the BVH's log-N, RT cores, denoising, and hybrid budgeting as the four stacked wins is the complete answer."</div></details>
+
+<div class="pager">
+  <a href="lesson-08.html">← Vulkan Sync</a>
+  <a href="lesson-10.html">Next: Frame Profiling →</a>
+</div>
+<div class="footer">GPU Mastery · Track C · Lesson 9 — works offline · progress saved in your browser</div>
+</div>
+<script src="../assets/diagramsC.js"></script>
+<script src="../assets/app.js"></script>
+</body>
+</html>

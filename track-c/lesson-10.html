@@ -1,0 +1,176 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>C10 Frame Profiling — RenderDoc &amp; Nsight — GPU Mastery</title>
+<link rel="stylesheet" href="../assets/style.css">
+</head>
+<body data-lesson="cl10">
+<nav><div class="inner">
+  <a class="logo" href="../index.html">GPU<span>Mastery</span></a>
+  <a class="item" href="../index.html">Home</a>
+  <a class="item on" href="../curriculum.html">Curriculum</a>
+  <a class="item" href="../labs.html">Labs</a>
+  <a class="item" href="../setup.html">Lab setup</a>
+  <a class="item" href="../prompt.html">Generator prompt</a>
+</div></nav>
+<div class="wrap">
+
+<div class="lesson-top">
+  <div><span class="badge">Track C · Lesson 10</span><span class="badge dim">≈ 3 h</span></div>
+  <button id="donebtn" class="donebtn">Mark lesson complete</button>
+</div>
+<h1>Frame Profiling — capture where, then measure why</h1>
+<p class="lead">You never optimize a frame by guessing — that's 5.10's whole doctrine, refitted for graphics. RenderDoc captures a frame and tells you WHERE the time goes (which pass, which draw); Nsight Graphics and Radeon GPU Profiler tell you WHY (occupancy, bandwidth, stalls). The frame pathologies you'll hunt are all core lessons wearing frame clothes — overdraw, tiny draws, fat G-buffers, sync bubbles. Today: the two-tool ritual and the 10-minute frame-triage runbook.</p>
+
+<p class="small dim">Lab note: RenderDoc (v1.45, open-source) captures Vulkan/GL/D3D frames on any GPU; Nsight Graphics (NVIDIA) and Radeon GPU Profiler (AMD) add hardware counters. The runbook below applies to any renderer you build — this is method, and method needs no special hardware to learn.</p>
+
+<h2>Concept</h2>
+
+<h3>Capture where, then measure why — the two-tool ritual</h3>
+<div class="diagram" data-diagram="c10-triage" data-caption="RenderDoc captures a frame and shows WHERE time goes (which pass/draw, overdraw); Nsight/RGP add hardware counters showing WHY (occupancy, bandwidth, stalls). Capture-first, counters-second — 5.10's ritual."></div>
+<p>This is 5.10's <code>nsys</code>-then-<code>ncu</code> ritual, refitted. <strong>RenderDoc</strong> (the open-source, cross-vendor frame debugger, v1.45) captures a single frame and lets you scrub through every draw call, inspect the state and inputs of each, see the framebuffer after each pass, and — critically — visualize <em>where</em> the cost is: which pass takes the most time, where overdraw is heavy (its quad-overdraw view), which draws are redundant. It answers WHERE, like <code>nsys</code> answered where in a kernel timeline. Then, once you know the guilty pass, <strong>Nsight Graphics</strong> (NVIDIA) or <strong>Radeon GPU Profiler</strong> (AMD) reads hardware counters on that pass — SM/CU occupancy, memory bandwidth, warp stall reasons — to tell you WHY it's slow, exactly like <code>ncu</code> did for a kernel. The discipline is the same and non-negotiable: <em>capture first to localize, counters second to diagnose, never guess</em>. A frame is a 16.6 ms budget (C11), and profiling tells you which pass is eating it — you don't optimize the pass you assume is slow, you optimize the one the capture proves is slow (5.9's max-lane law: the slowest stage sets the frame time, so find it before you touch anything).</p>
+
+<h3>The frame pathologies are all core lessons</h3>
+<div class="diagram" data-diagram="c10-pathologies" data-caption="Overdraw (shading a pixel many times), tiny draws (thousands of small calls), fat G-buffers (bandwidth-blown targets), and sync bubbles (GPU idle on a barrier) — each is a core lesson (5.2, 4.6, 5.9) in a frame's clothes."></div>
+<p>The four pathologies a capture reveals are not new — they're Module 4/5 lessons in graphics dress. <strong>Overdraw</strong> (shading the same pixel many times, C2) is wasted fragment work; fix by sorting front-to-back or a depth pre-pass. <strong>Tiny draws</strong> (thousands of small draw calls) are 5.2's launch confetti — per-call overhead dominating useful work; fix by batching and instancing. <strong>Fat G-buffers</strong> (bandwidth-blown deferred render targets) are 4.6's bus economics — too many bytes per pixel crossing the bus; fix by packing/downsizing the targets. <strong>Sync bubbles</strong> (the GPU idle, waiting on a barrier or a dependency) are 5.9's overlap failure — the pipeline draining instead of staying full; fix by overlapping independent passes or fixing over-broad barriers (C8). Recognizing each pathology as a core lesson is the whole value of having done Modules 4–5: you don't see "a slow frame," you see "5.2's launch overhead" or "4.6's bandwidth wall," and the fix is the one the core already taught. The profiler names the symptom; your fundamentals name the disease.</p>
+
+<h3>The 10-minute frame triage runbook</h3>
+<p>When a frame is slow, run this fixed sequence (mirroring 5.10's kernel triage) rather than poking around:</p>
+<pre><code>1. CAPTURE a representative frame in RenderDoc (a real slow scene, warmed — M1 L7).
+2. SORT passes by GPU time. The top 1–2 passes are your entire problem (5.9 max-lane).
+3. For the top pass, ask "which pathology?":
+   · overdraw high (quad-overdraw view)? → sort front-to-back / depth pre-pass (C2)
+   · thousands of tiny draws? → batch / instance (5.2)
+   · huge framebuffer bandwidth? → pack/shrink G-buffer, compress (4.6)
+   · GPU idle (gaps in the timeline)? → sync bubble, fix barriers/overlap (5.9/C8)
+4. CONFIRM the "why" with counters (Nsight/RGP): occupancy, bandwidth, stalls.
+5. FIX ONE thing, RE-CAPTURE, measure the delta (M1 L7 predict/measure). Repeat.
+never skip to step 5. The top pass is rarely the one you'd have guessed.</code></pre>
+<p>The runbook exists because the human instinct — "the lighting is probably slow, let me optimize the lighting shader" — is wrong most of the time, and a day spent optimizing a pass that wasn't the bottleneck is a day wasted (C2's over-tessellation scenario, exactly). Capture, sort, identify the pathology, confirm with counters, fix one thing, re-measure. It's 5.10's discipline, and it's what separates engineers who make frames faster from engineers who make random changes and hope.</p>
+
+<h2>Worked example</h2>
+<div class="card">
+<p><strong>Task:</strong> A frame runs at 40 fps (25 ms) and must hit 60 (16.6 ms). The team assumes the new PBR lighting is too expensive. Walk the runbook. Prediction first: is "optimize the lighting shader" the right first move, and what does the capture likely reveal?</p>
+<pre><code>the assumption: "PBR lighting is heavy, optimize the fragment shader."
+runbook:
+  1. capture a representative slow frame in RenderDoc.
+  2. sort passes by GPU time → the transparency pass is 11 ms; lighting is 4 ms.
+     (the assumption was WRONG — lighting isn't the bottleneck.)
+  3. transparency pass pathology: quad-overdraw view shows massive overdraw —
+     stacked transparent particles shading each pixel 8–10× (C2, and transparency
+     can't use early-Z). This is the disease, not the lighting.
+  4. counters (Nsight): the pass is fragment-bound with huge overdraw, low SM idle.
+  5. fix ONE thing: reduce particle overdraw (fewer layers, lower-res particle buffer,
+     or a cheaper particle shader). Re-capture: transparency 4 ms, frame now 18 ms.
+     One more pass (a tiny-draws batch fix elsewhere) → 16 ms, 60 fps. Done.
+Prediction: optimizing lighting would have wasted a day for ~1 ms. Result: confirmed —
+  the bottleneck was transparency overdraw, invisible without a capture.</code></pre>
+<p><strong>What to internalize:</strong> the team's assumption was not stupid — PBR lighting <em>is</em> expensive, and it's a reasonable guess — but it was a guess, and the capture proved it wrong: the actual bottleneck was transparency overdraw, a pass nobody suspected. Optimizing the lighting shader would have spent a day to shave ~1 ms off a 4 ms pass while the 11 ms transparency pass sat untouched — the frame would still miss 60 fps and the team would conclude "the GPU isn't fast enough." The runbook prevents exactly this: capture and sort <em>first</em>, and the top pass is your whole problem regardless of what you assumed. Then identify the pathology (overdraw), confirm with counters (fragment-bound), fix one thing, and re-measure the delta. Every step maps to a core lesson — overdraw is C2, the max-lane focus is 5.9, the predict-then-measure loop is M1 L7 — because frame profiling is just 5.10's kernel-profiling doctrine applied to a pipeline of passes. The single most valuable graphics-performance habit is refusing to optimize before you've captured, because the pass eating your budget is rarely the one you'd have guessed, and every hour spent on a non-bottleneck is an hour the real bottleneck keeps your frame slow.</p>
+</div>
+
+<h2>Key points</h2>
+<ul class="keypoints">
+<li>Frame profiling is 5.10's ritual refitted: RenderDoc captures WHERE (which pass/draw, overdraw), Nsight/RGP measure WHY (occupancy, bandwidth, stalls) — capture-first, counters-second, never guess.</li>
+<li>A frame is a 16.6 ms budget and 5.9's max-lane law applies: the slowest pass sets the frame time, so the top 1–2 passes by GPU time are your entire problem — find them before optimizing.</li>
+<li>The four pathologies are core lessons: overdraw (C2 fragment waste), tiny draws (5.2 launch confetti), fat G-buffers (4.6 bandwidth), sync bubbles (5.9 overlap failure) — the profiler names the symptom, your fundamentals name the disease.</li>
+<li>The 10-minute runbook: capture → sort passes by time → identify the top pass's pathology → confirm with counters → fix ONE thing → re-capture and measure the delta (M1 L7). Never skip to fixing.</li>
+<li>The bottleneck is rarely the pass you'd guess — the worked example's team assumed lighting (4 ms) but the culprit was transparency overdraw (11 ms); a capture prevents wasting a day on a non-bottleneck.</li>
+<li>RenderDoc is open-source and cross-vendor (Vulkan/GL/D3D); Nsight Graphics (NVIDIA) and Radeon GPU Profiler (AMD) add hardware counters — the same two-tier where/why toolset as nsys/ncu.</li>
+</ul>
+
+<h2>Quiz</h2>
+<div class="quiz">
+  <div class="q">1. A frame misses 60 fps and the team's most experienced graphics programmer is confident the new volumetric fog is the cause and starts optimizing its shader. What should happen first, and why is the confidence a liability?</div>
+  <button class="opt">Nothing — an experienced programmer's intuition about the bottleneck is reliable</button>
+  <button class="opt" data-c="1">Capture the frame in RenderDoc and sort passes by GPU time FIRST, before touching any shader. Even experienced intuition is a guess, and the bottleneck is frequently a pass nobody suspects (overdraw in transparency, a pile of tiny draws, a bandwidth-blown G-buffer). Optimizing the fog before confirming it's the top pass risks spending days shaving milliseconds off a pass that isn't the bottleneck while the real culprit sits untouched — the frame still misses 60 and the effort is wasted. The confidence is a liability precisely because it skips the capture that would validate or refute it (5.10's doctrine: measure, don't guess)</button>
+  <button class="opt">Trust the profiler's automatic recommendation and apply it blindly</button>
+  <button class="opt">Lower the resolution until it hits 60, then ship</button>
+  <div class="expl">Option 1 elevates intuition over measurement, the exact error 5.10 forbids — even experts guess wrong about bottlenecks often. Option 4 masks the problem without understanding it. Option 3 outsources judgment. The correct answer is the runbook's first rule: capture and sort before optimizing, because the top pass is your whole problem and it's rarely the one you'd guess. Experience makes better guesses, but a guess about a bottleneck is still a guess, and the capture is cheap insurance against a wasted day — the worked example (lighting assumed, transparency actual) is this quiz made concrete. Confidence that skips measurement is how senior engineers waste days too.</div>
+</div>
+<div class="quiz">
+  <div class="q">2. A RenderDoc capture shows the top pass is the deferred lighting pass, and Nsight reports it's memory-bandwidth-bound, not compute-bound. What core lesson does this map to, and what's the fix family?</div>
+  <button class="opt">Optimize the lighting math to use fewer instructions</button>
+  <button class="opt" data-c="1">Bandwidth-bound means the pass is moving too many bytes, not doing too much math — it's 4.6's bus economics. For deferred lighting that usually means a fat G-buffer (too many/too-large render targets read per pixel). The fix family is reducing bytes: pack the G-buffer (fewer, smaller targets — e.g. encode normals in 2 channels, pack material params), use lower-precision formats where acceptable, or compress. Optimizing the lighting MATH (option 1) won't help a bandwidth-bound pass — you'd be speeding up the thing that isn't the bottleneck (the roofline verdict, 4.7)</button>
+  <button class="opt">Add more lights; the pass is underutilized</button>
+  <button class="opt">Increase the render resolution to use the bandwidth better</button>
+  <div class="expl">Option 1 is the classic mistake: optimizing compute on a bandwidth-bound pass, which the roofline (4.7) says won't help — you're not compute-bound. Options 3/4 make it worse. The correct answer reads the counter correctly: bandwidth-bound = 4.6's bytes-crossing-the-bus problem, and for deferred rendering the usual cause is a fat G-buffer, so the fix is fewer/smaller/packed targets. This is why you confirm with counters (step 4): "the pass is slow" isn't actionable, but "the pass is bandwidth-bound" points directly at the byte budget, not the math. The counter tells you which knob to turn.</div>
+</div>
+
+<h2>Exercises</h2>
+<details><summary>Exercise 1 — Capture a frame of any renderer (yours, or a sample) in RenderDoc, sort the passes/draws by GPU time, and write down the top three passes and their share of the frame. For the top pass, use the overdraw and pipeline-state views to guess its pathology (overdraw / tiny draws / bandwidth / sync). Then state what counter you'd check in Nsight/RGP to confirm.</summary><div class="body">
+<p>Expected: the top 1–2 passes usually account for the majority of the frame (5.9's max-lane law — a few passes dominate). Your pathology guess from RenderDoc (e.g., "the transparency pass has huge quad-overdraw" or "the shadow pass issues thousands of tiny draws") is a hypothesis; the confirming counter names the resource — overdraw → fragment-bound + high shaded-fragment count; tiny draws → low GPU utilization with high draw-call count; bandwidth → high memory throughput near the roofline; sync bubble → idle gaps in the timeline. Deliverable: the top-three passes with their frame share, a pathology hypothesis for the top one, and the counter you'd check. This is the runbook's first four steps done for real — the capture-and-sort habit is the entire skill.</p>
+</div></details>
+<details><summary>Exercise 2 — Practice the predict-then-measure loop (M1 L7) on a frame: form a hypothesis about the bottleneck BEFORE capturing, then capture and check whether you were right. Record how often your pre-capture guess matches the actual top pass. Reflect on what that says about optimizing by intuition.</summary><div class="body">
+<p>Expected: across several frames/scenes, your pre-capture guesses will match the actual top pass some of the time but miss often — which is the lesson. Even a good mental model of a renderer mispredicts bottlenecks frequently, because the top pass depends on the specific scene (a scene heavy with transparency vs one heavy with geometry has different bottlenecks), and small pathologies (a stray depth copy, an unbatched UI) hide in passes you don't think about. Deliverable: a short log of guess-vs-actual across a few captures and a one-paragraph reflection. The takeaway is 5.10's core: intuition generates hypotheses, but the capture decides — and the gap between your guesses and the captures is exactly why "measure, don't guess" is a rule, not a suggestion.</p>
+</div></details>
+
+<hr>
+<h1>Go deeper — the frame-profiling craft</h1>
+
+<h2>1. The two-tier toolset (where vs why)</h2>
+<pre><code>tier           tool                        answers            5.10 analogue
+─────────────  ──────────────────────────  ─────────────────  ─────────────
+WHERE (capture) RenderDoc (open, all vendors) which pass/draw,  nsys (timeline)
+                                             overdraw, state
+WHY (counters)  Nsight Graphics (NVIDIA)     occupancy, BW,     ncu (per-kernel
+                Radeon GPU Profiler (AMD)     stalls, per-pass   counters)
+workflow: RenderDoc to localize the guilty pass (WHERE), then the vendor profiler
+to read counters on THAT pass (WHY). Same two-tier discipline as 5.10's nsys→ncu.
+RenderDoc also does pixel history (why is THIS pixel this color — every draw that
+touched it) and shader debugging — invaluable for correctness, not just perf.</code></pre>
+
+<h2>2. The pathology → core-lesson → fix table</h2>
+<pre><code>pathology        the core lesson it is      the fix family
+───────────────  ─────────────────────────  ──────────────────────────────────
+overdraw         C2 fragment waste          front-to-back sort, depth pre-pass
+tiny draws       5.2 launch confetti        batch, instance, indirect draws
+fat G-buffer     4.6 bandwidth economics    pack/shrink targets, compress, lower precision
+sync bubbles     5.9 overlap failure        fix over-broad barriers (C8), overlap passes
+CPU-bound        C3 (OpenGL's wall)         multithread command recording (Vulkan)
+shader-bound     5.6 occupancy / 5.7 access profile the shader like a kernel (it is one)
+the profiler shows the symptom; you supply the diagnosis from Modules 4–5. This table
+IS why the core came before the tracks: a graphics bottleneck is a core lesson you know.</code></pre>
+
+<h2>3. The runbook, and why order matters</h2>
+<pre><code>capture (warm, representative — M1 L7) → sort passes by time → identify top pass's
+pathology (RenderDoc views) → confirm the "why" (counters) → fix ONE thing →
+re-capture, measure the delta (predict/measure, M1 L7) → repeat.
+why the order is load-bearing:
+  · capture BEFORE optimizing → you fix the real bottleneck, not the assumed one (quiz 1)
+  · ONE fix at a time → you know which change helped (change two, learn nothing)
+  · re-capture after each → the bottleneck MOVES (fix pass A, pass B is now the top —
+    5.9's max-lane law: the slowest pass changes as you optimize)
+this is 5.10's stopping-rule discipline: optimize the top pass, re-measure, and STOP
+when the frame hits budget (16.6 ms) — not when you run out of ideas.</code></pre>
+
+<h2>Gotchas</h2>
+<div class="gotcha"><strong>Optimizing before capturing.</strong> The bottleneck is rarely the pass you'd guess (the worked example: lighting assumed, transparency actual). Capture and sort first — a day on a non-bottleneck is a day wasted (quiz 1).</div>
+<div class="gotcha"><strong>Optimizing math on a bandwidth-bound pass.</strong> The roofline (4.7) says compute optimizations don't help a bandwidth-bound pass. Check the counter (compute vs bandwidth-bound) and turn the right knob — bytes, not instructions (quiz 2).</div>
+<div class="gotcha"><strong>Changing two things at once.</strong> Fix one thing and re-capture, or you can't attribute the delta (M1 L7). Multiple simultaneous changes teach you nothing about which helped.</div>
+<div class="gotcha"><strong>Capturing an unrepresentative frame.</strong> A menu screen or a warmed-up idle frame isn't the slow scene. Capture a real, representative, warmed frame (M1 L7's warmup) — profiling the wrong frame optimizes the wrong thing.</div>
+<div class="gotcha"><strong>Forgetting the bottleneck moves.</strong> After fixing the top pass, the NEW top pass is a different problem (5.9's max-lane law). Re-capture after each fix; don't keep optimizing the old top pass past the point it stopped being the bottleneck.</div>
+<div class="gotcha"><strong>Not knowing when to stop.</strong> Optimize until the frame hits budget (16.6 ms for 60 fps), then stop — further optimization of a pass that's no longer the bottleneck is wasted effort (5.10's stopping rule). Budget is the target, not "as fast as possible."</div>
+
+<h2>Scenario — the day saved by a capture</h2>
+<p>A game misses its 60 fps target on the recommended hardware, sitting at 40 fps, and the graphics team gathers to decide what to cut. The senior-most engineer, who wrote the renderer's lighting, is certain the new physically based lighting is the culprit — it's the most sophisticated new code, and it feels expensive — and proposes spending the week simplifying the BRDF and cutting light counts. A quieter engineer asks for ten minutes and a RenderDoc capture first. The capture, sorted by pass time, is unambiguous: the lighting pass is 4 ms, comfortably in budget, while a transparency pass — stacked particle effects for smoke and fire — is 11 ms, nearly half the frame, drowning in overdraw because transparent surfaces can't use early-Z and the particles were authored with many overlapping layers (C2). The team was about to spend a week optimizing a pass that would have saved maybe a millisecond, while the actual 11 ms bottleneck sat unexamined. The fix, guided by the capture and confirmed by counters (the transparency pass is fragment-bound with extreme overdraw), is to reduce particle layer count and render the particles at half resolution — cutting the pass to 4 ms — and a second capture reveals a new, smaller bottleneck (a batch of tiny UI draws, 5.2's confetti) fixed by instancing. Two targeted fixes, two re-captures, and the frame hits 16 ms — 60 fps — with the lighting never touched. The morals are 5.10's, transposed to frames. First, the bottleneck is rarely the pass you'd guess, and seniority makes better guesses but not correct ones — the discipline of capturing before optimizing is what separates a week saved from a week wasted, and it applies to the most experienced engineer in the room as much as the newest. Second, every pathology the capture reveals is a core lesson you already know — overdraw is C2, tiny draws are 5.2, and had the bottleneck been bandwidth it would have been 4.6 — so the profiler names the symptom and your fundamentals name the disease and its cure. The engineers who capture first, fix one thing, and re-measure ship 60 fps; the ones who optimize their own most-clever code on faith ship 40 and blame the hardware.</p>
+
+<h2>Practice</h2>
+<details><summary>1. What does RenderDoc tell you versus Nsight Graphics / Radeon GPU Profiler, and which 5.10 tools are they analogous to?</summary><div class="body">RenderDoc is a frame-capture debugger that tells you WHERE: it captures a single frame and lets you scrub every draw call, inspect state and inputs, see the framebuffer after each pass, visualize overdraw, and do pixel history — localizing which pass/draw costs the time (and debugging correctness). It's analogous to nsys (the timeline profiler) from 5.10. Nsight Graphics (NVIDIA) and Radeon GPU Profiler (AMD) tell you WHY: they read hardware counters on a pass — occupancy, memory bandwidth, warp/wavefront stall reasons — to diagnose the cause of the slowness. They're analogous to ncu (the per-kernel counter profiler). The workflow is the two-tier 5.10 ritual: RenderDoc to localize (where), then the vendor profiler for counters (why).</div></details>
+<details><summary>2. State the 10-minute frame-triage runbook in order, and explain why capturing must come before optimizing.</summary><div class="body">(1) Capture a representative, warmed slow frame in RenderDoc. (2) Sort passes by GPU time — the top 1–2 are your whole problem. (3) Identify the top pass's pathology using RenderDoc's views (overdraw / tiny draws / bandwidth / sync bubble). (4) Confirm the "why" with hardware counters (Nsight/RGP): compute-bound, bandwidth-bound, occupancy, stalls. (5) Fix ONE thing, re-capture, and measure the delta; repeat until the frame hits budget. Capturing must come first because the bottleneck is frequently a pass you wouldn't guess (the worked example: lighting assumed, transparency actual), so optimizing before capturing risks spending days on a non-bottleneck while the real culprit is untouched — the frame stays slow and the effort is wasted. Measure, then optimize; never the reverse.</div></details>
+<details><summary>3. Match each pathology to its core lesson and fix: overdraw, tiny draws, fat G-buffer, sync bubbles.</summary><div class="body">Overdraw (shading a pixel multiple times) = C2's fragment waste; fix by sorting opaque geometry front-to-back or a depth pre-pass so occluded fragments are rejected before shading. Tiny draws (thousands of small draw calls) = 5.2's launch confetti (per-call overhead dominating); fix by batching and instancing (or indirect draws). Fat G-buffer (too many/large deferred render targets) = 4.6's bandwidth economics (too many bytes per pixel); fix by packing/shrinking the targets, lower-precision formats, or compression. Sync bubbles (the GPU idle waiting on a barrier/dependency) = 5.9's overlap failure (the pipeline draining); fix by narrowing over-broad barriers (C8) or overlapping independent passes. Each is a Module 4/5 lesson in a frame's clothes — the profiler shows the symptom, the core supplies the diagnosis.</div></details>
+<details><summary>4. Nsight reports a pass is bandwidth-bound. Why won't optimizing the shader's arithmetic help, and what should you do instead?</summary><div class="body">Because bandwidth-bound means the pass's bottleneck is moving bytes (memory traffic), not doing math — it's sitting on the memory ceiling of the roofline (4.7), not the compute ceiling. Speeding up the arithmetic reduces work the pass isn't waiting on, so it doesn't move the wall-clock (the roofline verdict: optimizing the non-binding resource doesn't help). Instead, reduce the BYTES: for a deferred pass that usually means a fat G-buffer, so pack the targets (encode normals in two channels, pack material parameters), use smaller/lower-precision formats where acceptable, compress textures (C5), or reduce the resolution of intermediate buffers. The counter tells you which resource is binding, and you turn that knob — bytes for bandwidth-bound, instructions/occupancy for compute-bound (5.6/5.7). Reading the counter correctly is what prevents optimizing the wrong thing.</div></details>
+<details><summary>5. Why must you fix one thing at a time and re-capture after each fix?</summary><div class="body">Two reasons. Attribution: if you change several things at once and the frame gets faster (or slower), you can't tell which change caused it, so you learn nothing and may keep a harmful change alongside a helpful one — the predict-then-measure discipline (M1 L7) requires isolating the variable. Moving bottleneck: after you fix the top pass, a DIFFERENT pass becomes the new bottleneck (5.9's max-lane law — the slowest pass sets the frame time, and once it's no longer slowest, another pass is), so continuing to optimize the old top pass past that point is wasted effort. Re-capturing after each fix both confirms the delta from that specific change and reveals the new top pass to target next. It's an iterative loop — fix one, re-measure, re-target — not a batch of guesses applied at once.</div></details>
+<details><summary>6. When do you STOP optimizing a frame, and why is "as fast as possible" the wrong goal?</summary><div class="body">You stop when the frame hits its budget — 16.6 ms for 60 fps (or 33 ms for 30, or whatever the target is). "As fast as possible" is the wrong goal because performance work has diminishing returns and opportunity cost: once the frame is in budget, further optimization of a pass that's no longer the bottleneck buys no player-visible benefit (the framerate is already capped at the target), while that engineering time could go to features, content, or fixing a different platform's budget. It's 5.10's stopping rule: optimize the top pass until the frame meets the target, then stop and spend effort where it matters. Chasing "fastest" also risks over-optimizing at the cost of code clarity or flexibility for a speed nobody sees. The budget is the goal; hitting it and stopping is the discipline.</div></details>
+<details><summary>7. The interview closer: "A frame is running slow. Walk me through how you'd make it faster." Deliver the spoken skeleton.</summary><div class="body">"I would not optimize anything until I've captured the frame, because the bottleneck is usually not the pass you'd guess. So step one: capture a representative, warmed-up slow frame in RenderDoc — the real problem scene, not a menu. Step two: sort the passes by GPU time. A frame is a budget and the slowest pass sets the frame time, so the top one or two passes are my entire problem, and everything else is a distraction. Step three: for the top pass, identify the pathology using RenderDoc's views — is it overdraw, which is fragment waste I fix with front-to-back sorting or a depth pre-pass; thousands of tiny draws, which is launch overhead I fix by batching and instancing; a fat G-buffer, which is bandwidth I fix by packing and shrinking targets; or a sync bubble, GPU idle on a barrier, which I fix by narrowing the barrier or overlapping passes. Step four: confirm the why with hardware counters in Nsight or Radeon GPU Profiler — for example, if it's bandwidth-bound I know not to waste time on the shader math. Step five: fix exactly one thing, re-capture, and measure the delta, because if I change two things I can't attribute the result, and because the bottleneck moves — once I fix the top pass, a different pass becomes the top, so I re-target. I repeat until the frame hits its budget, 16.6 milliseconds for 60 fps, and then I stop, because optimizing past the budget buys nothing the player sees. The through-line is that this is the same measure-don't-guess discipline as profiling a compute kernel, and every pathology I find is a core lesson — overdraw, launch overhead, bandwidth, overlap — so the profiler names the symptom and my fundamentals name the cure.' Leading with 'capture before I optimize' and naming the moving-bottleneck loop is the answer that shows I've actually optimized frames, not just read about it."</div></details>
+
+<div class="pager">
+  <a href="lesson-09.html">← Ray Tracing</a>
+  <a href="lesson-11.html">Next: Capstone — A Small Renderer →</a>
+</div>
+<div class="footer">GPU Mastery · Track C · Lesson 10 — works offline · progress saved in your browser</div>
+</div>
+<script src="../assets/diagramsC.js"></script>
+<script src="../assets/app.js"></script>
+</body>
+</html>

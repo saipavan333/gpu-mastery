@@ -1,0 +1,277 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>2.7 Files, Modules & Environments — GPU Mastery</title>
+<link rel="stylesheet" href="../assets/style.css">
+</head>
+<body data-lesson="m2l7">
+<nav><div class="inner">
+  <a class="logo" href="../index.html">GPU<span>Mastery</span></a>
+  <a class="item" href="../index.html">Home</a>
+  <a class="item on" href="../curriculum.html">Curriculum</a>
+  <a class="item" href="../labs.html">Labs</a>
+  <a class="item" href="../setup.html">Lab setup</a>
+  <a class="item" href="../prompt.html">Generator prompt</a>
+</div></nav>
+<div class="wrap">
+
+<div class="lesson-top">
+  <div><span class="badge">Module 2 · Lesson 7</span><span class="badge dim">≈ 3 h</span></div>
+  <button id="donebtn" class="donebtn">Mark lesson complete</button>
+</div>
+<h1>Files, Modules & Environments — from scripts to software</h1>
+<p class="lead">"Readily deployable" starts here. Data must survive the process ending (files), code must be reusable across projects (modules), and your setup must be reproducible on machines you've never touched (environments). This is the lesson that turns a folder of experiments into a repo a stranger can run.</p>
+
+<h2>Concept</h2>
+
+<h3>Files are bytes; everything else is interpretation</h3>
+<div class="diagram" data-diagram="m2l7-bytes" data-caption="Disk holds bytes. Text is bytes + a codec; images are bytes + a format. M1 L1, industrialized."></div>
+<pre><code>with open("results.txt", "w", encoding="utf-8") as f:   # 'with' GUARANTEES close,
+    f.write(f"median_ms={med:.3f}\n")                    # even if an exception flies (2.6)
+
+with open("results.txt", encoding="utf-8") as f:
+    for line in f:                                       # files iterate by line
+        key, val = line.strip().split("=")
+
+raw = open("photo.png", "rb").read()                     # 'rb': BYTES, no decoding
+raw[:4]            # b'\x89PNG' — the magic number, hex literacy paying rent (M1 L1)</code></pre>
+<p>Two rules with no exceptions: <strong>always <code>with</code></strong> (the context manager closes on every exit path — the <code>finally</code> from 2.6, packaged), and <strong>always name the encoding</strong> for text (<code>utf-8</code>); the platform default differs across OSes, which is a classic works-here-breaks-there. Text mode decodes bytes→str; <code>"rb"/"wb"</code> gives raw bytes — images, arrays, anything non-text.</p>
+
+<h3>Structured files: CSV and JSON in ten lines</h3>
+<pre><code>import json, csv
+from pathlib import Path
+
+runs = [{"name": "naive", "ms": 300.0}, {"name": "tiled", "ms": 12.5}]     # 2.4's shape
+Path("runs.json").write_text(json.dumps(runs, indent=2), encoding="utf-8")
+back = json.loads(Path("runs.json").read_text(encoding="utf-8"))
+assert back == runs                                       # round-trip: dicts/lists survive
+
+with open("runs.csv", "w", newline="", encoding="utf-8") as f:
+    w = csv.DictWriter(f, fieldnames=["name", "ms"]); w.writeheader(); w.writerows(runs)</code></pre>
+<p>JSON maps exactly onto 2.4's dicts/lists/strings/numbers — the universal config-and-results format (with one M1 L8 footnote: it round-trips fp64 exactly in modern Python, but writing floats for humans usually means choosing a precision — decide, don't default). CSV is the spreadsheet handshake; note <code>newline=""</code> (a Windows quirk the csv docs mandate). Big arrays don't belong in either: <code>np.save("x.npy", x)</code> / <code>np.load</code> stores dtype+shape+bytes losslessly and 10× smaller than text — the right container for 2.8's images and every tensor after.</p>
+
+<h3>Paths: pathlib, not string surgery</h3>
+<pre><code>from pathlib import Path
+DATA = Path(__file__).parent / "data"          # anchored to THIS FILE, not the cwd
+DATA.mkdir(exist_ok=True)
+for p in sorted(DATA.glob("*.npy")):            # iterate matching files, sorted = deterministic
+    print(p.name, p.stat().st_size)</code></pre>
+<p>The <code>/</code> operator joins paths portably (Windows vs Unix separators — never hand-concatenate with <code>+ "/"</code>). The <code>__file__</code>-anchored pattern kills the #1 script bug: "works when run from the repo root, dies from anywhere else" — relative paths silently depend on the current working directory; anchored paths don't.</p>
+
+<h3>Modules: import runs your file (once)</h3>
+<div class="diagram" data-diagram="m2l7-import" data-caption="The search order — and why a file named numpy.py ruins your afternoon."></div>
+<pre><code># gpu_math.py is 2.3's toolbox. Any file beside it can now:
+import gpu_math                        # runs gpu_math.py top-to-bottom ONCE, caches it
+gpu_math.ceil_div(10, 4)
+from gpu_math import ceil_div, clamp   # pull names into this namespace
+from bench import stats as bench_stats # rename on import — collision control</code></pre>
+<p>Importing <em>executes</em> the module's top level (defs run, creating the functions; loose code runs too — which is why 2.3 quarantined the self-checks behind <code>if __name__ == "__main__":</code> — that variable is <code>"__main__"</code> only in the file you launched, and the module's own name when imported). Subsequent imports hit the <code>sys.modules</code> cache: module-level state initializes once per process. A folder of modules becomes a <em>package</em> when you organize it as <code>toolbox/gpu_math.py</code> etc. and import <code>toolbox.gpu_math</code> — same machinery, one more level.</p>
+
+<h3>Environments: the deployability ritual</h3>
+<div class="diagram" data-diagram="m2l7-venv" data-caption="One shared Python = version fights. One venv per project = peace, pinned."></div>
+<pre><code>python -m venv .venv                    # create (once per project)
+source .venv/bin/activate               # Linux/macOS/WSL   (Windows: .venv\Scripts\activate)
+pip install numpy==2.5.0 pytest         # installs INTO the venv only
+pip freeze > requirements.txt           # pin the exact world
+# — teammate / future-you / CI: —
+python -m venv .venv && source .venv/bin/activate
+pip install -r requirements.txt         # identical environment, minutes, any machine</code></pre>
+<p>This six-line ritual is what "readily deployable" means at Python scale — and it's a rehearsal: the CUDA stack multiplies the version matrix (driver × toolkit × framework — <a href="../setup.html">Lab setup</a>'s warnings), and containers (Track A10/B7) are this same idea with the OS included. Colab note: it's one shared env — <code>!pip install</code> applies per-session; pin versions in the first cell of any notebook you care about.</p>
+
+<h2>Worked example</h2>
+<div class="card">
+<p><strong>Task:</strong> Assemble everything Module 2 has built into a deployable repo — the structure you'll clone-and-extend for every project through Module 5 and beyond.</p>
+<pre><code>gpu-toolbox/
+├── README.md               # what, why, how to run — three honest paragraphs
+├── requirements.txt        # numpy==2.5.0, pytest==8.*  (pinned)
+├── .gitignore              # .venv/, __pycache__/, *.npy results
+├── toolbox/
+│   ├── __init__.py         # marks the package; can re-export: from .gpu_math import ceil_div
+│   ├── gpu_math.py         # 2.3: ceil_div, clamp, lerp, is_pow2
+│   ├── vec.py              # 2.6: normalize (with its contract)
+│   └── bench.py            # 2.3/2.4: time_call, bench, stats, report
+├── tests/
+│   ├── test_gpu_math.py    # 2.6's suites, verbatim
+│   ├── test_vec.py
+│   └── test_bench.py
+└── scripts/
+    └── run_bench.py        # the only file with print()s and __main__</code></pre>
+<pre><code># scripts/run_bench.py — the EDGE (2.3: effects live here, logic lives in toolbox/)
+import argparse, json
+from pathlib import Path
+from toolbox.bench import bench, stats
+
+p = argparse.ArgumentParser(description="benchmark a toolbox function")
+p.add_argument("--n", type=int, default=1_000_000)
+p.add_argument("--repeats", type=int, default=20)
+p.add_argument("--out", type=Path, default=Path("results/run.json"))
+args = p.parse_args()
+
+times = bench(some_workload, args.n, repeats=args.repeats)
+med, iqr, outliers = stats(times)
+args.out.parent.mkdir(exist_ok=True)
+args.out.write_text(json.dumps({"n": args.n, "median_ms": med*1000,
+                                "iqr_ms": iqr*1000, "outliers": outliers,
+                                "repeats": args.repeats}, indent=2))
+print(f"median {med*1000:.2f} ms → {args.out}")</code></pre>
+<p><strong>The acceptance test</strong> — run the stranger's sequence in a fresh terminal: clone, venv, <code>pip install -r requirements.txt</code>, <code>pytest -q</code> (all green), <code>python scripts/run_bench.py --n 500000</code> (JSON appears). If any step needs a verbal footnote from you, the repo isn't done. <strong>Decisions made:</strong> logic/tests/scripts separated (purity architecture from 2.3, now as directories); results are JSON with the <em>parameters embedded</em> (a result that doesn't record its inputs is a rumor — M1 L7); argparse over input() because flags are scriptable and self-documenting (<code>--help</code> is free). This structure is 90% of what "engineering hygiene" means in interviews.</p>
+</div>
+
+<h2>Key points</h2>
+<ul class="keypoints">
+<li>Files are bytes: text needs an explicit encoding (utf-8, always stated), binary needs "rb"/"wb"; <code>with open(...)</code> guarantees the close on every exit path.</li>
+<li>JSON ↔ dicts/lists for configs and results; CSV for spreadsheet handshakes; <code>np.save/.npy</code> for arrays — text formats are for humans, not tensors.</li>
+<li>pathlib with <code>Path(__file__).parent</code> anchoring kills cwd-dependent breakage; <code>/</code> joins portably.</li>
+<li>import executes the module once and caches it; <code>if __name__ == "__main__":</code> separates "run as program" from "used as library."</li>
+<li>Never name files after modules you import (numpy.py, random.py) — your folder wins the search and the error messages are surreal.</li>
+<li>venv + pinned requirements.txt is the reproducibility ritual: same inputs, same environment, same results — on any machine, including future-you's.</li>
+</ul>
+
+<h2>Quiz</h2>
+<div class="quiz">
+  <div class="q">1. You create <code>test.py</code> to try things, later <code>random.py</code> for dice utilities. Suddenly <code>import numpy</code> fails deep inside with <code>AttributeError: module 'random' has no attribute 'gauss'</code>. What happened?</div>
+  <button class="opt">NumPy is broken — reinstall it</button>
+  <button class="opt" data-c="1">Your random.py shadows the standard library's random module — NumPy imported YOUR file (script's folder wins the search) and found no gauss in it</button>
+  <button class="opt">random needs pip installing first</button>
+  <button class="opt">test.py conflicts with pytest</button>
+  <div class="expl">Import search checks the script's directory before the standard library — your random.py wins, and every consumer of random (NumPy included) gets your dice file. Diagnose with print(random.__file__); fix by renaming (and deleting the stale random.pyc/__pycache__). The error appearing INSIDE numpy is the cruel part: the traceback points at innocent code. Never name files after anything importable — test.py included (pytest tries to collect it).</div>
+</div>
+<div class="quiz">
+  <div class="q">2. A script works launched as <code>python scripts/run.py</code> from the repo root but crashes with FileNotFoundError from anywhere else. The code says <code>open("data/config.json")</code>. Diagnosis and durable fix?</div>
+  <button class="opt">The file was deleted between runs</button>
+  <button class="opt">Permissions differ by directory</button>
+  <button class="opt" data-c="1">The relative path resolves against the CURRENT WORKING DIRECTORY, not the script's location — anchor it: <code>Path(__file__).parent.parent / "data" / "config.json"</code></button>
+  <button class="opt">JSON files require absolute paths</button>
+  <div class="expl">"data/config.json" means "data under wherever the USER happens to be standing" — launch-location roulette. __file__ anchoring makes the path a property of the code's location, invariant to cwd. (For installed packages the modern tool is importlib.resources, same principle.) This single fix ends a whole genus of "works for me" tickets.</div>
+</div>
+
+<h2>Exercises</h2>
+<details><summary>Exercise 1 — Results with provenance: extend run_bench.py to embed reproducibility metadata in its JSON — timestamp, python version, numpy version, the random seed, and the exact command line. Write the reader too: a script that loads any results file and prints a one-line summary. (M1 L7's "log the seed," industrialized.)</summary><div class="body">
+<pre><code>import sys, json, time, platform
+import numpy as np
+
+record = {
+    "median_ms": med * 1000, "iqr_ms": iqr * 1000, "outliers": outliers,
+    "params": {"n": args.n, "repeats": args.repeats, "seed": args.seed},
+    "provenance": {
+        "timestamp": time.strftime("%Y-%m-%dT%H:%M:%S"),
+        "python": platform.python_version(),          # e.g. "3.13.5"
+        "numpy": np.__version__,                      # e.g. "2.5.0"
+        "argv": sys.argv,                             # the exact invocation
+    },
+}
+args.out.write_text(json.dumps(record, indent=2), encoding="utf-8")
+
+# reader.py
+from pathlib import Path
+import json, sys
+for p in sorted(Path(sys.argv[1]).glob("*.json")):
+    r = json.loads(p.read_text(encoding="utf-8"))
+    print(f"{p.name}: {r['median_ms']:.2f} ms  (n={r['params']['n']}, "
+          f"numpy {r['provenance']['numpy']})")</code></pre>
+<p>Why this matters beyond tidiness: two months from now a result will look wrong, and the question will be "what EXACTLY produced this number?" Provenance-in-the-artifact answers it without archaeology. GPU benchmark reports add driver/toolkit/GPU fields to this same dict in 5.10 — the pattern is set here.</p>
+</div></details>
+<details><summary>Exercise 2 — Binary vs text, measured: save the same 1M-float32 array as (a) .npy, (b) JSON (list), (c) CSV. Compare file sizes and load times, verify lossless round-trips where they exist, and explain the one that ISN'T lossless by default.</summary><div class="body">
+<pre><code>import numpy as np, json, time
+from pathlib import Path
+x = np.random.default_rng(0).random(1_000_000).astype(np.float32)
+
+np.save("x.npy", x)                                          # (a) 4,000,128 bytes ≈ 3.8 MiB
+Path("x.json").write_text(json.dumps(x.tolist()))            # (b) ~19 MB of decimal text
+np.savetxt("x.csv", x)                                       # (c) ~25 MB, one number per line
+
+assert np.array_equal(np.load("x.npy"), x)                   # (a) EXACT: dtype+shape+bytes
+back_j = np.array(json.loads(Path("x.json").read_text()), dtype=np.float32)
+assert np.array_equal(back_j, x)                             # (b) exact — but only because
+                                                             # tolist() promoted to fp64 text
+back_c = np.loadtxt("x.csv", dtype=np.float32)               # (c) savetxt default %.18e is
+assert np.array_equal(back_c, x)                             # lossless here too — BUT trim
+                                                             # the format (%.6f) and bits die silently</code></pre>
+<p>Sizes: ~4 MB vs ~19 MB vs ~25 MB; load times follow (binary ~10-50×). The precision story (M1 L8): binary stores THE bits; text stores a decimal RENDERING — exact only if you print enough digits (fp32 needs 9 significant; fp64 needs 17). Any human "tidying" of the format string (%.6f for readability) silently truncates ulps, and downstream equality tests start failing mysteriously. Moral: arrays travel as .npy/.npz (or parquet/safetensors later); text is for eyeballs.</p>
+</div></details>
+
+<hr>
+<h1>Go deeper — the complete guide</h1>
+<p>Context managers as a concept, import mechanics you can debug with, package layout conventions, config-file patterns, environment troubleshooting, and the .gitignore of numerical repos.</p>
+
+<h2>1. with, generalized: acquisition has a shape</h2>
+<pre><code>with open(p) as f, open(q, "w", encoding="utf-8") as g:   # multiple resources, one line
+    g.write(transform(f.read()))
+# temporary directory that cleans itself:
+import tempfile
+with tempfile.TemporaryDirectory() as tmp:
+    work(Path(tmp))
+# timing block (write your own context manager in one line):
+from contextlib import contextmanager
+@contextmanager
+def timer(label):
+    t0 = time.perf_counter()
+    yield
+    print(f"{label}: {(time.perf_counter()-t0)*1000:.1f} ms")
+with timer("matmul"): C = A @ B</code></pre>
+<p>The pattern — acquire, use, release <em>no matter what</em> — is everywhere resources are: files, locks, temp dirs, database connections, and (Module 5) GPU memory and CUDA streams (<code>torch.cuda.stream(...)</code> is a context manager for exactly these reasons). Learn the shape once here; recognize it forever.</p>
+
+<h2>2. Import mechanics for debugging</h2>
+<pre><code>import numpy, sys
+numpy.__file__                    # WHERE it loaded from — the shadowing detector
+sys.path                          # the search list, in order
+sys.modules["numpy"]              # the cache; a second import is a dict lookup
+import importlib; importlib.reload(mymod)    # dev-loop tool (state may straddle! restart > reload)</code></pre>
+<p>Three facts that resolve 95% of import mysteries: <strong>(1)</strong> <code>module.__file__</code> never lies about shadowing (quiz 1's one-line diagnosis); <strong>(2)</strong> the cache means module top-level runs ONCE — mutate a module-level list from two importers and they share it (2.4's aliasing at architecture scale — also the legitimate trick behind 2.4's kernel REGISTRY); <strong>(3)</strong> circular imports (a imports b imports a) crash with partially-initialized modules — the fix is structural (move shared things to a third module), not syntactic. And __pycache__/: compiled bytecode cache (deep-dive 2.1 §1's compilation, persisted) — ignorable, deletable, gitignored.</p>
+
+<h2>3. Package layout: the two conventions that matter</h2>
+<pre><code>toolbox/__init__.py               # empty is fine; or curate the public API:
+from .gpu_math import ceil_div, clamp        # users: from toolbox import ceil_div
+from .vec import normalize
+__all__ = ["ceil_div", "clamp", "normalize"]</code></pre>
+<p>Relative imports (<code>from .gpu_math import ...</code>) bind the package internally; the curated <code>__init__</code> gives users a stable front door while you refactor rooms behind it. When a project graduates to pip-installability, a small <code>pyproject.toml</code> makes <code>pip install -e .</code> work (editable install — imports resolve to your working copy; the standard dev setup so <code>tests/</code> can import <code>toolbox</code> from anywhere without path hacks). That's deliberately all the packaging you need until you ship a library.</p>
+
+<h2>4. Configs: from constants to files</h2>
+<pre><code># evolution of configuration, choose the simplest that suffices:
+BLOCK = 256                                   # 1. module constant (2.3) — fine for course code
+p.add_argument("--block", type=int, default=256)   # 2. CLI flag — per-run variation
+cfg = json.loads(Path("config.json").read_text())  # 3. config file — many related knobs
+BLOCK = int(os.environ.get("BLOCK", "256"))        # 4. env var — deployment-time override (Track A10)</code></pre>
+<p>Rules that survive contact with teams: configs are DATA (JSON/TOML), never executable Python (importing a config runs it — a security and sanity hazard); validate at load (2.6's boundary: unknown keys are errors, not typos-in-waiting — the match-statement dtype table from 2.2 §6 is the same ethic); and echo the effective config into your results file (Exercise 1's provenance). The precedence stack — defaults &lt; file &lt; env &lt; CLI — is how every serious tool (pytest included) resolves its settings; build it once in 2.8's project.</p>
+
+<h2>5. Environment troubleshooting: the four-question protocol</h2>
+<table>
+<tr><th>Question</th><th>Command</th><th>Classic finding</th></tr>
+<tr><td>WHICH python is running?</td><td><code>import sys; sys.executable</code></td><td>system python, not the venv (forgot to activate; IDE picked wrong interpreter)</td></tr>
+<tr><td>WHERE did this module load from?</td><td><code>mod.__file__</code></td><td>shadowing; or an old global install winning over the venv</td></tr>
+<tr><td>WHAT versions are here?</td><td><code>pip list</code> / <code>np.__version__</code></td><td>requirements drift; the "works on my machine" delta</td></tr>
+<tr><td>WHO owns this pip?</td><td><code>pip --version</code> (shows its python)</td><td>pip installed into a different interpreter than the one running</td></tr>
+</table>
+<p>Ninety percent of "Python is broken" is a mismatch among these four answers. The same protocol, with <code>nvcc --version</code> / <code>nvidia-smi</code> / <code>torch.version.cuda</code> added, debugs the CUDA stack in Module 5 — quadruply worth internalizing now.</p>
+
+<h2>6. Gotchas</h2>
+<div class="gotcha"><strong>Encoding roulette.</strong> <code>open(p)</code> without encoding uses a platform default (Windows ≠ Linux); mojibake or UnicodeDecodeError appears only on the OTHER machine — always <code>encoding="utf-8"</code>, both directions.</div>
+<div class="gotcha"><strong>Work at import time.</strong> A module that loads a 2 GB file at top level taxes every importer (and pytest collection!). Top level: defs and constants; work: inside functions or under <code>__main__</code> (2.3's gotcha, now with architectural teeth).</div>
+<div class="gotcha"><strong>Shadowing stdlib/site-packages.</strong> numpy.py, random.py, test.py, email.py — and their lingering __pycache__ even after rename. Quiz 1's protocol: __file__, then rename, then delete the cache.</div>
+<div class="gotcha"><strong>cwd-relative paths.</strong> FileNotFoundError that depends on where you stood when launching (quiz 2). Anchor to __file__; accept user paths as CLI args (Path type in argparse).</div>
+<div class="gotcha"><strong>pip without a venv.</strong> Installs mutate the shared system state — project B breaks project A retroactively (the diagram's fight). If <code>pip install</code> ever suggests --user or sudo, stop: you're not in a venv.</div>
+<div class="gotcha"><strong>Pinning nothing (or everything, forever).</strong> No requirements.txt → the future breaks you silently. Pinned but never refreshed → security/bug fixes never arrive. Ritual: pin exact for apps, refresh deliberately (a monthly "bump + run tests" chore — tests from 2.6 make it safe).</div>
+
+<h2>Scenario — "works on my machine," dissected in four acts</h2>
+<p>Your study partner shares their Module-2 project zip an hour before your group's show-and-tell; on your laptop it detonates in four distinct ways — a perfect specimen collection. <strong>Act 1:</strong> <code>ModuleNotFoundError: numpy</code> — no requirements.txt; they installed globally months ago and forgot NumPy was a dependency at all. venv + pip freeze on their side, install -r on yours: two minutes. <strong>Act 2:</strong> <code>FileNotFoundError: data/samples.csv</code> — cwd-relative paths; you launched from ~/Downloads. The __file__ anchor fix, plus moving the data path to a --data flag (configs are per-machine facts, not code). <strong>Act 3:</strong> a UnicodeDecodeError in the results reader — their Windows wrote the log in cp1252, your Linux read it as utf-8; encoding="utf-8" added at BOTH ends, and the corrupted legacy file regenerated. <strong>Act 4</strong>, the connoisseur's bug: everything imports, but plots are garbage — their folder contains <code>statistics.py</code> (their own stats helpers), shadowing the stdlib module that one of their dependencies imports internally; <code>statistics.__file__</code> convicts it in one line (quiz 1's move). Forty minutes, four fixes, and the repo now passes the stranger test — because you ARE the stranger. The meta-lesson your group writes down: every one of these four failures was <em>invisible on the author's machine by construction</em>; only structure (pins, anchors, encodings, naming) defends against a class of bug you cannot see yourself.</p>
+
+<h2>Practice</h2>
+<details><summary>1. Predict each: (a) <code>open("x.npy").read()</code> on a NumPy file; (b) <code>json.dumps({"a": np.float32(2.5)})</code>; (c) <code>Path("a") / "b" / ".." / "c"</code>; (d) importing a module whose top level prints "hello", twice.</summary><div class="body">(a) UnicodeDecodeError (or mojibake) — binary file opened in text mode; needs "rb". (b) TypeError: not JSON serializable — NumPy scalars aren't Python floats; convert with float() or .item() (a real daily annoyance in results-writing). (c) Path("a/b/../c") — pathlib does NOT simplify ".." until .resolve(). (d) "hello" prints ONCE — the second import is a sys.modules cache hit (§2). Each is a five-minute mystery you've now pre-solved.</div></details>
+<details><summary>2. Write save_run(results: dict, dir: Path) that writes JSON to a timestamped filename (run_20260703_141530.json), creating the directory if needed, refusing (loudly) to overwrite, and returning the path. Name the 2.6 contract you're honoring with the refusal.</summary><div class="body"><code>def save_run(results, dir): dir.mkdir(parents=True, exist_ok=True); p = dir / time.strftime("run_%Y%m%d_%H%M%S.json");</code> then <code>if p.exists(): raise FileExistsError(p)</code> (two runs in the same second — rare, real, and data-destroying; add a counter suffix if you'd rather resolve than refuse — but DECIDE) then <code>p.write_text(json.dumps(results, indent=2), encoding="utf-8"); return p</code>. The contract: chosen failure modes — silent overwrite is the file-world's loosen-until-green. Timestamped, append-only results directories are how experiment tracking works before you adopt a tool for it.</div></details>
+<details><summary>3. Your tests pass with <code>pytest</code> from the repo root but "ModuleNotFoundError: toolbox" from inside tests/. Explain via the import-search diagram, and give the two clean fixes (one command-line habit, one repo-level).</summary><div class="body">From the root, "" (the cwd) is effectively on the path and toolbox/ is visible; from tests/, the search starts THERE — no toolbox in sight. Fixes: (1) habit — always run pytest from the root (where pytest.ini/pyproject.toml lives; pytest's rootdir detection rewards this); (2) structural — make the package pip-installable and <code>pip install -e .</code> into the venv, so toolbox resolves from site-packages regardless of cwd (§3). The second is why "editable installs" exist; path-hacking sys.path.append in test files is the fix that isn't.</div></details>
+<details><summary>4. Design the .gitignore for gpu-toolbox and justify each line class. What must NEVER be committed, and which "results" exception might a course repo legitimately make?</summary><div class="body"><code>.venv/</code> (rebuildable from requirements — commit the recipe, not the cake), <code>__pycache__/, *.pyc</code> (machine-generated bytecode), <code>results/, *.npy, *.png</code> outputs (large, regenerable, bloat every clone forever — git history is append-only), <code>.pytest_cache/, .ipynb_checkpoints/</code>, secrets/creds if any ever exist (NEVER committed — history remembers even after deletion). Legitimate exception: small golden fixtures for tests (the 4×4 pooling reference from 2.5 P7) — tiny, load-bearing, versioned ON PURPOSE in tests/fixtures/. The principle: commit sources and contracts, ignore derivatives and environments.</div></details>
+<details><summary>5. A teammate "fixes" a flaky loader by wrapping it in try/except and returning [] on any exception (2.6's laundering, file edition). Their defense: "missing files shouldn't crash the pipeline." Write the version that honors both truths, with FileNotFoundError policy, decode-error policy, and logging.</summary><div class="body"><code>def load_runs(p: Path) -> list:</code> — <code>if not p.exists(): log.warning("no results at %s — first run?", p); return []</code> (missing = a legitimate, NAMED state, handled narrowly); then <code>try: return json.loads(p.read_text(encoding="utf-8"))</code> <code>except (json.JSONDecodeError, UnicodeDecodeError): log.exception("corrupt results file %s — refusing to guess", p); raise</code> — corruption is NOT emptiness; silently returning [] would quietly discard real data and let a broken writer keep breaking. Policy per failure mode, narrow catches, evidence preserved: 2.6's constitution applied to I/O. The one-line summary for reviews: "absence is a state; corruption is an error."</div></details>
+<details><summary>6. Environments forensics: pip says "Requirement already satisfied: numpy" but <code>import numpy</code> fails. Using §5's four questions, list the two most likely worlds and the one-liner that distinguishes them.</summary><div class="body">World A: pip belongs to a DIFFERENT interpreter than the one running your script (system pip vs venv python, or python3 vs an IDE's bundled one) — distinguish: <code>pip --version</code> vs <code>python -c "import sys; print(sys.executable)"</code>; if the pythons differ, case closed (fix: always <code>python -m pip install ...</code> — pip bound to THAT python by construction). World B: shadowing — a numpy.py/__pycache__ in the folder intercepts (fails with AttributeError more often than ImportError; <code>python -c "import numpy; print(numpy.__file__)"</code> convicts). The habit that prevents World A forever: python -m pip, never bare pip.</div></details>
+<details><summary>7. Design: the data layout for 2.8's image project — inputs (a few PNGs), golden outputs (expected results for tests), generated results, and configs. Specify directories, formats, what's committed, path-anchoring, and the config precedence — citing the sections that decide each.</summary><div class="body"><code>project/ ├ images/ (committed: 2-3 small PNGs — sources) ├ tests/fixtures/ (committed: tiny golden .npy outputs + the 4×4 hand-computed pooling case — P4's exception, §"binary vs text" says .npy for exactness) ├ results/ (gitignored — derivatives, P4) ├ config.json (committed defaults: blur radius, output dir) └ toolbox/ + scripts/pipeline.py</code> as in the worked example. Paths: images and fixtures anchored via Path(__file__) (§ pathlib); results dir from config, overridable by --out (CLI beats file beats defaults — §4's precedence). Formats: intermediate arrays .npy (lossless, M1 L8-safe for golden comparisons); final visual outputs .png for humans. Provenance JSON per run (Ex.1) — parameters + versions embedded. Every choice here is a section of this lesson; 2.8 just inherits the decisions and builds the fun part.</div></details>
+
+<div class="pager">
+  <a href="lesson-06.html">← Errors, debugging & testing</a>
+  <a href="lesson-08.html">Next: Capstone — image processing with NumPy →</a>
+</div>
+<div class="footer">GPU Mastery · Module 2 · Lesson 7 — works offline · progress saved in your browser</div>
+</div>
+<script src="../assets/diagrams2.js"></script>
+<script src="../assets/app.js"></script>
+</body>
+</html>

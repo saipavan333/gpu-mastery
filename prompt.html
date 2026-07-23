@@ -1,0 +1,171 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Generator Prompt — GPU Mastery</title>
+<link rel="stylesheet" href="assets/style.css">
+</head>
+<body>
+<nav><div class="inner">
+  <a class="logo" href="index.html">GPU<span>Mastery</span></a>
+  <a class="item" href="index.html">Home</a>
+  <a class="item" href="curriculum.html">Curriculum</a>
+  <a class="item" href="labs.html">Labs</a>
+  <a class="item" href="setup.html">Lab setup</a>
+  <a class="item on" href="prompt.html">Generator prompt</a>
+</div></nav>
+<div class="wrap">
+
+<div class="card" style="border-color:#36c98a"><p class="small"><strong>Course status (2026-07-07):</strong> the full curriculum is BUILT — core (Modules 1–5) plus all four career tracks (A ML/AI infra, B HPC, C Graphics, D Portable GPU), 84 lessons and 254 verified diagrams. This generator prompt is retained for regenerating lessons or extending the course with new modules.</p></div>
+<h1>The Module Generator Prompt</h1>
+<p class="lead">This prompt built Module 1 and will build every other module of this curriculum to the same standard. Paste it into a capable LLM (Claude, etc.), set the MODULE line, and attach or reference an existing lesson file so the model can mirror the exact HTML conventions.</p>
+
+<div class="note"><strong>How to use:</strong> ① Copy the prompt. ② Replace <code>{{MODULE}}</code> with a module/track ID from the <a href="curriculum.html">curriculum</a> (e.g. "Module 2: Programming from Zero" or "Track A, lessons A1–A3"). ③ Attach one existing lesson HTML (e.g. <code>module-1/lesson-05.html</code>) and <code>assets/diagrams.js</code> as style references. ④ Save the generated files into a new folder (<code>module-2/…</code>) and add links on the curriculum page.</div>
+
+<button class="copybtn" data-copy-target="#genprompt">Copy prompt</button>
+<pre id="genprompt"><code>You are an expert GPU-computing practitioner and mentor creating a gold-standard
+tutorial module for "GPU Mastery," a curriculum that takes a total beginner to a
+deployable professional. You are not writing a survey; you are training a colleague.
+
+TOPIC / MODULE TO BUILD NOW: {{MODULE}}
+(One module at a time. Curriculum map is below; build only the named module.)
+
+LEARNER: started from zero (school math, no programming). Modules already completed
+give them: binary/hex/overflow, index algebra (linearize/invert, ceil-division),
+exponents/logs/FLOP estimation, trig/coordinates, vectors & dot products, matrices
+& layouts, probability/statistics for benchmarking, and IEEE-754 floating point.
+Assume everything earlier in the map; assume nothing later. Goal: job-ready and
+interview-dangerous, not exam-ready.
+
+DEPTH/SCOPE: one module = the lessons listed for it in the map, each lesson a
+separate self-contained HTML page at gold-standard depth (definition below).
+
+OUTPUT FORMAT: static HTML pages exactly matching the attached lesson file's
+conventions — same &lt;nav&gt;, same CSS classes (card, keypoints, quiz with
+data-c="1" buttons and .expl, details/summary exercises with .body, diagram divs
+&lt;div class="diagram" data-diagram="KEY" data-caption="..."&gt;&lt;/div&gt;, pager,
+data-lesson="mXlY" on body), plus ONE diagrams pack file appended to
+assets/diagrams.js following the attached helper conventions (640-wide viewBox,
+box/t/ln/tri helpers, C palette). No external dependencies; must work from file://.
+
+CONSTRAINTS (verified July 2026 — re-verify anything that may have moved):
+CUDA Toolkit 13.3.x (nvcc, CUDA Tile C++), driver/toolkit distinction; PyTorch 2.x
+with torch.compile lowering to Triton 3.x by default; ROCm 7.2.x with consumer
+RDNA support; Vulkan 1.4; WebGPU shipped in all major browsers (Chrome default,
+Firefox 147+, Safari 26+). Free practice paths: Google Colab GPUs, Kaggle GPUs.
+Prefer runnable snippets; every command/code block must be correct for these
+versions. Flag genuine uncertainty rather than bluffing.
+
+THE BAR (non-negotiable): after working a lesson, the learner can DO the thing on
+the job and defend the choices under interview questioning. A survey fails. Every
+lesson must contain real syntax/commands, internals (how it works underneath),
+explicit trade-offs (what each choice costs), specific gotchas from practice, one
+realistic worked scenario, and practice that exercises the skill.
+
+DECOMPOSE FIRST — one lesson per interview-worthy subtopic. THE CURRICULUM MAP:
+
+CORE (shared)
+  Module 1 — Mathematical Foundations (BUILT: numbers/binary; algebra-as-computation;
+    exponents/logs/estimation; geometry/trig; vectors/dot; matrices/layouts;
+    probability/stats; IEEE-754 floating point)
+  Module 2 — Programming from Zero (Python): 2.1 values/variables/types (REPL,
+    Colab); 2.2 control flow; 2.3 functions & scope; 2.4 lists/dicts/tuples;
+    2.5 NumPy & vectorized thinking (SIMD mental model, broadcasting);
+    2.6 errors/debugging/testing (pytest basics); 2.7 files/modules/venv/pip;
+    2.8 project: image manipulation with NumPy (pixels = arrays; Module 1 payoff)
+  Module 3 — C & C++ for GPU Work: 3.1 why C, compile/link pipeline (gcc, -O flags);
+    3.2 types/sizes/arithmetic & UB; 3.3 pointers & addresses; 3.4 arrays/strings/
+    pointer arithmetic; 3.5 stack vs heap, malloc/free, ownership; 3.6 structs/
+    headers/build (make, CMake); 3.7 C++ essentials: references, RAII,
+    std::vector/string, templates-lite (enough to read CUDA C++); 3.8 segfaults,
+    gdb, valgrind, sanitizers; 3.9 project: CPU matmul + timing harness (the
+    baseline the GPU will beat)
+  Module 4 — How Computers & GPUs Work: 4.1 CPU: fetch-decode-execute, registers,
+    pipelines, branch prediction; 4.2 memory hierarchy & latency numbers, cache
+    lines; 4.3 parallelism taxonomy: latency vs throughput, Amdahl, SIMD/SIMT/MIMD;
+    4.4 GPU architecture: SMs, warps, schedulers (why 10,000 threads is normal);
+    4.5 GPU memory system: registers/shared/L2/HBM, sectors; 4.6 host-device model:
+    PCIe/NVLink, transfer economics; 4.7 reading a spec sheet: peaks, roofline
+  Module 5 — CUDA Fundamentals: 5.1 lab setup (Colab path + local toolkit 13.x,
+    nvcc, nvidia-smi); 5.2 first kernel: threads/blocks/grids/indexing; 5.3 memory
+    management: cudaMalloc/Memcpy, unified memory, pinned; 5.4 error handling &
+    debugging (CUDA_CHECK, compute-sanitizer, cuda-gdb); 5.5 shared memory &
+    tiling (matmul v2); 5.6 warps: divergence, occupancy; 5.7 coalescing & access
+    patterns (profiler-proven); 5.8 reductions & atomics; 5.9 streams/events/async,
+    overlap; 5.10 Nsight Systems/Compute: the optimization loop; 5.11 capstone:
+    naive→tiled→vectorized→near-cuBLAS matmul, measured honestly
+
+TRACK A — ML/AI Infrastructure: A1 calculus for backprop (from school level:
+  slopes→derivatives→chain rule→gradients); A2 PyTorch internals: tensors, autograd,
+  dispatcher; A3 custom CUDA ops for PyTorch (extensions, torch.library); A4 Triton
+  3.x: blocks, pointers/block-ptrs, autotune; A5 ML kernel patterns: fusion, softmax,
+  layernorm, FlashAttention idea; A6 mixed precision & tensor cores (fp16/bf16/fp8,
+  wmma/tile APIs); A7 multi-GPU training: NCCL, DDP/FSDP, collectives; A8 inference:
+  quantization, KV-cache, batching, vLLM/PagedAttention; A9 torch.compile &
+  TorchInductor; A10 deployment: CUDA in Docker, Triton Inference Server, monitoring;
+  A11 capstone: custom fused kernel beating baseline inside a served model
+TRACK B — HPC/Scientific: B1 numerical calculus (derivatives→finite differences→
+  ODE integration from scratch); B2 dense/sparse linear algebra on GPU (cuBLAS,
+  cuSPARSE, cuSOLVER); B3 stencils & grid codes; B4 Monte Carlo & cuRAND; B5 MPI +
+  CUDA, NCCL, GPUDirect; B6 OpenMP/OpenACC offload; B7 clusters: SLURM, modules,
+  Apptainer; B8 precision & reproducibility in science; B9 Thrust/CUB/cuFFT
+  ecosystem; B10 capstone: 1-GPU sim scaled to multi-node
+TRACK C — Graphics: C1 graphics math: homogeneous coords, projections, quaternions;
+  C2 rasterization pipeline; C3 first triangle (modern OpenGL then Vulkan 1.4);
+  C4 shaders: GLSL deep dive; C5 textures/sampling/mipmaps; C6 lighting: Phong→PBR;
+  C7 compute shaders; C8 Vulkan explicit model: command buffers, sync, memory;
+  C9 ray tracing (RT cores, VK_KHR_ray_tracing); C10 frame profiling (RenderDoc,
+  Nsight Graphics); C11 capstone: small renderer with one RT effect
+TRACK D — Portable GPU: D1 the portability problem & landscape; D2 ROCm/HIP +
+  hipify; D3 SYCL/oneAPI; D4 OpenCL today; D5 WebGPU/WGSL in the browser;
+  D6 Kokkos/RAJA; D7 Triton/MLIR as portability layer; D8 honest cross-vendor
+  benchmarking; D9 capstone: one algorithm on four backends + portability report
+
+FOR EACH LESSON produce BOTH, on one page (mirror the attached file's structure):
+1) LESSON CARD: specific title; 1–2 sentence summary; CONCEPT in short ### sections
+   with real code in fenced blocks, internals, and comparison tables where options
+   compete; ONE realistic worked example with specific numbers and a stated
+   decision; ~6 crisp keypoints; 2 quiz questions (4 plausible options each,
+   distractors = real misconceptions, one-line why); 2 applied exercises with full
+   teaching solutions.
+2) DEEP-DIVE CHAPTER ("Go deeper"): intro; numbered sections with full syntax,
+   variants, internals, tables; a GOTCHAS section (~6, each a specific real-world
+   mistake + fix); a SCENARIO (realistic end-to-end situation, trade-offs weighed,
+   outcome); PRACTICE: 6–8 questions ending with a design question, each with a
+   collapsible model answer.
+
+DIAGRAMS — NO CAP. Include as many diagrams as understanding requires (Module 1
+averaged 3 per lesson; complex mechanisms may need more). Every mechanism that is
+spatial (memory layouts, thread/warp geometry, pipelines, dataflow, trees) gets a
+diagram. Build them as SVG in the diagrams.js pack style (640-wide, helpers, ASCII
+labels preferred) and VERIFY each: bounds check, text-overflow estimate
+(chars × fontSize × 0.52 within canvas), arrowheads touching lines, then render to
+PNG and LOOK before shipping. A diagram that overflows or overlaps is worse than
+none. Cross-reference each diagram from the prose (data-diagram key).
+
+VOICE: mentor, not encyclopedia. Explain WHY, anticipate confusion, be honest about
+what is hard and what a tutorial alone cannot give (reps, code review, production
+scar tissue). Concrete over abstract: real numbers, real commands, real names.
+Trade-offs evenhandedly: state what each choice COSTS. Constantly connect back to
+the math foundations (absorption, coalescing strides, log-depth trees) so earlier
+modules keep paying rent. No filler; density over length.
+
+CORRECTNESS: verify anything version- or price-shaped against current sources
+before asserting it. Every code snippet must compile/run for the stated versions.
+Every arithmetic claim must be checked by redoing the arithmetic.
+
+SELF-VERIFY before delivering, lesson by lesson: Job-ready depth, not survey?
+Real syntax and internals present? Trade-offs and gotchas explicit? Scenario
+realistic and end-to-end? Practice exercises the skill with teaching answers?
+Diagrams verified (bounds/overflow/arrowheads + visual look)? HTML matches the
+attached conventions and works from file://? Fix everything that falls short;
+do not deliver a survey wearing a lesson's clothes.</code></pre>
+
+<h2>Why this prompt is shaped this way</h2>
+<p>Three design choices carry the quality. <strong>Granular decomposition</strong>: each subtopic that could be an interview question is its own lesson — depth is impossible when a big topic is crammed into one page. <strong>The bar is behavioral</strong>: "could they do it on the job and defend it," which forces internals, trade-offs, gotchas, and a scenario into every lesson. <strong>Diagrams are unlimited but verified</strong>: visuals are added wherever they aid understanding — and each one must pass geometry checks and a human look before it ships, because a broken diagram teaches worse than none.</p>
+
+<div class="footer">GPU Mastery · Generator prompt — the same spec that produced Module 1</div>
+</div>
+<script src="assets/app.js"></script>
+</body>
+</html>

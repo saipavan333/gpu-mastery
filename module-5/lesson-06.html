@@ -1,0 +1,200 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>5.6 Warps, Divergence & Occupancy — GPU Mastery</title>
+<link rel="stylesheet" href="../assets/style.css">
+</head>
+<body data-lesson="m5l6">
+<nav><div class="inner">
+  <a class="logo" href="../index.html">GPU<span>Mastery</span></a>
+  <a class="item" href="../index.html">Home</a>
+  <a class="item on" href="../curriculum.html">Curriculum</a>
+  <a class="item" href="../labs.html">Labs</a>
+  <a class="item" href="../setup.html">Lab setup</a>
+  <a class="item" href="../prompt.html">Generator prompt</a>
+</div></nav>
+<div class="wrap">
+
+<div class="lesson-top">
+  <div><span class="badge">Module 5 · Lesson 6</span><span class="badge dim">≈ 3.5 h</span></div>
+  <button id="donebtn" class="donebtn">Mark lesson complete</button>
+</div>
+<h1>Warps, Divergence & Occupancy — what the hardware does with your ifs</h1>
+<p class="lead">4.4 told you threads execute 32 at a time on one instruction stream. Today that fact starts editing your code: every <code>if</code> gets priced, every register counted, and "how many warps are resident" becomes a number you compute before the profiler confirms it.</p>
+
+<h2>Concept</h2>
+
+<h3>Your block, sliced into warps</h3>
+<pre><code>int tid  = threadIdx.y * blockDim.x + threadIdx.x;  // linearized: x runs FASTEST
+int warp = tid / 32;         // which instruction stream you share
+int lane = tid % 32;         // your seat in it (0..31)
+// block (256,1,1) = warps 0..7.  block (16,16) → warp 3 = tids 96..127
+//   = rows ty=6,7 — TWO adjacent rows, because x is the fast axis (M2 L5's
+//   row-major order, deciding hardware groupings now, not just cache lines).</code></pre>
+
+<h3>Divergence: the if that runs both sides</h3>
+<div class="diagram" data-diagram="m5l6-divergence" data-caption="One instruction stream, 32 threads: a split warp executes path A with half masked, then path B with the other half masked. Time = A + B, not max(A,B)."></div>
+<pre><code>if (x[i] &gt; 0) y[i] = slow_f(x[i]);      // 300 cycles
+else          y[i] = cheap_g(x[i]);     //  20 cycles
+// warp uniform (all 32 same way):  300 OR 20   — divergence-free
+// warp split:                      300 PLUS 20 — both paths, masked halves
+// The units that matter: DIVERGENCE IS INTRA-WARP ONLY. Warp 0 taking the
+// if while warp 1 takes the else costs NOTHING — different warps are
+// different instruction streams (4.4). Price branches at warp granularity.</code></pre>
+<p>Now re-price patterns you already ship: the 5.2 guard <code>if (i &lt; n)</code> splits only the single tail warp — nanoseconds, ship it forever. <code>if (i % 2)</code> splits EVERY warp 16/16 — full both-paths tax on the whole grid. <code>if ((i/32) % 2)</code> alternates WHOLE warps — zero divergence, same "half the threads" semantics. And <code>if (x[i] &gt; 0)</code> is priced by your DATA's arrangement — which is about to explain a famous mystery.</p>
+
+<h3>Occupancy: the dial, formalized</h3>
+<div class="diagram" data-diagram="m5l6-dial" data-caption="Resident warps per SM = min over three budgets (threads, registers, shared). The smallest fraction is the dial; the others are slack."></div>
+<pre><code>occupancy = resident_warps / max_warps        (per SM; T4 max = 32 warps)
+resident blocks = min( maxThreadsPerSM / blockThreads,      ← threads budget
+                       regsPerSM / (regsPerThread × blockThreads),   ← registers
+                       sharedPerSM / sharedPerBlock,         ← 5.5's tile bill
+                       maxBlocksPerSM )                      ← arch cap (16 on T4)
+// regsPerThread comes from:  nvcc --ptxas-options=-v  →  "Used 37 registers"
+// WHY you care (the only reason): resident warps are 4.4's latency-hiding
+// pool. Below the floor the SM idles between memory replies; above "enough",
+// extra warps add NOTHING. Occupancy is a MEANS, not a score.</code></pre>
+
+<h3>Registers, and the spill cliff</h3>
+<div class="diagram" data-diagram="m5l6-spill" data-caption="Squeeze registers below what the kernel needs and the compiler spills to 'local' memory — which is HBM wearing a friendly name. The dial goes up; the kernel gets slower."></div>
+<pre><code>__launch_bounds__(256, 4)   // promise: 256-thread blocks, want 4 resident/SM
+                            // → compiler must fit regs ≤ 65536/(4×256) = 64
+nvcc -maxrregcount=32 …     // the blunt global version of the same squeeze
+// ptxas -v after squeezing:  "Used 32 registers, 288 bytes spill stores"
+//                                                 ^^^^^^^^^^^^^^^^^ the cliff
+// "Local" memory = thread-private GLOBAL memory (4.5's hierarchy — the name
+// lies about the latency). Spilled loops pay HBM prices for what were
+// register accesses. Occupancy up, speed sometimes DOWN: measure (M1 L7).</code></pre>
+
+<h2>Worked example</h2>
+<div class="card">
+<p><strong>Task:</strong> The occupancy audit ritual, run on 5.5's tiled matmul (T4, block 256, 2 KB shared) — then on a register-tiled variant that will anchor 5.11. Numbers first, profiler later.</p>
+<pre><code>$ nvcc -arch=sm_75 --ptxas-options=-v mm_tiled.cu
+    ptxas info: Used 37 registers, 2048 bytes smem
+audit (T4: 1024 thr/SM, 65536 regs/SM, 64 KB smem/SM, 16 blocks/SM):
+  threads:   1024 / 256                 = 4 blocks   ← MIN (binding)
+  registers: 65536 / (37 × 256) = 6.9   = 6 blocks
+  shared:    65536 B / 2048 B           = 32 blocks
+  arch cap:                               16 blocks
+  → 4 blocks × 8 warps = 32 warps = 100% theoretical occupancy. Dial: threads.
+
+$ nvcc -arch=sm_75 --ptxas-options=-v mm_regtile.cu     (each thread: 4×4 outputs)
+    ptxas info: Used 96 registers, 8192 bytes smem
+  threads: 4 | registers: 65536/(96×256) = 2.6 → 2 | shared: 8 | cap: 16
+  → 2 blocks = 16 warps = 50% occupancy. Dial: REGISTERS.
+Is 50% a problem? 4.4's question, quantified: this kernel issues 16 FMAs per
+8 shared loads — 4× the math-per-load of the plain tile (1 FMA per 2 loads).
+Its latency-hiding need is LOW: each warp runs long unbroken FMA bursts.
+Measured: regtile 2.4× FASTER despite half the occupancy. The dial serves
+latency hiding; latency hiding serves throughput; nothing serves the
+percentage itself.</code></pre>
+<p><strong>The ritual to keep:</strong> ptxas -v → four-line min() table → name the dial → ask "does THIS kernel need more warps?" (memory-bound: probably; register-reusing compute: often not) → only then touch __launch_bounds__. The table takes ninety seconds and replaces an afternoon of superstitious flag-twiddling. In 5.10 ncu's <em>achieved</em> occupancy joins the table (theoretical is a ceiling; tails and imbalance eat from it — M1 L7's measured-vs-modeled discipline).</p>
+</div>
+
+<h2>Key points</h2>
+<ul class="keypoints">
+<li>Divergence is intra-warp only: a split warp runs BOTH paths with masking (cost ≈ sum); different warps disagreeing costs nothing — price every branch at warp granularity.</li>
+<li>The tail guard splits one warp (free); i%2 splits all warps (full tax); (i/32)%2 splits none; data-dependent branches are priced by the data's ARRANGEMENT.</li>
+<li>Occupancy = resident warps / max, set by min(threads, registers, shared, cap) — compute the table from ptxas -v before touching any knob.</li>
+<li>Occupancy is a means (4.4's latency-hiding pool), not a score: memory-latency-bound kernels want more; register-reusing kernels can win at 50% or below (the worked example measured it).</li>
+<li>Register squeezing past the kernel's need spills to "local" = HBM in disguise: check ptxas for spill bytes after every __launch_bounds__/-maxrregcount change, then measure.</li>
+<li>Post-Volta warps have per-thread program counters: intra-warp communication uses _sync primitives (__syncwarp, __shfl_*_sync) — lockstep is a pricing model, not a synchronization guarantee (5.8 builds on this).</li>
+</ul>
+
+<h2>Quiz</h2>
+<div class="quiz">
+  <div class="q">1. A kernel applies slow_f to positive elements, cheap_g to negatives. On RANDOM data it runs 3.1× slower than on the SAME values SORTED (positives together). A teammate says "sorting improved cache locality". You saw this exact input-trick in 4.1 — with a different mechanism. Untangle both.</div>
+  <button class="opt">Teammate is right — it's caching</button>
+  <button class="opt" data-c="1">GPU mechanism: divergence, not caches. Random signs split nearly every warp → every warp pays slow_f PLUS cheap_g. Sorted signs make warps uniform (only the boundary warp splits) → each warp pays one path. Same elements, same total work per thread, ~sum-vs-max pricing per warp. 4.1's CPU version of this trick was the BRANCH PREDICTOR (mispredict flushes); the GPU has no predictor to appease — it has masks. Same experiment, two architectures, two mechanisms: know which story you're in</button>
+  <button class="opt">Sorting reduced the number of slow_f calls</button>
+  <button class="opt">Warp scheduler prioritizes sorted data</button>
+  <div class="expl">The element count per path is IDENTICAL either way — only the warp-level mixing changed (option 3 dies by arithmetic: count the calls). This pairing is a spectacular interview discriminator because the famous StackOverflow sorted-array question (4.1) primes everyone to say "branch prediction" — on a GPU that answer is wrong. Masks, not predictions. Cache effects exist but are second-order here; the 3.1× tracks the slow/cheap path ratio.</div>
+</div>
+<div class="quiz">
+  <div class="q">2. Kernel at 100% theoretical occupancy is HBM-bandwidth-bound at 85% of peak. An engineer spends a week of __launch_bounds__/tile-size tuning "to keep occupancy at 100%" while adding features, rejecting any variant that drops below. Judge the policy with 4.4 + 4.7.</div>
+  <button class="opt">Correct policy — never sacrifice occupancy</button>
+  <button class="opt" data-c="1">Wrong optimization target. The kernel is at 85% of the MEMORY roofline (4.7): its ceiling is bandwidth, and it's near it. Occupancy above "enough to keep the bus saturated" is pure slack — dropping to 75% or 50% costs nothing if the bus stays fed (Little's-law arithmetic, 4.6, decides how many warps 'enough' is). The week should have gone to TRAFFIC reduction (5.5's tiling, fusion, dtype width — the only levers that move a bandwidth ceiling). Policing a non-binding constraint is optimizing the speedometer</button>
+  <button class="opt">Right instinct, wrong tool — use -maxrregcount</button>
+  <button class="opt">100% occupancy means the kernel is optimal</button>
+  <div class="expl">The complete reasoning chain: identify the binding ceiling (roofline, 4.7) → ask what occupancy must deliver (enough in-flight requests to saturate it — 4.6's bytes-in-flight) → treat everything past that as trade-able slack (the worked example traded it for registers and won). "Occupancy = quality" is the most common intermediate-level CUDA superstition; this quiz is its vaccination.</div>
+</div>
+
+<h2>Exercises</h2>
+<details><summary>Exercise 1 — Reproduce quiz 1 on Colab: branchy kernel (expensive path: 40-iteration math loop; cheap: one multiply), run on random signs, sorted signs, and the warp-aligned pattern ((i/32)%2 chooses the path). Measure all three, compute the sum-vs-max ratio your timings imply, and write the two-mechanism paragraph (GPU masks here vs 4.1's CPU predictor) from memory.</summary><div class="body">
+<p>Expected shape: random ≈ sorted×(2.5–3.5×) when path costs are ~40:1 and signs are 50/50 (both paths per split warp; nearly every warp splits at random). Warp-aligned lands ≈ sorted (proof that ALIGNMENT, not uniformity of data, is what hardware charges for). Then the twist that cements it: rerun with the expensive path only 2× the cheap one — the random/sorted gap nearly vanishes. Divergence tax scales with path-cost ASYMMETRY, which is why elementwise ML kernels (mostly symmetric cheap ops) survive branches that would murder a ray tracer (Track C's daily war). File the ratio table in your machine-model repo.</p>
+</div></details>
+<details><summary>Exercise 2 — The audit + squeeze lab: run ptxas -v on YOUR tiled matmul, build the four-line min() table for your GPU, name the dial. Then force higher occupancy with __launch_bounds__ two steps harsher than natural, re-read ptxas (spill bytes?), and measure. Write the verdict line: what you paid, what you got, keep or revert.</summary><div class="body">
+<pre><code>typical T4 outcome for the 37-reg tiled kernel:
+  natural:              37 regs, 0 spills, 100% theor. occ  → baseline time
+  __launch_bounds__ squeezing regs to 32: often 0–small spills, occ already
+                        100% (threads-bound!) → time unchanged → REVERT (no-op knob:
+                        the dial was THREADS — squeezing registers moved nothing)
+  the regtile variant is where the knob is live: squeeze 96→64 regs
+                        → spills appear (ptxas says how many bytes) → occ 50%→75%
+                        → measured: SLOWER by 15–30% → revert, document</code></pre>
+<p>The meta-skill: you just ran a controlled experiment on a knob most engineers turn by folklore. The write-up format (dial named → knob turned → ptxas delta → time delta → keep/revert + why) is the exact format of a professional perf PR description — 5.10 makes it mandatory, 5.11 grades it. Bonus: rerun ptxas after ANY nvcc version change — register allocation shifts between releases, and yesterday's table silently expires (the audit is cheap; stale tables aren't).</p>
+</div></details>
+
+<hr>
+<h1>Go deeper — the scheduler's fine print</h1>
+
+<h2>1. Post-Volta reality: warps are not your sync primitive</h2>
+<pre><code>// PRE-Volta folklore (now a bug): "threads in a warp run in lockstep, so
+// intra-warp shared-memory reads need no barrier."  Volta+ gave each thread
+// its own program counter (independent thread scheduling) — diverged threads
+// can interleave in ways the folklore never priced.
+__syncwarp(mask);                  // the warp-scope barrier (cheap)
+__shfl_down_sync(mask, val, off);  // note the _sync suffix + mask on ALL
+__ballot_sync(mask, pred);         //   warp primitives since CUDA 9 — the
+                                   //   API forced the correctness in
+// Divergence is thus a PRICING model every day, and a SYNC model never.
+// 5.8's shuffles are built exclusively on the _sync forms.</code></pre>
+
+<h2>2. Branches the compiler already flattened</h2>
+<pre><code>y[i] = (x[i] &gt; 0) ? a*x[i] : b*x[i];   // compiles to SELECT (predication):
+                                        // both multiplies + a csel — NO branch,
+                                        // no divergence, 3 instructions flat
+// Short both-sides-cheap ifs get predicated automatically; "removing the
+// branch by hand" often changes nothing but readability. VERIFY before
+// heroics: nvcc -ptx (or 5.10's ncu source view) shows whether a real
+// branch survived — 3.6's Godbolt reflex, aimed at PTX/SASS now.</code></pre>
+
+<h2>3. The occupancy API (let the runtime do your table)</h2>
+<pre><code>int minGrid, best;
+cudaOccupancyMaxPotentialBlockSize(&amp;minGrid, &amp;best, kernel, 0, 0);
+// suggests a block size maximizing theoretical occupancy for THIS kernel on
+// THIS device — a fine STARTING point (and how libraries stay portable),
+// never the last word: it can't know your kernel is ILP-rich (the worked
+// example's regtile would be mis-served). Table first, API to cross-check.</code></pre>
+
+<h2>4. Gotchas</h2>
+<div class="gotcha"><strong>Theoretical vs achieved.</strong> The table gives a ceiling. Short grids (fewer blocks than SMs — 5.2's saturation rule), imbalanced work, and launch tails drag ACHIEVED occupancy down; ncu reports both, and the gap is its own diagnosis (5.10).</div>
+<div class="gotcha"><strong>Early return before a barrier.</strong> <code>if (i &gt;= n) return;</code> above a __syncthreads() is 5.5's deadlock gotcha wearing divergence clothes — the returned threads never arrive. Guard stores, not participation.</div>
+<div class="gotcha"><strong>Divergence panic on tail guards.</strong> Reviewers who flag <code>if (i &lt; n)</code> as "divergence!" are pricing at the wrong granularity — one warp, once, nanoseconds. Push back with arithmetic (this lesson IS the arithmetic).</div>
+<div class="gotcha"><strong>-maxrregcount as a global vitamin.</strong> It's per-COMPILATION-UNIT medicine with per-kernel side effects; __launch_bounds__ is the targeted tool. The scenario below is this gotcha with a body count.</div>
+<div class="gotcha"><strong>Register counts as constants.</strong> They shift with nvcc version, arch target, and neighboring code changes. The ptxas -v line belongs in your build log (CI greps it — a 30%-reg jump is a perf regression you catch at compile time, before any benchmark runs).</div>
+<div class="gotcha"><strong>Reading 50% occupancy as 50% speed.</strong> The mapping from occupancy to throughput is a STEP function that flattens at "enough" (4.4's pool). Halving occupancy above the knee costs 0%; below it, plenty. The knee's location is a per-kernel measurement, not a constant.</div>
+
+<h2>Scenario — the flag that optimized one kernel and taxed eleven</h2>
+<p>A perf-minded engineer reads a blog: "-maxrregcount=32 boosted our occupancy 2×". They add it to the project's global NVCCFLAGS. Their target kernel — small, latency-bound, register-light — indeed improves 12%. The PR ships with that benchmark attached. Over the next month, four "unrelated" regressions trickle in: the fused attention kernel (was 96 registers, deeply reg-tiled) now spills 1.2 KB per thread and runs 31% slower; two reduction kernels lose 8% each; a quantization kernel's inner loop gained a mysterious HBM traffic stream (ncu: "local memory" — the spill cliff, wearing 4.5's friendly name). Total fleet cost: far more than the 12% win. The fix, by whoever runs this course's ritual: delete the global flag, add <code>__launch_bounds__(128, 8)</code> to the ONE kernel that wanted squeezing, add the ptxas -v line to CI so register jumps page a human at compile time. The moral has three layers: knobs have blast radii (global flags are per-kernel medicine sprayed fleet-wide); every knob-turn needs its ptxas/measure pair (Ex.2's verdict line); and blogs report their kernel's knee, not yours (M1 L7's "your machine, your numbers" — now "your kernel, your dial").</p>
+
+<h2>Practice</h2>
+<details><summary>1. Block (32, 8): how many warps, and exactly which (ty, tx) pairs form warp 5? Then block (8, 32): same questions — and the layout-dependent conclusion that matters for 5.7.</summary><div class="body">(32,8): 256 threads, 8 warps; tid = ty·32+tx, warp 5 = tids 160..191 = ty=5 exactly (one full row — x-fastest linearization makes each 32-wide row one warp). (8,32): warp 5 = tids 160..191 = ty·8+tx → ty=20..23, all tx (FOUR rows stacked). Conclusion: blockDim.x = 32 aligns warps with x-rows — and since consecutive tx usually maps to consecutive memory (5.2's convention), (32,y) blocks make "one warp = one contiguous 128-byte run" natural — the shape 5.7 will insist on for coalescing. Block SHAPE is a memory-layout decision disguised as a launch detail.</div></details>
+<details><summary>2. Price these four guards for a 10-warp-per-block kernel (fractions of warps split): (a) i&lt;n tail; (b) i%2; (c) (i/32)%2; (d) tid==0 does a block-level finalize. Which one is "divergent" by the textbook yet FREE by the clock, and why?</summary><div class="body">(a) ≤1 warp per GRID (the last one) — free. (b) 10/10 warps split 16/16 — full tax. (c) 0 split (whole warps choose) — free. (d) warp 0 splits 1/31... but the else side is EMPTY: masked threads idle for the finalize's duration, no second path to execute — cost = the finalize itself, which existed anyway. (d) is the textbook-divergent-but-clock-free case: divergence taxes you BOTH PATHS; a one-sided if has one path. The single-thread finalize's real cost is serialization (31 lanes idle), which is why 5.8 replaces it with warp-collective finishes.</div></details>
+<details><summary>3. Kernel: 48 regs/thread, block 384, 12 KB shared/block. Fill the T4 table (1024 thr, 65536 regs, 64 KB smem, 16 blocks), name the dial, and state the cheapest single change that adds one more resident block.</summary><div class="body">threads: 1024/384 = 2.67 → 2; regs: 65536/(48·384) = 3.5 → 3; shared: 65536/12288 = 5.3 → 5; cap 16. Min = 2, dial = THREADS (384 doesn't divide 1024 kindly — 2×384 = 768, wasting 256 thread-slots). Cheapest change: block 384 → 256 (threads: 4 blocks = 1024, regs: 65536/(48·256) = 5.3 → 5, shared: 5) → 4 resident blocks, 100% vs 75% occupancy, zero code changed beyond the launch constant. Awkward block sizes that don't divide the SM's thread capacity are the quietest occupancy leak — always check divisibility before exotic fixes.</div></details>
+<details><summary>4. ncu shows "local memory" traffic appeared after you set -maxrregcount 40 on a kernel that used 55. Translate "local memory" honestly, predict the two opposing effects on runtime, and name the kernel property that decides which wins.</summary><div class="body">"Local" = thread-private slice of GLOBAL memory (HBM latency, HBM bandwidth — 4.5's hierarchy; the name is heritage, not description). Effects: (+) more resident warps → deeper latency-hiding pool; (−) spilled values now cost HBM round-trips inside the hot loop, ADDING traffic to whatever bus pressure existed. Decider: where the kernel sits on 4.7's roofline. Latency-bound and bus-idle → extra warps can win despite spills. Bandwidth-bound → spill traffic competes with useful traffic on the SATURATED resource → strictly worse. The worked example's regtile was compute-dense: spills lost. Same knob, opposite outcomes, one roofline question between them.</div></details>
+<details><summary>5. Why is __syncthreads() after an early-exit guard UB rather than "the arrived threads just wait forever, which is at least predictable"? What do synccheck and the post-Volta scheduler each contribute to the story, and what's the always-safe rewrite?</summary><div class="body">The barrier's contract is ALL-or-NONE per block (5.5 Law 2); hardware tracks arrival counts per barrier — exited threads never arrive, so behavior is formally undefined: real outcomes range from hangs to "barrier releases early because the exited threads were COUNTED OUT at return" (arch-dependent!) → silent races, worse than a hang. Post-Volta's per-thread PCs widen the interleaving space, making the folklore outcomes less reproducible, not safer. synccheck exists precisely to flag divergent-barrier executions (5.4's panel). Rewrite: all threads run the cooperative phases; guard only the private work — <code>bool active = (i &lt; n);</code> … barriers unconditional … <code>if (active) out[i] = r;</code> (5.5's skeleton did exactly this, now you know the law it obeyed).</div></details>
+<details><summary>6. The Volkov argument, with 4.6's arithmetic: T4 needs ~88 KB in flight to saturate HBM (220 GB/s × 400 ns). If each thread keeps 1 outstanding 4-B load, how many warps does the GPU need? If unrolling gives each thread 4 outstanding 16-B (float4) loads, how many? Convert both to per-SM occupancy (40 SMs, 32 warps max) and state the design lesson.</summary><div class="body">1×4 B/thread: 88 KB / 4 B = 22,000 threads ≈ 688 warps GPU-wide → 17.2/SM ≈ 54% occupancy needed. 4×16 B = 64 B/thread: 1,375 threads ≈ 43 warps → 1.1/SM ≈ 3% (!). Lesson: bytes-in-flight = warps × per-thread outstanding bytes — the PRODUCT saturates the bus, and ILP (unrolling, vector loads: 5.7's float4) is a full substitute for occupancy on the memory side. This is Volkov's classic result derived from YOUR Little's-law numbers (4.6), and it's the quantitative teeth behind "occupancy is a means": the worked example's regtile won at 50% because each thread carried 4× the in-flight work.</div></details>
+<details><summary>7. Interview closer: "Is 100% occupancy always the goal?" Deliver the complete 60-second answer: definition, what it buys, the knee, two named cases where lower wins, and the two tools that settle any specific argument.</summary><div class="body">Skeleton: occupancy = resident/max warps per SM, set by min(threads, regs, shared, cap) — it buys LATENCY-HIDING depth (4.4), nothing else. Throughput vs occupancy is a knee curve: below "enough in-flight to cover the binding latency" (Little's law, 4.6/practice 6) more warps help; above it they're inert. Lower-wins cases: (1) register-tiled compute kernels — each thread holds more state and ILP, fewer warps needed (worked example: 50% occ, 2.4× faster); (2) shared-memory-heavy tiles where bigger tiles (more reuse, 5.5) beat more blocks. Tools: ptxas -v + the min() table names the dial a priori; ncu's achieved-occupancy + stall reasons (5.10) verdicts a posteriori. Close with: "I optimize the roofline ceiling I'm under (4.7); occupancy is one knob that serves it, priced per kernel." That last sentence is the senior-signal.</div></details>
+
+<div class="pager">
+  <a href="lesson-05.html">← Shared memory & tiling</a>
+  <a href="lesson-07.html">Next: Coalescing in code →</a>
+</div>
+<div class="footer">GPU Mastery · Module 5 · Lesson 6 — works offline · progress saved in your browser</div>
+</div>
+<script src="../assets/diagrams5.js"></script>
+<script src="../assets/app.js"></script>
+</body>
+</html>

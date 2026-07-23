@@ -1,0 +1,191 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>1.8 Floating Point — GPU Mastery</title>
+<link rel="stylesheet" href="../assets/style.css">
+</head>
+<body data-lesson="m1l8">
+<nav><div class="inner">
+  <a class="logo" href="../index.html">GPU<span>Mastery</span></a>
+  <a class="item" href="../index.html">Home</a>
+  <a class="item on" href="../curriculum.html">Curriculum</a>
+  <a class="item" href="../labs.html">Labs</a>
+  <a class="item" href="../setup.html">Lab setup</a>
+  <a class="item" href="../prompt.html">Generator prompt</a>
+</div></nav>
+<div class="wrap">
+
+<div class="lesson-top">
+  <div><span class="badge">Module 1 · Lesson 8</span><span class="badge dim">≈ 3 h · capstone</span></div>
+  <button id="donebtn" class="donebtn">Mark lesson complete</button>
+</div>
+<h1>Floating Point — how GPUs really store numbers</h1>
+<p class="lead">Module 1's capstone, and the single most bug-generating topic in numerical computing. fp16 overflow NaN'd real training runs; reduction order makes GPU results "randomly" differ from CPU; 0.1 + 0.2 ≠ 0.3. After this lesson, none of that will ever surprise you again.</p>
+
+<h2>Concept</h2>
+
+<h3>The problem: infinite reals, 32 bits</h3>
+<p>Between 0 and 1 there are infinitely many real numbers; 32 bits give you 2³² ≈ 4.3 billion patterns <em>total</em> (Lesson 1). Something must give. Fixed-point (put the decimal point at a fixed position) wastes range or precision. The winning design — <strong>floating point</strong> — is scientific notation (Lesson 3) in binary: store a sign, an exponent (where the point floats to), and the leading digits (the fraction/mantissa).</p>
+<div class="diagram" data-diagram="m1l8-fp" data-caption="IEEE-754: sign, biased exponent, fraction — with fp16 and bf16 dividing their 16 bits differently."></div>
+<pre><code>value = (−1)^sign × 1.fraction₂ × 2^(exponent − bias)         bias: 127 for fp32
+5.75 = 101.11₂ = 1.0111₂ × 2²  →  sign 0 | exp 2+127=129=10000001 | frac 0111000…0</code></pre>
+<p>The hidden "1." is free precision: every normalized binary number starts with 1, so it isn't stored — 23 stored bits buy 24 significant bits. Roughly <strong>7 decimal digits</strong> of precision, with a range of ~±3.4×10³⁸.</p>
+
+<h3>Relative precision: dense near zero, sparse far out</h3>
+<div class="diagram" data-diagram="m1l8-density" data-caption="Each power-of-two interval holds the same 2²³ floats — so the gaps double as you go up."></div>
+<p>Every interval [2ᵏ, 2ᵏ⁺¹) contains exactly 2²³ floats — the same count stretched over doubling width. Consequences: the gap between neighbors ("1 ulp") near 1.0 is <strong>machine epsilon ≈ 1.19×10⁻⁷</strong>; near 2²⁴ = 16 777 216 the gap is <em>2</em> — fp32 cannot represent 16 777 217. Above 2²⁴, adding 1.0 to a float does <em>nothing</em>. Precision is relative (~7 digits wherever you are), never absolute — the root fact behind half the gotchas below.</p>
+
+<h3>Why 0.1 + 0.2 ≠ 0.3</h3>
+<p>0.1 = 1/10, and 10 = 2·5. Binary fractions can only represent p/2ᵏ exactly; the factor of 5 makes 0.1 an infinite repeating binary fraction (0.000110011̄₂…), which gets rounded to the nearest float. So 0.1, 0.2, 0.3 are each tiny lies, and (rounded 0.1) + (rounded 0.2) rounds to a float that differs from (rounded 0.3) by one ulp: 0.30000000000000004 in fp64. Nothing is broken — decimal fractions just aren't binary fractions. (Same reason 1/3 isn't a finite decimal.)</p>
+
+<h3>Special values: the algebra of the edges</h3>
+<table>
+<tr><th>Value</th><th>Made by</th><th>Rules that bite</th></tr>
+<tr><td>+∞ / −∞</td><td>overflow, 1/0</td><td>∞ − ∞ = NaN; ∞ compares greater than everything</td></tr>
+<tr><td><strong>NaN</strong></td><td>0/0, √(−1), ∞−∞, log(−1)</td><td>NaN ≠ NaN (!); every comparison false; propagates through all arithmetic — one NaN poisons the tensor</td></tr>
+<tr><td>−0</td><td>negative underflow, −1×0</td><td>−0 == +0 is true, but 1/−0 = −∞; sign matters in branches on atan2/copysign</td></tr>
+<tr><td>subnormals</td><td>numbers below 2⁻¹²⁶</td><td>graceful underflow, but 10–100× slower on some hardware; GPUs often flush to zero (FTZ)</td></tr>
+</table>
+<pre><code>if (x != x)        // the classic NaN test — true ONLY for NaN
+isnan(x), isinf(x) // the readable versions
+fmaxf(NaN, 1.0f)   // CUDA returns 1.0f (IEEE says ignore the NaN operand) —
+                   // but max(NaN, 1.0) in other APIs returns NaN. Know YOUR library.</code></pre>
+
+<h3>The format zoo of 2026</h3>
+<table>
+<tr><th>Format</th><th>Bits (s|e|m)</th><th>~Digits</th><th>Max</th><th>Job</th></tr>
+<tr><td>fp64</td><td>1|11|52</td><td>15.9</td><td>1.8×10³⁰⁸</td><td>HPC, science, money-adjacent — Track B's home</td></tr>
+<tr><td>fp32</td><td>1|8|23</td><td>7.2</td><td>3.4×10³⁸</td><td>graphics, general GPU compute, master weights</td></tr>
+<tr><td>tf32</td><td>1|8|10</td><td>3.3</td><td>3.4×10³⁸</td><td>tensor-core matmul input trick: fp32 range, fp16-ish speed</td></tr>
+<tr><td>fp16</td><td>1|5|10</td><td>3.3</td><td><strong>65 504</strong></td><td>inference, training-with-care (loss scaling)</td></tr>
+<tr><td>bf16</td><td>1|8|7</td><td>2.3</td><td>3.4×10³⁸</td><td>ML training workhorse: fp32's range, third the precision</td></tr>
+<tr><td>fp8 (e4m3/e5m2)</td><td>1|4|3, 1|5|2</td><td>~1</td><td>448 / 57 344</td><td>frontier training/inference on latest tensor cores</td></tr>
+</table>
+<p>Read the table through one lens: <strong>exponent bits buy range, mantissa bits buy precision, fewer total bits buy speed</strong> (2× the FLOP/s and half the memory traffic per halving, roughly). bf16 vs fp16 is the exam question: bf16 keeps fp32's 8 exponent bits (same range — gradients don't overflow) and pays with 7 mantissa bits (~2 digits). fp16 spends more on mantissa but caps at 65 504 — hence the NaN'd training runs, and the fix in the worked example.</p>
+
+<h2>Worked example</h2>
+<div class="card">
+<p><strong>Task:</strong> Your fp16 training run's loss goes <code>2.31 → 2.29 → inf → NaN</code> within three steps. Explain the mechanism from the bit layout, apply the standard fix, and say why bf16 makes the problem mostly vanish.</p>
+<p><strong>Mechanism:</strong> backprop multiplies gradients layer by layer (chain rule — Track A1); a few large activations compound and some gradient hits |g| > 65 504 = fp16 max → rounds to <strong>inf</strong>. Next step: inf × weight-decay or inf − inf → <strong>NaN</strong>. NaN ≠ NaN and NaN propagates: one poisoned gradient element infects every weight in one update. (Meanwhile tiny gradients below fp16's subnormal floor ~6×10⁻⁸ flush to zero — silent underflow at the other end.)</p>
+<p><strong>Fix — loss scaling (what torch.cuda.amp does):</strong> multiply the <em>loss</em> by S (say 2¹⁶) before backprop; by linearity every gradient scales by S, lifting small gradients out of the flush-to-zero zone; divide by S before the optimizer step. If any inf/NaN appears in gradients: skip the step, halve S; if stable for 2000 steps: double S ("dynamic loss scaling"). Exponent arithmetic, nothing more.</p>
+<pre><code>scaler = torch.amp.GradScaler()                  # the three-line version
+with torch.autocast(device_type="cuda", dtype=torch.float16):
+    loss = model(x).loss
+scaler.scale(loss).backward(); scaler.step(opt); scaler.update()</code></pre>
+<p><strong>Why bf16 mostly ends this:</strong> 8 exponent bits → max ~3.4×10³⁸ — gradients essentially can't overflow; underflow floor drops to ~10⁻³⁸ too. Cost: 7 mantissa bits (~2 digits), which training tolerates because gradient noise (Lesson 7!) already exceeds rounding noise. That's why bf16-by-default won 2020s ML — a decision you can now defend from the bit fields alone. Master weights still ride in fp32: tiny updates (lr × grad ≈ 10⁻⁷ relative) would be absorbed entirely at bf16's 2-digit precision (see cancellation, below).</p>
+</div>
+
+<h2>Key points</h2>
+<ul class="keypoints">
+<li>float = sign × 1.fraction × 2^(exp−bias): scientific notation in binary; the hidden leading 1 gives 24 significant bits from 23 stored.</li>
+<li>Precision is relative: ~7 digits for fp32 anywhere on the line; gaps double each power of two — above 2²⁴, x + 1.0f == x.</li>
+<li>Decimal fractions like 0.1 repeat forever in binary; every literal is already rounded — compare with tolerances, never ==.</li>
+<li>NaN ≠ NaN, all comparisons false, and it propagates; inf arises from overflow and 1/0; GPUs often flush subnormals to zero.</li>
+<li>Formats trade exponent (range) vs mantissa (precision) vs width (speed): fp16 overflows at 65 504; bf16 keeps fp32 range with ~2 digits; fp8 pushes further on tensor cores.</li>
+<li>Float addition is NOT associative: parallel reductions reorder sums, so GPU ≠ CPU results bitwise — correctness means "within tolerance," and tree sums are actually MORE accurate.</li>
+</ul>
+
+<h2>Quiz</h2>
+<div class="quiz">
+  <div class="q">1. In fp32, what does <code>16777216.0f + 1.0f</code> evaluate to, and why?</div>
+  <button class="opt">16777217.0 — floats handle integers exactly</button>
+  <button class="opt" data-c="1">16777216.0 — the gap between floats there is 2, so +1 rounds back (absorption)</button>
+  <button class="opt">inf — it overflows the mantissa</button>
+  <button class="opt">A compile error — precision loss is detected</button>
+  <div class="expl">2²⁴ is where fp32's integer-exactness ends: 24 significant bits are spent, the ulp becomes 2, and 16777217 does not exist in fp32. The add rounds to the nearest representable — the original value. This is absorption, and it silently breaks long float accumulators (frame counters, running sums) in real systems.</div>
+</div>
+<div class="quiz">
+  <div class="q">2. A parallel GPU sum of the same fp32 array gives 1024.0007 while the sequential CPU sum gives 1024.0011. Who's wrong?</div>
+  <button class="opt">The GPU — parallelism corrupted the sum</button>
+  <button class="opt">The CPU — sequential code can't use FMA</button>
+  <button class="opt" data-c="1">Neither — addition order differs, rounding differs; the tree sum is typically CLOSER to the true value</button>
+  <button class="opt">Both — fp32 sums are meaningless</button>
+  <div class="expl">(a+b)+c ≠ a+(b+c) in floats. The GPU's pairwise/tree order keeps partial sums similar in magnitude → less absorption → error O(log n) vs the sequential running sum's O(n). Different ≠ wrong; tests must use tolerances, and "GPU matches CPU bitwise" is the wrong acceptance criterion.</div>
+</div>
+
+<h2>Exercises</h2>
+<details><summary>Exercise 1 — Encode −0.375 in fp32 by hand: sign, exponent field (binary), first mantissa bits. Verify by decoding.</summary><div class="body">
+<p>0.375 = 3/8 = 0.011₂ = 1.1₂ × 2⁻². Sign = 1 (negative). Exponent field = −2 + 127 = 125 = 01111101₂. Mantissa = fraction after the hidden 1: 1000…0 (23 bits). Decode: (−1)¹ × 1.1₂ × 2⁻² = −(1.5)/4 = −0.375 ✓. Note 0.375 is exact (denominator 8 = 2³) while 0.1 never is — representability is about the denominator's prime factors, exactly like 1/3 in decimal.</p>
+</div></details>
+<details><summary>Exercise 2 — Diagnose: a physics engine accumulates game time as <code>float t; t += 0.016667f;</code> each frame. Players report animations stuttering after ~4–6 hours. Compute where and why, and give two fixes.</summary><div class="body">
+<p>After 5 h, t ≈ 18 000. fp32 ulp near 2¹⁴ = 16384 is 2¹⁴⁻²³ = 2⁻⁹ ≈ 0.002. Each frame's +0.016667 still registers (it's 8× the ulp) but rounds to a multiple of 0.002 — ~12% relative quantization per step, and it worsens: near 2²⁰ (~12 days at this rate — servers!) the ulp is 0.125 and the add is mostly absorbed. Meanwhile sin(t)-style wave animations (Lesson 4, Ex. 2) stutter much earlier because they need t's *fractional* precision. Fixes: (1) accumulate time in fp64 (or integer microseconds — Lesson 1's fixed width, doing what it's good at), convert per frame; (2) keep per-effect phase accumulators that wrap mod 2π so the magnitude never grows. Both appear in real engine postmortems; "float time" is a famous class of bug (KSP, Minecraft's Far Lands are the spatial cousin).</p>
+</div></details>
+
+<hr>
+<h1>Go deeper — the complete guide</h1>
+<p>Rounding rules, error analysis you can do on a napkin, cancellation and the summation algorithms that defeat it, FMA's secret extra precision, GPU-specific float behavior (FTZ, fast-math, determinism), and the comparison discipline that makes numerical tests trustworthy.</p>
+
+<h2>1. Rounding: the default and the alternatives</h2>
+<p>IEEE default is <strong>round-to-nearest-even</strong>: ties (exactly halfway) go to the even neighbor, so ties don't drift systematically upward. Guaranteed: every basic op (+, −, ×, ÷, √) returns the exactly-rounded true result — error ≤ ½ ulp per op. Alternatives you'll actually meet: round-toward-zero (integer casts truncate — <code>(int)(-2.7f)</code> is −2, not −3; use floorf), and <strong>stochastic rounding</strong> (round up with probability = fractional distance — makes rounding error zero-mean, Lesson 7's unbiased-estimator pattern; hardware-supported for fp8 training on recent accelerators). ½ ulp per op sounds tiny; the rest of this chapter is about how tiny errors become big ones.</p>
+
+<h2>2. Absorption and catastrophic cancellation</h2>
+<div class="diagram" data-diagram="m1l8-cancel" data-caption="Absorption eats the small addend; the following subtraction reveals the theft."></div>
+<p><strong>Absorption:</strong> big + small = big whenever small < ½ ulp(big) — the +1 at 2²⁴ from the quiz. <strong>Cancellation:</strong> subtracting nearly-equal numbers erases the leading digits that matched, <em>promoting</em> old rounding errors to the leading digits of the result: (1e8 + 1) − 1e8 = 0 instead of 1 (the 1 was absorbed; the subtraction then reveals the loss). Napkin rule: subtracting numbers that agree in their first k digits costs k digits of accuracy. Classic real instances and their algebraic escapes:</p>
+<pre><code>quadratic formula, b>0:  x = (−b + √(b²−4ac))/2a  cancels when 4ac ≪ b²
+   fix: x₁ = −(b + √(b²−4ac))/2a  then  x₂ = c/(a·x₁)      (Vieta — no subtraction)
+variance: E[X²] − μ²  cancels for large μ (and can go NEGATIVE, then sqrt → NaN)
+   fix: Welford's one-pass algorithm, or shift data by an approximate mean first
+1 − cos θ for small θ: cancels (cos ≈ 1 − θ²/2)
+   fix: use 2·sin²(θ/2)  — trig identity as numerical rescue (Lesson 4 pays rent)</code></pre>
+
+<h2>3. Summation: order is an algorithm</h2>
+<p>Summing n floats naively left-to-right grows error like O(n·ε) — the running total gets big, later terms get partially absorbed. The alternatives, in ascending sophistication:</p>
+<table>
+<tr><th>Method</th><th>Error growth</th><th>Cost</th><th>Note</th></tr>
+<tr><td>Sequential running sum</td><td>O(n·ε)</td><td>n adds</td><td>what a naive CPU loop does</td></tr>
+<tr><td>Pairwise / tree sum</td><td>O(log n·ε)</td><td>n adds</td><td>what parallel reductions do anyway — free accuracy!</td></tr>
+<tr><td>Kahan compensated</td><td>O(ε)</td><td>4× adds</td><td>carries the rounding error in a second variable and re-adds it</td></tr>
+<tr><td>fp64 accumulator</td><td>~O(ε) for n < 2²⁹</td><td>≈ free on modern GPUs for accumulate-only</td><td>what cuBLAS/tensor cores do: multiply in fp16/bf16, ACCUMULATE in fp32</td></tr>
+</table>
+<pre><code>// Kahan, four lines you should recognize on sight:
+float s = 0, c = 0;
+for (i…) { float y = a[i] - c; float t = s + y; c = (t - s) - y; s = t; }</code></pre>
+<p>The GPU-shaped takeaway: the parallel tree order you're forced into for speed (Lesson 3's log₂ staircase) is also <em>numerically superior</em> to the sequential order — a rare free lunch. And "accumulate in a wider type" is why tensor cores advertise "fp16 multiply, fp32 accumulate": the products are half-precision, the running sum — where absorption lives — is not.</p>
+
+<h2>4. FMA: one rounding instead of two</h2>
+<p><code>fmaf(a, b, c)</code> computes a·b + c with a <em>single</em> rounding — the product is kept exact (all 48 product bits!) until after the add. It's faster AND more accurate, and GPU compilers contract <code>a*b + c</code> into FMA by default. The flip side: contraction changes results vs un-contracted code, so CPU-vs-GPU diffs and "same code, different flags, different bits" often trace to FMA. Flags to know: <code>nvcc -fmad=true</code> (default) vs <code>false</code>; a cross-platform "exactly reproduce" requirement usually means taming FMA and math-library differences — promise statistical, not bitwise, equality unless you control every flag on every platform (Lesson 7's scenario caveat, now explained).</p>
+
+<h2>5. GPU-specific float behavior</h2>
+<p><strong>Flush-to-zero:</strong> CUDA devices default to FTZ for fp32 in many ops (subnormals → 0); <code>-ftz=false</code> restores them at a speed cost. If your algorithm relies on gradual underflow, decide explicitly. <strong>Fast math:</strong> <code>-use_fast_math</code> swaps sinf/expf/divisions for fast approximate versions (2–4× on transcendentals, errors up to a few ulps or worse at range edges) — great for graphics and many ML inference paths, unacceptable for Track B science without validation; know it's two different functions, <code>__sinf</code> vs <code>sinf</code>, and that the flag flips them globally. <strong>Atomics and determinism:</strong> <code>atomicAdd</code> on floats commits sums in whatever order threads arrive → run-to-run nondeterminism on the SAME machine. PyTorch's <code>torch.use_deterministic_algorithms(True)</code> exists precisely to route around such kernels (at a perf cost). Interview-ready sentence: "GPU float nondeterminism is scheduling order meeting non-associativity — fix it with ordered/tree reductions or accept tolerance-based testing."</p>
+
+<h2>6. Comparing floats like a professional</h2>
+<pre><code>// absolute epsilon: only near a known scale
+fabsf(a-b) < 1e-6f                    // WRONG for a,b ~ 1e8 (ulp there is 8!)
+                                      // WRONG for a,b ~ 1e-8 (everything "equal")
+// relative + absolute floor (the workhorse — this is numpy.isclose / torch.allclose):
+fabsf(a-b) <= atol + rtol * fabsf(b)  // defaults: rtol 1e-5, atol 1e-8
+// ULP distance (bit-level: how many floats sit between a and b)
+</code></pre>
+<p>Choosing tolerances is engineering, not superstition: estimate the error budget (ops on the critical path × ulp × magnitudes — the napkin analysis of §2–3), then set rtol with ~10× headroom. When a kernel test flakes only in fp16, only on Tuesdays: recompute the budget — fp16's ε is 9.8×10⁻⁴, three orders looser than fp32's, and a tolerance copy-pasted from an fp32 test is a bug in the <em>test</em>.</p>
+
+<h2>7. Gotchas</h2>
+<div class="gotcha"><strong>== on computed floats.</strong> Legitimate uses exist (exact constants, flag values, detecting the same rounded result); comparing two differently-computed values with == is the bug. isclose with justified tolerances.</div>
+<div class="gotcha"><strong>float accumulators for counters/time/money.</strong> Absorption at 2²⁴ (counts), quantization (time — Ex. 2), and 0.1's inexactness (money → use integer cents). Integers exist; use them for integer-shaped data.</div>
+<div class="gotcha"><strong>fp16 range confidence.</strong> 65 504 arrives fast: a variance, a squared distance, an un-normalized logit. Square anything ~256 in fp16 and you're at the cliff edge. Compute norms/variances in fp32 even when data is fp16.</div>
+<div class="gotcha"><strong>NaN's comparison behavior inverting branches.</strong> <code>if (x > threshold)</code> is false for NaN — so NaN silently takes the ELSE path: min/max/clamp/sort all misroute it. Sorting with NaNs present is UB-adjacent chaos in most libraries: sanitize at ingestion.</div>
+<div class="gotcha"><strong>Testing bitwise GPU-vs-CPU equality.</strong> FMA contraction + reduction order + libm differences guarantee mismatches that are MORE accurate, not less. Tolerance tests with error budgets; bitwise only within one pinned platform+flags.</div>
+<div class="gotcha"><strong>Blaming precision, shipping cancellation.</strong> "We need fp64" is often "our formula cancels." E[X²]−μ², 1−cosθ, naive quadratic roots: fix the algebra first — it's free — before paying 2–32× for wider types (fp64 is 1/32 rate on some gaming GPUs, 1/2 on datacenter parts — check your target's spec sheet).</div>
+
+<h2>Scenario — the model that failed accuracy review by 0.4%</h2>
+<p>Your team quantizes a recommendation model to fp16 for a 2× serving-cost win. Offline eval: accuracy drops 0.4% — enough to block launch. The postmortem is a tour of this lesson. Finding 1: the feature-normalization step computes variance as E[X²]−μ² <em>in fp16</em>; for a popularity feature with μ ≈ 180 (μ² ≈ 32 400 — brushing 65 504), the subtraction cancels catastrophically and intermittently overflows to inf → those requests silently fell back to unnormalized features. Fix: Welford in fp32 (features stay fp16). Finding 2: cosine similarities computed as dot/(‖a‖‖b‖) with fp16 norms — squared magnitudes overflow for long embeddings; fix: normalize embeddings ONCE in fp32 at index time (Lesson 5's scenario, now with the precision reason attached), serve pure fp16 dots safely (each |aᵢbᵢ| ≤ 1, sums accumulate in fp32 via the tensor-core path). Finding 3: the eval harness itself compared fp16 pipeline vs fp32 golden with rtol = 1e-6 — flagging correct-within-fp16 results as failures and inflating the measured drop; fix the tolerance to the fp16 error budget. Re-run: true accuracy delta 0.05%, launch approved, serving cost halved. Nobody wrote a new model — three bit-layout arguments and one honest tolerance did it. That's floating-point literacy as a business skill.</p>
+
+<h2>Practice</h2>
+<details><summary>1. What are the fp32 ulps near 1.0, 1024.0, and 2²⁴? General formula from the exponent?</summary><div class="body">ulp(x) for x ∈ [2ᵏ, 2ᵏ⁺¹) is 2^(k−23). Near 1.0 (k=0): 2⁻²³ ≈ 1.19e−7 (machine ε). Near 1024 (k=10): 2⁻¹³ ≈ 1.22e−4. Near 2²⁴: 2¹ = 2. Precision is a sliding scale set by the exponent — memorize the formula, derive the rest.</div></details>
+<details><summary>2. Why is 0.5 exact in every float format but 0.1 exact in none? State the general representability rule.</summary><div class="body">A decimal terminates in binary iff it equals p/2ᵏ — denominator a pure power of two. 0.5 = 1/2 ✓. 0.1 = 1/10 = 1/(2·5): the factor 5 forces an infinite repeating binary expansion, rounded at storage. Corollary: sums of halves/quarters/eighths (texture coords, mip levels) are exact; sums of tenths drift.</div></details>
+<details><summary>3. Predict, then explain: in fp32, does (0.1f + 0.2f) + 0.3f equal 0.1f + (0.2f + 0.3f)? What property died, and name the GPU consequence.</summary><div class="body">Generally unequal (each grouping rounds different intermediates; in fp32 these two differ in the last ulp). Associativity died — the compiler may NOT reorder float sums without permission (that's what -ffast-math grants), and parallel reductions that reorder sums produce run-dependent results unless the order is fixed (tree with fixed topology) — the root of "deterministic mode" switches in every ML framework.</div></details>
+<details><summary>4. A logit vector in fp16 contains [12.1, 9.3, 88.0]. Trace what softmax does naively, then with the max-subtraction trick (Lesson 3), all in fp16 terms.</summary><div class="body">Naive: e^88 overflows even fp32 (e^88 ≈ 1.7e38 ≈ max) and utterly overflows fp16 (max 65504, e^11.1 already exceeds it — e^12.1 ≈ 1.8e5 → inf). inf/inf = NaN: the whole distribution NaNs. Stable: subtract M = 88 → [−75.9, −78.7, 0]; e^−75.9 underflows to 0 (harmlessly — those probabilities ARE ~0), e^0 = 1 → probs ≈ [0, 0, 1]. Underflow to zero is graceful here; overflow was fatal. The asymmetry (protect the top, let the bottom flush) is why the trick subtracts the max rather than centering.</div></details>
+<details><summary>5. Kahan summation stores a correction c. Walk one iteration summing s = 1e8, next term 1.0 (fp32), and show what c captures.</summary><div class="body">y = 1.0 − 0 = 1.0; t = 1e8 + 1.0 → rounds to 1e8 (ulp there is 8 — absorption); c = (t − s) − y = (0) − 1.0 = −1.0. The "lost" 1.0 now lives in c and is re-injected next iteration (y = a[i] − (−1) = a[i]+1). Kahan is bookkeeping for absorbed crumbs; after n such terms, s + (−c) recovers ≈ the true sum where the naive loop lost all n.</div></details>
+<details><summary>6. Your CUDA kernel's results differ between -O3 and -O0 builds by 1–2 ulps. List the three most likely causes and the flag/test for each.</summary><div class="body">(1) FMA contraction at -O3: test with -fmad=false. (2) Different math-function paths (fast vs precise, e.g., division/sqrt): check -prec-div/-prec-sqrt and -use_fast_math. (3) Reassociation/vectorization changing sum order (host code too, via -ffast-math). Verify by pinning flags and diffing per-op; then encode the finding as a tolerance-based test with an error budget, not a bitwise golden file.</div></details>
+<details><summary>7. Design: a Track-B style simulation needs the total energy of 10⁹ particles (fp32 values spanning 10⁻⁶ … 10⁶) summed every step, accurate to 1e−6 relative, deterministic across runs on one machine. Specify the reduction (levels, precisions, order), justify against naive summation, and state the residual risks.</summary><div class="body">Design: per-block tree reduction in shared memory (fixed intra-block order), accumulating each fp32 product/read into an fp64 partial (or Kahan-fp32 if fp64-slow hardware); block partials written to a fixed-index array; final pass sums the ~10⁴ partials in fp64 in a FIXED order (single block tree, not atomics). Why: naive fp32 running sum has error ~n·ε ≈ 10⁹·6e−8 → order-10 relative garbage with mixed magnitudes; tree order cuts growth to log₂n ≈ 30 roundings and fp64 accumulation makes each rounding 2⁻⁵² — total error ≪ 1e−6. Determinism: no atomicAdd anywhere (arrival order!), fixed topology, pinned flags (-fmad choice), same GPU/driver. Residual risks: inputs already contaminated (garbage in, precisely summed garbage out), cross-GPU-model bit drift (promise tolerance, not bits, across models), and a future contributor "optimizing" the final pass with atomics — document WHY it's ordered. This design is, almost line for line, how production HPC codes and cuBLAS-style reductions actually do it.</div></details>
+
+<div class="pager">
+  <a href="lesson-07.html">← Probability & statistics</a>
+  <a href="../curriculum.html">Module 1 complete → Curriculum & next modules</a>
+</div>
+<div class="footer">GPU Mastery · Module 1 · Lesson 8 — works offline · progress saved in your browser</div>
+</div>
+<script src="../assets/diagrams.js"></script>
+<script src="../assets/app.js"></script>
+</body>
+</html>

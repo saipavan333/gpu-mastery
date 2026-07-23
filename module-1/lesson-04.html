@@ -1,0 +1,183 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>1.4 Geometry, Coordinates & Trigonometry — GPU Mastery</title>
+<link rel="stylesheet" href="../assets/style.css">
+</head>
+<body data-lesson="m1l4">
+<nav><div class="inner">
+  <a class="logo" href="../index.html">GPU<span>Mastery</span></a>
+  <a class="item" href="../index.html">Home</a>
+  <a class="item on" href="../curriculum.html">Curriculum</a>
+  <a class="item" href="../labs.html">Labs</a>
+  <a class="item" href="../setup.html">Lab setup</a>
+  <a class="item" href="../prompt.html">Generator prompt</a>
+</div></nav>
+<div class="wrap">
+
+<div class="lesson-top">
+  <div><span class="badge">Module 1 · Lesson 4</span><span class="badge dim">≈ 2–3 h</span></div>
+  <button id="donebtn" class="donebtn">Mark lesson complete</button>
+</div>
+<h1>Geometry, Coordinates & Trigonometry — the math of space</h1>
+<p class="lead">Every pixel has coordinates; every camera, rotation, wave, and circle in graphics — and every distance between embeddings in ML — reduces to Pythagoras and the unit circle. This lesson rebuilds both until they're reflexes.</p>
+
+<h2>Concept</h2>
+
+<h3>Coordinates: naming every point in space</h3>
+<p>Descartes' idea: cross two number lines (x right, y up) and every point in the plane gets a unique name (x, y). Add a z axis for 3D. Two conventions will fight for your attention all career:</p>
+<div class="diagram" data-diagram="m1l4-ydown" data-caption="Math is y-up; images and screens are y-down. Same numbers, mirrored world."></div>
+<p>3D adds a second fight: <em>right-handed</em> (z toward you; OpenGL, math, physics) vs <em>left-handed</em> (z into the screen; DirectX, Unity). Neither is wrong; mixing them silently mirrors your world. Rule: state the convention at the top of every graphics file and convert at boundaries.</p>
+
+<h3>Distance: Pythagoras, promoted to n dimensions</h3>
+<pre><code>2D:  d = √((x₂−x₁)² + (y₂−y₁)²)
+3D:  d = √(Δx² + Δy² + Δz²)
+nD:  d = √(Σᵢ Δᵢ²)        — same formula, any dimension</code></pre>
+<p>The n-dimensional version is not a stunt: an embedding model places sentences in 1024-dimensional space, and "how similar are these documents" is <em>this distance</em> (or the related cosine, next lesson) computed by a GPU a billion times per second. School's triangle formula is the search engine's inner loop.</p>
+<div class="note">Performance habit, starting now: comparing distances? Compare <em>squared</em> distances — <code>d₁² < d₂²</code> ⇔ <code>d₁ < d₂</code> for non-negatives, and you skip the square root (which costs ~10–20× a multiply on GPU). Every k-nearest-neighbor kernel does this.</div>
+
+<h3>Angles: degrees for humans, radians for machines</h3>
+<div class="diagram" data-diagram="m1l4-radians" data-caption="One radian: walk one radius along the rim. 2π radii wrap the full circle."></div>
+<p>Degrees slice a circle into 360 arbitrary parts. Radians measure the arc <em>in units of radius</em>: full circle = circumference/radius = 2π. That makes radians the "natural" unit — arc length is just r·θ, angular velocity integrates cleanly, and (in Track A/B calculus) sin′ = cos <em>only</em> in radians. Every math library follows suit:</p>
+<pre><code>radians = degrees × π / 180        degrees = radians × 180 / π
+sinf(90.0f)  → 0.894  (!!)  — that's sin of 90 RADIANS ≈ 14.3 full turns
+sinf(90.0f * 3.14159265f / 180.0f) → 1.0  ✓</code></pre>
+
+<h3>sin & cos: coordinates on the unit circle</h3>
+<div class="diagram" data-diagram="m1l4-unitcircle" data-caption="The definition that unifies triangles, waves, and rotations: the point at angle θ is (cos θ, sin θ)."></div>
+<p>Forget SOH-CAH-TOA as the definition (it only handles 0–90°). The grown-up definition: walk angle θ counterclockwise around a radius-1 circle from the positive x-axis; where you stand is <strong>(cos θ, sin θ)</strong>. Everything follows: both stay in [−1, 1]; Pythagoras on the triangle gives <strong>sin²θ + cos²θ = 1</strong>; angles beyond 90° and negatives work automatically (cos 180° = −1); and both repeat every 2π — they are the mathematics of anything that spins or oscillates.</p>
+<table>
+<tr><th>θ (deg)</th><td>0</td><td>30</td><td>45</td><td>60</td><td>90</td><td>180</td><td>270</td></tr>
+<tr><th>θ (rad)</th><td>0</td><td>π/6</td><td>π/4</td><td>π/3</td><td>π/2</td><td>π</td><td>3π/2</td></tr>
+<tr><th>sin θ</th><td>0</td><td>1/2</td><td>√2/2</td><td>√3/2</td><td>1</td><td>0</td><td>−1</td></tr>
+<tr><th>cos θ</th><td>1</td><td>√3/2</td><td>√2/2</td><td>1/2</td><td>0</td><td>−1</td><td>0</td></tr>
+</table>
+<p>tan θ = sin θ / cos θ is the slope of the radius — useful, but explodes where cos = 0; code reaches for <code>atan2(y, x)</code> instead (deep dive §4).</p>
+
+<h3>Rotation: trig's day job in graphics</h3>
+<p>To rotate point (x, y) by angle θ about the origin:</p>
+<pre><code>x' = x·cos θ − y·sin θ
+y' = x·sin θ + y·cos θ          rotate (1,0) by 90°: (cos90, sin90) = (0,1) ✓</code></pre>
+<p>Next lesson packages this pair as a matrix — and you already saw the punchline in Lesson 1.6's diagram: the matrix's columns are where the axes land, i.e., (cos θ, sin θ) and (−sin θ, cos θ).</p>
+
+<h2>Worked example</h2>
+<div class="card">
+<p><strong>Task:</strong> Write the per-pixel logic that draws a ring (annulus) centered on screen — the "hello world" of fragment shaders — for a 1920×1080 image, ring radii 300–340 px.</p>
+<pre><code>// runs once per pixel; (px, py) is this pixel's coordinate — y-down!
+float cx = 1920.0f / 2, cy = 1080.0f / 2;      // center
+float dx = px - cx,  dy = py - cy;
+float d2 = dx*dx + dy*dy;                       // squared distance (no sqrt yet)
+bool in_ring = (d2 >= 300.0f*300.0f) && (d2 <= 340.0f*340.0f);
+color = in_ring ? WHITE : BLACK;</code></pre>
+<p><strong>Why it works:</strong> "distance from center between 300 and 340" <em>is</em> the definition of a ring; squaring both bounds lets us test d² directly — zero square roots for 2 M pixels. Circle symmetry means no trig needed at all here.</p>
+<p><strong>Extension with trig:</strong> to make a loading spinner (only a 90° arc of the ring), you need each pixel's angle: <code>float ang = atan2f(dy, dx);</code> then test <code>ang</code> against the arc's range — handling the wrap at ±π (deep dive gotcha). <strong>Decision made:</strong> distance test for the shape, angle test only for the sector — always do the cheap rejection first so most pixels skip the expensive path. That ordering instinct is shader optimization in miniature.</p>
+</div>
+
+<h2>Key points</h2>
+<ul class="keypoints">
+<li>Screens are y-down, math is y-up; 3D splits into right- vs left-handed. Convention mismatches mirror your world silently — declare and convert at boundaries.</li>
+<li>Distance is √(Σ Δᵢ²) in any dimension — the same formula measures pixel offsets and 1024-D embedding similarity.</li>
+<li>Compare squared distances to skip square roots; sqrt and trig cost an order of magnitude more than multiply-add.</li>
+<li>Radians measure arc in radius units: 2π per turn, arc = r·θ; every API (sinf, GLSL, PyTorch) expects radians.</li>
+<li>(cos θ, sin θ) is the point at angle θ on the unit circle — the definition that makes negatives, big angles, waves, and rotations all work; sin²+cos² = 1 is Pythagoras in disguise.</li>
+<li>Rotation by θ is x' = x cosθ − y sinθ, y' = x sinθ + y cosθ — trig's most-executed lines of code on Earth.</li>
+</ul>
+
+<h2>Quiz</h2>
+<div class="quiz">
+  <div class="q">1. A shader calls <code>sinf(45.0f)</code> intending a 45° result. What does it actually compute?</div>
+  <button class="opt">sin 45° = 0.707 — the compiler knows you meant degrees</button>
+  <button class="opt" data-c="1">sin of 45 radians ≈ 0.851 — about 7.16 full turns around the circle</button>
+  <button class="opt">A compile error — units are type-checked</button>
+  <button class="opt">1.0 — sinf saturates above 2π</button>
+  <div class="expl">45 radians = 45/(2π) ≈ 7.16 turns; the fractional 0.16 turn lands near 0.851. No language type-checks angle units (a few libraries offer wrappers). The bug produces plausible-looking garbage — the worst kind.</div>
+</div>
+<div class="quiz">
+  <div class="q">2. Two embedding vectors have squared distances d₁² = 0.84 and d₂² = 0.36 from a query. A teammate insists you must take square roots before ranking. Are they right?</div>
+  <button class="opt">Yes — distances aren't valid until rooted</button>
+  <button class="opt" data-c="1">No — x→√x preserves order for non-negatives, so ranking by d² is identical and cheaper</button>
+  <button class="opt">No — but only because these specific numbers happen to work</button>
+  <button class="opt">Yes — squared distance overflows more easily, so roots are safer</button>
+  <div class="expl">√ is monotonic on [0, ∞): a² < b² ⇔ a < b. Ranking, nearest-neighbor, thresholding (compare to t²) all work in squared space. (The overflow concern is real in fp16 but is solved by scaling, not by sqrt.)</div>
+</div>
+
+<h2>Exercises</h2>
+<details><summary>Exercise 1 — A 2D sprite at (3, 1) must rotate 30° about the origin. Compute its new position exactly (surds allowed), then to 3 decimals. Then explain what changes if the rotation should be about the sprite's own center (2.5, 0.5).</summary><div class="body">
+<p>cos30 = √3/2, sin30 = 1/2. x' = 3·(√3/2) − 1·(1/2) = (3√3−1)/2 ≈ 2.098. y' = 3·(1/2) + 1·(√3/2) = (3+√3)/2 ≈ 2.366.</p>
+<p>About its own center: rotation formulas rotate about the <em>origin</em>, so translate first, rotate, translate back: p' = R·(p − c) + c. With p−c = (0.5, 0.5): rotated = (0.5cos30 − 0.5sin30, 0.5sin30 + 0.5cos30) ≈ (0.183, 0.683); add c → (2.683, 1.183). "Translate–rotate–translate" is the pattern behind every pivot, camera orbit, and joint in animation — and next lesson's matrices make it one multiplication.</p>
+</div></details>
+<details><summary>Exercise 2 — Diagnose: a procedural water shader animates with <code>height = sin(x + t)</code> and looks right at t=0 but drifts into visible stutter after a few hours of uptime (t ≈ 30000). Why, and what's the standard fix?</summary><div class="body">
+<p><strong>Why:</strong> fp32 has ~7 significant digits (Lesson 8 preview). At t = 30000, the spacing between representable floats near t is ~0.002, but sin needs the <em>fractional part of t modulo 2π</em> to sub-pixel precision. Worse, sin implementations must internally reduce the argument mod 2π; for large inputs that reduction amplifies the representation error — successive frames quantize, and motion stutters.</p>
+<p><strong>Fix:</strong> keep the phase small yourself: pass <code>fmodf(t, 2π)</code> (or accumulate phase per frame and wrap it) so sin always sees a value in [0, 2π). Engines do exactly this; some GPUs' fast <code>__sinf</code> intrinsic is only accurate for |x| < ~π·2¹⁶ anyway. General principle: periodic quantities should be <em>stored</em> wrapped, not wrapped at use.</p>
+</div></details>
+
+<hr>
+<h1>Go deeper — the complete guide</h1>
+<p>Pythagoras with a proof you can retell, the unit circle as the master key, atan2 and angle wrapping, waves (amplitude–frequency–phase), aspect ratio, and where the rotation formulas actually come from.</p>
+
+<h2>1. Pythagoras: the one-minute proof</h2>
+<p>Take a right triangle with legs a, b, hypotenuse c. Arrange four copies inside a square of side (a+b), corners touching. The uncovered middle is a tilted square of side c, so (a+b)² = 4·(ab/2) + c² → a² + 2ab + b² = 2ab + c² → <strong>a² + b² = c²</strong>. Distance in 3D applies it twice (floor diagonal, then up the wall), and induction carries it to n dimensions: d² = Σ Δᵢ². Knowing the proof matters at interviews less than knowing this consequence: distance is a <em>sum of independent per-axis terms</em> — which is exactly why it parallelizes and vectorizes so well.</p>
+
+<h2>2. The unit circle as master key</h2>
+<p>All the identities you'll actually use, each with its one-line reason:</p>
+<table>
+<tr><th>Identity</th><th>Why (unit-circle view)</th><th>Where you'll use it</th></tr>
+<tr><td>sin²θ + cos²θ = 1</td><td>the point is on a radius-1 circle</td><td>normalizing, converting sin↔cos</td></tr>
+<tr><td>sin(−θ) = −sin θ, cos(−θ) = cos θ</td><td>mirror across x-axis</td><td>symmetry shortcuts, even/odd functions</td></tr>
+<tr><td>sin(θ+π) = −sin θ</td><td>antipodal point</td><td>phase flips</td></tr>
+<tr><td>sin(θ+2π) = sin θ</td><td>full lap</td><td>wrapping, periodic boundary</td></tr>
+<tr><td>cos θ = sin(θ + π/2)</td><td>cos is sin a quarter-turn ahead</td><td>quadrature signals, complex numbers later</td></tr>
+<tr><td>sin(a±b) = sin a cos b ± cos a sin b</td><td>compose two rotations</td><td>rotation matrices, wave interference</td></tr>
+<tr><td>cos(a±b) = cos a cos b ∓ sin a sin b</td><td>same composition, x-coordinate</td><td>same</td></tr>
+</table>
+<p>The sum formulas are the deep ones: rotate by a, then by b, and ask where (1, 0) lands — you get cos(a+b) and sin(a+b) in terms of the pieces. That computation, written as a grid of four products, <em>is</em> matrix multiplication discovering itself; Lesson 6 completes the thought.</p>
+
+<h2>3. Radians, definitively</h2>
+<p>arc = r·θ only in radians (in degrees it's r·θ·π/180 — the conversion factor haunts every formula). Angular speed ω rad/s gives linear speed v = rω. Small-angle facts you'll use in graphics LOD and physics: for |θ| < 0.1 rad, sin θ ≈ θ (error < 0.17%) and cos θ ≈ 1 − θ²/2. A 4K pixel seen across a living room subtends ~0.0003 rad — deciding "is this triangle smaller than a pixel" is a radian estimate engines make millions of times per frame.</p>
+
+<h2>4. atan2: the inverse that actually works</h2>
+<p>Plain atan(y/x) loses the quadrant (y/x = 1 could be 45° or 225°) and divides by zero at x = 0. <code>atan2(y, x)</code> takes both signs and returns the true angle in (−π, π] — it is the <em>only</em> angle-recovery function you should call:</p>
+<pre><code>atan2( 1,  1) =  π/4          atan2( 1, -1) =  3π/4
+atan2(-1, -1) = -3π/4         atan2(-1,  1) = -π/4
+atan2(y, 0)  = ±π/2           // no division, no crash — it's defined piecewise</code></pre>
+<p><strong>Angle wrap-around</strong>, the eternal bug: the shortest difference between headings a and b is <em>not</em> a − b (359° vs 1° gives 358°, truth is 2°). Canonical fix: <code>diff = atan2f(sinf(a-b), cosf(a-b))</code> — maps any difference into (−π, π] with no branches. Camera controllers, turret AI, robot steering: all carry this line.</p>
+
+<h2>5. sin as a wave: amplitude, frequency, phase</h2>
+<pre><code>y(t) = A · sin(2π·f·t + φ)
+       A: height of the wave        f: cycles per second     φ: head start (radians)</code></pre>
+<p>Plot sin θ against θ (instead of on the circle) and you get the wave. Sums of waves make water, audio, and noise textures; the phase φ is what you animate (<code>φ = speed·t</code>); and "reduce mod 2π before evaluating" (Exercise 2) is the numerical care wave code needs. Fourier's theorem — any repeating signal is a sum of sins — waits for Track B/C, but every "wobble" you'll ever ship is already this one line.</p>
+
+<h2>6. Aspect ratio and normalized coordinates</h2>
+<p>Shaders often work in normalized coordinates u, v ∈ [0, 1]. On a 1920×1080 screen, a "circle" in uv-space renders as an ellipse stretched 16:9 — because one u-unit is 1920 px while one v-unit is 1080 px. Fix by measuring distance in <em>pixel-true</em> space: <code>dx = (u − 0.5) * (width/height); dy = v − 0.5;</code>. Symptom to memorize: circles become ovals ⇔ someone forgot aspect correction. It is the second-most-common beginner shader bug (after degrees-vs-radians).</p>
+
+<h2>7. Gotchas</h2>
+<div class="gotcha"><strong>Degrees into radian functions.</strong> sinf(90) ≈ 0.894, not 1. No error, plausible output. Grep any new codebase for bare numeric literals inside trig calls.</div>
+<div class="gotcha"><strong>y-down flips rotation direction.</strong> The "counterclockwise" rotation formula turns clockwise on screen coordinates. If your sprite spins the wrong way, don't negate sin by trial and error — flip the convention consciously (θ → −θ).</div>
+<div class="gotcha"><strong>atan for angles.</strong> Quadrant loss + division by zero. atan2 always. (GLSL's <code>atan(y, x)</code> two-arg form IS atan2.)</div>
+<div class="gotcha"><strong>Comparing angles across the wrap.</strong> 359° ≈ 1° but arithmetic says they're far. Use the sin/cos wrap trick or compare unit vectors via dot product (next lesson).</div>
+<div class="gotcha"><strong>sqrt when squared works.</strong> Threshold checks, rankings, "is anything within radius r" — all valid on d² vs r². Roots belong only where actual lengths are needed (normalizing, arc lengths).</div>
+<div class="gotcha"><strong>sin²θ+cos²θ == 1.0f as a test.</strong> In fp32 it's 0.99999994 or 1.0000001. Tolerances, never ==, for anything post-trig (full story in Lesson 8).</div>
+
+<h2>Scenario — the minimap that lied</h2>
+<p>You join a small game team. Bug report: the circular minimap "sometimes" shows enemies at mirrored positions, and its sweep radar rotates the wrong way on one platform. You audit the pipeline with this lesson as the checklist. Finding 1: world uses y-up right-handed; the UI framework is y-down — the minimap code converted positions but not <em>angles</em>, so atan2(dy, dx) values were mirrored for the sprite rotation: fix by negating dy at the boundary (one place, documented). Finding 2: the sweep used <code>angle += 2.0</code> per frame — in <em>degrees</em> on the engine's API but the port's API took radians: 2 rad/frame ≈ 115°/frame — aliasing into apparently-reversed slow rotation (a wagon-wheel effect). Fix: store the sweep phase in radians, wrap with fmod 2π each frame, convert only at the API call. Finding 3 (bonus): enemy-in-range checks called sqrt per enemy per frame; switching to squared-radius comparison removed the minimap's frame spike with 200+ enemies. Three textbook items — conventions, units, squared distance — one afternoon, three closed tickets. That's this lesson doing production work.</p>
+
+<h2>Practice</h2>
+<details><summary>1. Exact values: sin 150°, cos 150°, sin(−45°), cos 3π (radians). Use circle symmetry, not memorization.</summary><div class="body">150° mirrors 30° across the y-axis: sin = +1/2, cos = −√3/2. sin(−45°) = −√2/2 (x-axis mirror). 3π = π + 2π → same as π: cos 3π = −1.</div></details>
+<details><summary>2. Points A(2, 3, 6) and origin: distance? Then: how many multiply-adds and how many sqrts does a kernel need to find the nearest of 10⁶ such points to a query — done right?</summary><div class="body">√(4+9+36) = √49 = 7. Kernel: per point 3 subs, 3 squares, 2 adds (~1 fused loop) on d²; ONE sqrt total (or zero, if only the index is needed) after the min-reduction. 10⁶ sqrts saved by comparing squared distances.</div></details>
+<details><summary>3. Convert: 72° to radians (exact multiple of π); 5 rad to degrees (3 s.f.). Which direction does each conversion multiply by π?</summary><div class="body">72° = 72π/180 = 2π/5. 5 rad = 5·180/π ≈ 286°. Degrees→radians multiplies BY π (÷180); radians→degrees divides by π. Sanity check: radians are the smaller-count unit (only 6.28 per turn), so degree numbers shrink when converted.</div></details>
+<details><summary>4. Where does the rotation formula come from? Derive x' = x cosθ − y sinθ using the sum identities, starting from the point (r cos α, r sin α).</summary><div class="body">The point at radius r, angle α, rotated by θ sits at angle α+θ: x' = r cos(α+θ) = r(cos α cos θ − sin α sin θ) = (r cos α)cos θ − (r sin α)sin θ = x cos θ − y sin θ. Same expansion for y' with sin(α+θ). The sum formulas ARE rotation; the matrix in Lesson 6 just files them in a 2×2 box.</div></details>
+<details><summary>5. A drone at heading 350° must turn to heading 20°. Compute the naive difference and the correct shortest turn, then give branch-free code.</summary><div class="body">Naive: 20 − 350 = −330° (a near-full wrong-way spin). Truth: +30°. Code: <code>d = atan2f(sinf(b−a), cosf(b−a))</code> with a, b in radians → +30° equivalent (0.524 rad). The identity maps any difference into (−π, π] because sin/cos erase whole turns by construction.</div></details>
+<details><summary>6. An embedding model uses "cosine similarity" — cos of the angle between vectors. Using ONLY this lesson + Pythagoras, explain why cos θ near 1 means "similar" and near 0 means "unrelated," and why magnitude is deliberately ignored.</summary><div class="body">On the unit circle, θ = 0 → same direction → cos = 1; θ = 90° → perpendicular (no shared direction at all) → cos = 0. Direction encodes *what* a text is about; length tends to track things like confidence/frequency — normalizing to the unit sphere (Lesson 5) makes "aboutness" the only thing compared. Similar meaning ⇒ small angle ⇒ cosine near 1.</div></details>
+<details><summary>7. Design: a "radial menu" UI has 8 sectors. Given a mouse position relative to center, write the logic (pseudo-code) that returns the sector index 0–7 with sector 0 centered on "up," clockwise, robust at all angles — name every pitfall you're dodging.</summary><div class="body"><code>ang = atan2f(dx, -dy)</code> — note the argument shuffle: this measures clockwise-from-up directly in y-down screen coords (dodges: y-down flip, quadrant loss, x=0 crash). Then <code>ang = fmodf(ang + 2π, 2π)</code> to land in [0, 2π) (dodges negative angles). Offset by half a sector so sector 0 is *centered* on up: <code>idx = (int)((ang + π/8) / (π/4)) & 7</code> (dodges boundary bias; & 7 wraps index 8→0 — Lesson 1's power-of-two mask). Test the four cardinal directions plus a point at exactly 22.5° (a boundary).</div></details>
+
+<div class="pager">
+  <a href="lesson-03.html">← Exponents & logs</a>
+  <a href="lesson-05.html">Next: Vectors →</a>
+</div>
+<div class="footer">GPU Mastery · Module 1 · Lesson 4 — works offline · progress saved in your browser</div>
+</div>
+<script src="../assets/diagrams.js"></script>
+<script src="../assets/app.js"></script>
+</body>
+</html>

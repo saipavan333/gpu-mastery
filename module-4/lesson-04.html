@@ -1,0 +1,190 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>4.4 Inside the GPU — SMs, Warps & Latency Hiding — GPU Mastery</title>
+<link rel="stylesheet" href="../assets/style.css">
+</head>
+<body data-lesson="m4l4">
+<nav><div class="inner">
+  <a class="logo" href="../index.html">GPU<span>Mastery</span></a>
+  <a class="item" href="../index.html">Home</a>
+  <a class="item on" href="../curriculum.html">Curriculum</a>
+  <a class="item" href="../labs.html">Labs</a>
+  <a class="item" href="../setup.html">Lab setup</a>
+  <a class="item" href="../prompt.html">Generator prompt</a>
+</div></nav>
+<div class="wrap">
+
+<div class="lesson-top">
+  <div><span class="badge">Module 4 · Lesson 4</span><span class="badge dim">≈ 3 h · the centerpiece</span></div>
+  <button id="donebtn" class="donebtn">Mark lesson complete</button>
+</div>
+<h1>Inside the GPU — SMs, Warps & the One Trick That Explains Everything</h1>
+<p class="lead">Here is the machine itself. One idea organizes all of it: <em>a GPU hides memory latency not with caches and predictions, but with an enormous standing army of threads, any of which can issue the moment another stalls.</em> Hold that sentence; every spec, limit, and CUDA rule in your future is a footnote to it.</p>
+
+<h2>Concept</h2>
+
+<h3>The floor plan: many modest cores, not one heroic one</h3>
+<div class="diagram" data-diagram="m4l4-die" data-caption="H100: 132 SMs around a shared L2 and HBM stacks. One SM ≈ a modest multicore processor."></div>
+<p>A <strong>Streaming Multiprocessor (SM)</strong> is the unit that matters: its own schedulers, ALUs, tensor cores, registers, and a chunk of fast scratch memory. An H100 carries 132; consumer Blackwell ~170 (RTX 5090's 21,760 "CUDA cores" = ~170 SMs × 128 lanes — marketing counts lanes, architects count SMs). Across SMs: pure MIMD (4.3) — no cheap communication, which is why CUDA's programming model (blocks that never talk across SMs — 5.2) mirrors the floor plan exactly. The programming model IS the architecture with syntax.</p>
+
+<h3>The warp: 32 threads, one program counter (mostly)</h3>
+<p>Threads execute in groups of 32 — <strong>warps</strong> — in SIMT lockstep (4.3's middle column): one instruction issued, 32 lanes execute it on their own registers. Three consequences you already half-know:</p>
+<table>
+<tr><th>Consequence</th><th>Where you met the idea</th></tr>
+<tr><td><strong>Coalescing:</strong> the warp's 32 loads are judged as ONE memory request — consecutive addresses = few transactions</td><td>4.2's cache line, resized to 32-B sectors (4.5 quantifies)</td></tr>
+<tr><td><strong>Divergence:</strong> if lanes disagree at a branch, BOTH paths execute serially under masks — ~2× for a coin-flip branch</td><td>4.1's misprediction ×32; 4.3 quiz 2's ranking; the branchless kit applies verbatim</td></tr>
+<tr><td><strong>Warp-level cooperation:</strong> lanes can swap registers directly (shuffles) — a 32-wide SIMD register file when you want it</td><td>M1 L3's tree staircase runs INSIDE a warp in 5 steps (5.8)</td></tr>
+</table>
+
+<h3>Residency: warps LIVE on the SM</h3>
+<div class="diagram" data-diagram="m4l4-warps" data-caption="Up to 64 warps resident; the scheduler picks any ready one, every cycle, for free."></div>
+<p>An SM hosts up to <strong>64 resident warps (2048 threads)</strong> simultaneously — not queued, <em>resident</em>: every warp's registers stay allocated in that huge 256 KB register file (the die diagram's inversion: more registers than cache, now explained). A stalled warp costs nothing to bypass; switching is a mux selection, not a context switch. Compare the CPU's answer to a stall — predict, reorder, pray to the cache (4.1) — with the GPU's: <em>shrug and run someone else.</em></p>
+
+<h3>Latency hiding: the trick itself</h3>
+<div class="diagram" data-diagram="m4l4-hiding" data-caption="The 400-cycle wait still happens — buried under 400 cycles of other warps' arithmetic."></div>
+<pre><code>warps needed ≈ stall latency ÷ cycles-between-issues-per-warp
+             ≈ 400 cycles HBM ÷ ~30 cycles of independent work per warp
+             ≈ 13 warps per scheduler × 4 schedulers ≈ 50 warps ≈ decent occupancy
+/* M1 L2 division — sizing a supercomputer's thread count on a napkin */</code></pre>
+<p><strong>Occupancy</strong> = resident warps ÷ 64. It's not about "using all the cores" — it's about having enough <em>candidates</em> to cover stalls. What limits residency: each warp's <strong>register</strong> appetite and each block's <strong>shared memory</strong> appetite, divided into the SM's fixed budgets — exactly the floor-division economics you computed in M2 L3 P3 (65,536 regs ÷ (threads × regs-per-thread)), two years of curriculum early. High occupancy with nothing to hide is pointless; low occupancy with long stalls is death; the balance is 5.6's whole lesson.</p>
+
+<h3>Blocks and the grid: the software mirror</h3>
+<pre><code>kernel&lt;&lt;&lt;grid, block&gt;&gt;&gt;(...)      /* 5.2's syntax; TODAY, the hardware meaning:  */
+block  = a team of threads GUARANTEED to share one SM
+         → can share its fast memory + barrier-sync (5.5's tiles live here)
+grid   = as many blocks as the problem needs (M1 L2's ceil-division!)
+         → blocks are INDEPENDENT: scheduled to any SM, any order, no promises
+/* independence is the price of scalability: the same grid runs on 1 SM or 132 —  */
+/* the purity discipline of M2 L3, now enforced by silicon                        */</code></pre>
+
+<h2>Worked example</h2>
+<div class="card">
+<p><strong>Task:</strong> Size a real launch and predict its behavior — saxpy on 100M floats, RTX 5090-class GPU — using only arithmetic this course has already taught.</p>
+<pre><code>launch shape:  block = 256 threads (8 warps);  grid = ceil(1e8 / 256) = 390,625 blocks
+                                                        (M1 L2/M2 L3's launch_shape!)
+residency:     saxpy needs ~16 regs/thread → 256×16 = 4 KB of regs per block
+               → register budget allows 65,536/4,096 = 16 blocks/SM…
+               but 2048-thread cap → 8 blocks (64 warps): FULL occupancy ✓
+work per SM:   390,625 blocks / 170 SMs ≈ 2,298 blocks each — a deep queue:
+               tail effects negligible (last "ragged" wave is 0.04% of work)
+the verdict:   AI = 2 FLOP / 12 B = 0.167 → memory-roof bound (4.7):
+               predicted time ≈ traffic / BW = 1.2 GB / 1.79 TB/s ≈ 0.67 ms
+               predicted GFLOP/s ≈ 300 — 0.3% of the 104,800 peak. AND CORRECT.</code></pre>
+<p><strong>Read the verdict twice:</strong> full occupancy, perfect coalescing, thousands of resident warps — and saxpy still uses 0.3% of peak FLOPs, <em>because latency hiding manufactures bandwidth-saturation, not FLOPs</em>. The army of warps got the memory system to its 1.79 TB/s roof (which IS the win — a CPU sustains ~3% of that); no army can make 0.167 FLOP/byte into more arithmetic. <strong>Decision made:</strong> we sized the block at 256 (a multiple of 32 — never orphan partial warps) and checked BOTH budgets (registers, thread cap) before predicting — the exact pre-launch ritual of 5.2, performed today without a GPU in the room. When your first real kernel matches this prediction within 20%, the model — not the luck — did it.</p>
+</div>
+
+<h2>Key points</h2>
+<ul class="keypoints">
+<li>The GPU = 100+ independent SMs (MIMD) around shared L2/HBM; "CUDA cores" count lanes — architects and kernels think in SMs and warps.</li>
+<li>A warp = 32 threads in SIMT lockstep: memory judged per-warp (coalescing), branches serialize disagreeing lanes (divergence ≈ 2× for coin-flips), registers swappable lane-to-lane (shuffles).</li>
+<li>Up to 64 warps stay RESIDENT per SM with registers allocated — switching is free; the giant register file is the price of the trick.</li>
+<li>Latency hiding: warps-needed ≈ latency ÷ per-warp issue gap (~12–16/scheduler) — occupancy exists to supply stall-coverage candidates, not to "use cores."</li>
+<li>Residency is bought with register/shared budgets (floor-division economics — M2 L3 P3); blocks share an SM and may cooperate, the grid is independent by contract.</li>
+<li>Full occupancy + perfect access saturates the MEMORY roof; only arithmetic intensity moves you toward the FLOP roof (the worked example's 0.3%, and 4.7's chart).</li>
+</ul>
+
+<h2>Quiz</h2>
+<div class="quiz">
+  <div class="q">1. A kernel uses 128 registers per thread (a fat physics kernel). Blocks of 256 threads. How many blocks fit per SM (65,536 registers), what's the occupancy, and is that automatically bad?</div>
+  <button class="opt">16 blocks — registers don't limit residency</button>
+  <button class="opt" data-c="1">65,536/(256×128) = 2 blocks = 16 warps = 25% occupancy — bad ONLY if stalls outnumber the coverage: a compute-dense kernel with high ILP per warp can run near-peak at 25% (occupancy is a means, not a score)</button>
+  <button class="opt">2 blocks — and 25% occupancy means 25% of peak performance</button>
+  <button class="opt">0 — 128 registers is illegal</button>
+  <div class="expl">The floor division: 65,536/32,768 = 2 (M2 L3 P3's formula, on real silicon). But the second half is the wisdom: warps-needed ≈ latency/issue-gap — if this kernel's warps each carry long independent FMA chains (high ILP, 4.1), 16 warps may cover the stalls fine. Chasing 100% occupancy by spilling registers to memory (the compiler WILL if you cap regs) often makes kernels SLOWER. 5.6 measures this trade; today you can already reason it.</div>
+</div>
+<div class="quiz">
+  <div class="q">2. Within one warp: <code>if (threadIdx.x &lt; 16) f(); else g();</code> versus <code>if (blockIdx.x % 2) f(); else g();</code> — same branch shape, wildly different cost. Explain.</div>
+  <button class="opt">Both diverge — any if costs 2×</button>
+  <button class="opt" data-c="1">The first splits INSIDE every warp (lanes 0–15 vs 16–31): true divergence, f then g serially, ~2×. The second is uniform PER BLOCK — every warp in a block agrees, takes ONE path: free (a predictable branch — 4.1's happy case)</button>
+  <button class="opt">The second crashes — blocks can't branch</button>
+  <button class="opt">The first is free because 16 is a power of two</button>
+  <div class="expl">Divergence is measured at WARP granularity: uniform-within-warp branches cost nothing (all masks on). Corollary that designs real kernels: make branch conditions functions of warp/block ID or of SORTED data (4.3's corollary), not of per-lane noise. The same physics gave you 4.1's sorted-vs-shuffled ×3; here the multiplier applies to 32 lanes at once. Branch SHAPE, not branch COUNT, is what you audit.</div>
+</div>
+
+<h2>Exercises</h2>
+<details><summary>Exercise 1 — The occupancy calculator, built from scratch: write occ.py (or .c) taking (threads_per_block, regs_per_thread, shared_bytes_per_block) and printing blocks/SM under each of the three budgets (65,536 regs; 228 KB shared; 2048 threads / 64 warps), the binding constraint, and occupancy. Verify against the quiz and worked example, then find: the largest block size that keeps 100% occupancy at 32 regs/thread, and the shared-memory budget per block that halves occupancy at block=256.</summary><div class="body">
+<pre><code>def occupancy(tpb, regs, smem):
+    by_regs   = 65536 // (tpb * regs) if regs else 99
+    by_smem   = 228*1024 // smem if smem else 99
+    by_threads= 2048 // tpb
+    blocks = min(by_regs, by_smem, by_threads, 32)      # 32 = blocks/SM hardware cap
+    warps  = blocks * (tpb // 32)
+    which  = min((by_regs,'registers'),(by_smem,'shared'),(by_threads,'threads'))[1]
+    return blocks, warps/64, which
+# checks: (256,16,0) → 8 blocks, 100%, threads-bound ✓ (worked example)
+#         (256,128,0) → 2 blocks, 25%, registers-bound ✓ (quiz 1)
+# finds:  32 regs → tpb×32 ≤ 65536/blocks… at 100% need 2048 threads: 2048×32 = 65,536
+#         EXACTLY — any block size dividing 2048 works at 32 regs: the knife's edge.
+#         smem to halve occupancy at 256: 32 warps = 4 blocks → smem &gt; 228K/8 = 28.5 KB
+#         per block pushes below 8 blocks; &gt; 57 KB → ≤ 4 blocks (50%).</code></pre>
+<p>Two design facts fall out: <strong>32 registers/thread is the full-occupancy waterline</strong> (why the compiler's default targets hover there, and what <code>-maxrregcount</code> negotiates — 3.9's occupancy Practice, now inevitable); and <strong>shared memory is a residency currency</strong> — 5.5's tiles will SPEND occupancy to buy reuse, and this calculator prices the trade before you write the kernel. Keep it; you'll use it weekly in Module 5 (and it reproduces what the CUDA occupancy API reports — you've built the tool before meeting it).</p>
+</div></details>
+<details><summary>Exercise 2 — Divergence accounting on paper: a warp processes 32 image rows; 7 rows are "edge rows" needing a 40-instruction special path; the other 25 take a 12-instruction fast path. Compute the warp's cost (a) as-is, (b) if rows are pre-sorted so edge rows cluster into dedicated warps, (c) with a branchless unified path of 20 instructions. Which wins at THESE numbers, and at what edge-fraction does (c) overtake (b)?</summary><div class="body">
+<p>(a) Mixed warp: divergent → both paths serialize: 40 + 12 = 52 instructions per warp (every lane waits through both). (b) Sorted: 25/32 of warps take 12 (fast-only), 7/32 take 40 → average 12×(25/32) + 40×(7/32) = 9.4 + 8.75 = 18.1 — 2.9× better than (a). (c) Uniform 20 always. At these numbers (b) 18.1 &lt; (c) 20: sorting wins. Crossover: avg(b) = 12(1−e) + 40e = 20 → e = 8/28 ≈ 28.6% edge fraction — above that, the branchless path wins. The general kit, now priced: <strong>sort/partition when the expensive case is rare; go branchless when it's common; never leave coin-flips inside warps</strong> (a: the 52). This is 4.1 §4's cmov economy re-derived for 32 lanes — and it's the actual design meeting behind every production image/attention kernel's "edge handling" section (your M2 L8 crop-vs-pad decision was this meeting, junior edition).</p>
+</div></details>
+
+<hr>
+<h1>Go deeper — the complete guide</h1>
+<p>Warp scheduling fine print, independent thread scheduling (post-Volta truth), tensor cores as the fourth layer, what blocks really buy, tail effects, and the CPU→GPU translation table completed.</p>
+
+<h2>1. Schedulers and dual-issue fine print</h2>
+<p>Each SM partitions into 4 scheduler quadrants (32 lanes + tensor core + registers each); each picks one ready warp per cycle. The issue-gap arithmetic (concept §4) is per-quadrant: ~12–16 ready warps per scheduler covers HBM; shared-memory or L2 stalls (~30/200 cycles) need proportionally fewer (M1 L2 division, always). Corollary for reading Nsight later: "issue slot utilization" is the GPU's IPC (4.1's translation table, cashed) — 100% means every scheduler issued every cycle; the gap between that and your FLOP number is instruction mix (loads, address math — why 5.7 obsesses over index arithmetic costs too).</p>
+
+<h2>2. Independent thread scheduling: the modern truth about lockstep</h2>
+<p>Since Volta, each thread has its own program counter — warps <em>can</em> interleave divergent paths and threads can wait on each other without deadlock (pre-Volta code that assumed strict lockstep famously broke). What did NOT change: issue is still warp-wide with masks; divergence still serializes; coalescing still judges the warp's addresses together. Read it as: <em>correctness</em> got per-thread guarantees (you may write producer-consumer within a warp, with explicit <code>__syncwarp()</code>), <em>performance</em> still obeys the 32-lane physics. The practical rules survive unchanged — but "warps are strictly lockstep" would be a 2016 answer in a 2026 interview; "SIMT with per-thread PCs, warp-granular issue and masking" is the current one.</p>
+
+<h2>3. Tensor cores: the SIMD-of-tiles fourth layer</h2>
+<pre><code>one tensor-core op ≈ D(16×16) += A(16×16) × B(16×16)   per instruction-ish:
+~8,000 FLOPs from ONE issued warp instruction — vs 32 FMAs (64 FLOPs) for lanes.
+That ~64–128× density is the entire fp16/bf16 peak (M1 L8's formats cash out):
+RTX 5090: 105 TF fp32 lanes vs 838 TF dense fp16 tensor (1676 with sparsity*).</code></pre>
+<p>The warp collectively feeds tile fragments from registers/shared memory (the layouts are why 5.5's tiling discipline precedes A6's tensor-core work). Two honest notes: only matmul-shaped math qualifies (the taxonomy's data-parallel heartland — everything else uses the lanes), and the sparsity asterisk (4.7's spec-sheet trap) doubles the brochure but requires 2:4 structured-sparse weights. Tensor cores are why "GPU FLOPs" quotes need three qualifiers before they're numbers.</p>
+
+<h2>4. What a block actually buys (and what it costs)</h2>
+<table>
+<tr><th>Block guarantee</th><th>Buys you</th><th>Costs</th></tr>
+<tr><td>same SM for all its threads</td><td>shared memory access (5.5's tiles), fast barriers (__syncthreads)</td><td>residency currency (Ex.1's budgets)</td></tr>
+<tr><td>schedulable anywhere, anytime</td><td>the same binary scales 1→132 SMs; preemption-friendly</td><td>NO inter-block sync mid-kernel (grid-wide sync = new kernel launch, or cooperative groups with strict limits)</td></tr>
+<tr><td>ragged last blocks allowed</td><td>arbitrary N via ceil-division + guard (the M1 L2 liturgy)</td><td>tail waves: the last &lt;1 wave of blocks runs at partial width — visible in small grids (§5)</td></tr>
+</table>
+
+<h2>5. Tail effects and the wave arithmetic</h2>
+<pre><code>waves = ceil(blocks / (blocks_per_SM × SMs))          — yet another M1 L2 ceil!
+390,625 blocks / (8 × 170) = 287.2 waves → the 0.2 partial wave is noise. BUT:
+a 2,048-block launch = 1.5 waves → 33% of runtime at ~half throughput. Small
+grids on big GPUs waste silicon — why 5090-class cards want BIG batches, why
+serving stacks fuse small ops (Track A9), and why "my GPU is slower than my
+laptop on tiny inputs" is EXPECTED physics, not a driver bug.</code></pre>
+
+<h2>6. Gotchas</h2>
+<div class="gotcha"><strong>Chasing 100% occupancy as a score.</strong> Quiz 1's lesson: occupancy is stall-coverage supply. Spilling registers to raise it trades fast storage for slow to impress a metric. Balance, measured (5.6).</div>
+<div class="gotcha"><strong>Block sizes that aren't multiples of 32.</strong> 250 threads = 7 full warps + one 26/32 warp: 6 lanes of every 8th warp permanently masked off — a built-in 2.3% tax plus scheduler slot waste. 128/256/512, essentially always.</div>
+<div class="gotcha"><strong>Per-lane branch conditions.</strong> Quiz 2's first form. Audit every <code>if</code> in a kernel: is the condition uniform per warp/block, sorted-coherent, or branchless-able? The 4.1 Ex.2 kit is the rewrite manual.</div>
+<div class="gotcha"><strong>Assuming blocks run in launch order (or at all, concurrently).</strong> The contract says ANY order, ANY subset concurrently. Inter-block spinlocks deadlock on small GPUs and "work" flakily on big ones — the independence rule is load-bearing (M2 L3's purity, silicon edition).</div>
+<div class="gotcha"><strong>Pre-Volta lockstep folklore.</strong> Warp-synchronous code without __syncwarp(), shuffles without masks — 2016 idioms that modern schedulers legally break (§2). Modern intrinsics take explicit masks for exactly this reason.</div>
+<div class="gotcha"><strong>Ignoring the tail on small grids.</strong> §5's 1.5-wave trap: benchmark conclusions from small N condemn the GPU unfairly (and the fix — batching — lives one lesson later, 4.6/A8). Wave arithmetic BEFORE judging hardware.</div>
+
+<h2>Scenario — the kernel review you can already conduct</h2>
+<p>A study-group friend, one week into Module 5, brings their first "disappointingly slow" kernel: per-thread Monte-Carlo option pricing (M1 L7's dart game, finance edition), 1,000 threads total, block size 100, a per-thread <code>if (path_hit_barrier)</code> mid-loop, and 96 registers/thread from a fat local state struct. You review it with THIS lesson only — no profiler yet. Finding 1: 1,000 threads on a 170-SM part is ~0.4% residency — the machine is empty (latency hiding has no army); fix: each thread prices ONE path not ONE option → 10M threads (the taxonomy reshape, 4.3 §1). Finding 2: block=100 = 3.125 warps — the fractional warp tax plus awkward scheduling; fix: 256. Finding 3: the barrier-<code>if</code> is a per-lane coin flip mid-loop — Ex.2's accounting says ~2×; fix: branchless max/select forms (the payoff formulas are all expressible that way — finance kernels famously are). Finding 4: 96 regs → Ex.1's calculator says 2 blocks/SM even after the thread fix; the state struct carries loop-invariant market params — hoist them to shared/constant memory (M2 L3's hoisting, GPU edition) → 40 regs → 6 blocks. Predicted compound improvement: 50–200×, before any profiler, from four findings that were ALL this lesson's checklist items. The friend's stunned question — "how did you see that without running it?" — has a one-word answer you can now give honestly: <em>arithmetic.</em></p>
+
+<h2>Practice</h2>
+<details><summary>1. Translate marketing to architecture: "21,760 CUDA cores, 2.41 GHz" → derive the fp32 peak (with FMA) and check against the quoted 104.8 TF. Then express the machine in architect units (SMs × lanes × clock).</summary><div class="body">21,760 lanes × 2 FLOP/FMA × 2.41e9 ≈ 104.9 TF ✓ — the brochure number is just lanes×2×clock (M1 L3 estimation validating marketing for once). Architect units: 21,760/128 = 170 SMs × 128 lanes. The translation habit matters because EVERY capability question (occupancy, waves, shared memory totals) computes from SM counts, never from "CUDA cores."</div></details>
+<details><summary>2. Warps-needed arithmetic for three stall profiles: HBM-bound (400 cyc stalls, 10-instr independent runs), shared-memory-bound (30 cyc, 10-instr), and tensor-core pipelines (varying). Which needs the occupancy, and what does that imply about tiled (5.5-style) kernels' occupancy tolerance?</summary><div class="body">HBM: 400/10 = 40 warps/scheduler-worth of demand → wants HIGH occupancy (the saxpy world). Shared-bound: 30/10 = 3 warps/scheduler ≈ 12/SM ≈ 19% occupancy suffices! Tensor pipelines: long deterministic latencies but few, with high ILP — modest occupancy + fat blocks typically. Implication: tiled kernels that convert HBM traffic into shared-memory traffic ALSO convert their occupancy requirement from 'maximal' to 'modest' — which is precisely why 5.5's tiles can afford to spend residency on shared memory (Ex.1's currency trade closes its own loop). One formula, three regimes, a design philosophy.</div></details>
+<details><summary>3. A warp reads <code>x[threadIdx.x * 2]</code> (stride-2 floats). Using 4.5's preview (32-B sectors): how many sectors does the warp touch, what's the efficiency, and which THREE course locations taught this exact pattern's cost?</summary><div class="body">32 threads × stride 8 B span 256 B = 8 sectors (vs 4 minimum for 128 B of payload): 50% efficiency — every sector half-used. The lineage: M2 L5 Ex.2 (NumPy stride timings), 4.2's stride-lab (lines half-used at stride 2), 3.9's ijk (the N-stride catastrophe's little sibling). Fourth appearance, same physics, new unit (sector) — by 5.7's profiler session this pattern-spotting is meant to be reflexive, and it is.</div></details>
+<details><summary>4. Explain to a CPU-performance colleague (4 sentences max) why GPUs get away with L2 caches smaller than their register files, using the translation table. Then name the ONE workload class where this bet fails and what GPUs added for it.</summary><div class="body">"A CPU cache exists to make ONE thread's next access fast — miss it and the core drowns. A GPU replaces that bet: any miss just parks one warp of 64, and the scheduler issues another; latency is hidden by candidates, not avoided by copies. So silicon goes to registers — the parked army's luggage — instead of speculative copies. The bet fails on pointer-chasing/irregular workloads with NO army-sized parallelism (graph traversals with tiny frontiers) — for which GPUs added bigger L2s over the generations (50→126 MB) and, honestly, those workloads often still belong on CPUs (4.3 §5's gate)."</div></details>
+<details><summary>5. Wave math triage: your kernel launches 3,400 blocks of 128 threads (32 regs/thread, no shared) on the 170-SM part. Blocks/SM? Waves? Expected tail penalty? Now the same launch on a 60-SM laptop GPU — which machine shows the HIGHER utilization, and what does that teach about benchmark hardware choices?</summary><div class="body">128×32 = 4K regs/block → 16 by regs, but 2048/128 = 16 by threads → 16 blocks/SM. Waves on 170 SMs: 3400/(16×170) = 1.25 → a 25%-full second wave: ~10–15% throughput haircut. On 60 SMs: 3400/960 = 3.54 waves — the partial wave is amortized: HIGHER utilization on the SMALLER GPU (!). Teaching: small-workload benchmarks flatter small GPUs and slander big ones (§5's physics); honest comparisons scale N with the machine or report waves alongside (the 4.3 Scaling Report grows a GPU row — as promised).</div></details>
+<details><summary>6. Rewrite audit: for each kernel-fragment, classify (uniform / sorted-coherent / divergent) and give the fix where needed: (a) <code>if (i &lt; n)</code> guard; (b) <code>if (x[i] &lt; 0) x[i] = 0</code>; (c) <code>if (row_type[i] == SPARSE) sparse_path() else dense_path()</code> on shuffled rows; (d) <code>if (threadIdx.x == 0) block_total = 0</code>.</summary><div class="body">(a) Sorted-coherent by construction: only the LAST warp of the grid diverges (the ragged tail) — cost ~0, keep it (the guard is sacred — M1 L2). (b) Divergent condition but trivially branchless: <code>x[i] = fmaxf(x[i], 0)</code> — ReLU, literally; the select costs less than the mask bookkeeping. (c) True divergence on a coin-ish flip: partition rows by type at ingest (sort ONCE, amortized — 4.3's corollary, Ex.2's arithmetic decides sorted-vs-unified). (d) Uniform-enough: one lane does tiny work while 31 idle for 2 instructions — fine AND standard (someone must zero the accumulator); the alternative (all lanes racing to write) is worse. Four ifs, four different verdicts — branch AUDITING, not branch phobia.</div></details>
+<details><summary>7. Design: the "launch ritual" checklist card for Module 5 (one screen, printed beside the keyboard): block-size rules, the three-budget occupancy check (your Ex.1 tool), warps-needed vs stall profile estimate, wave count, divergence audit of every if, coalescing audit of every index expression, and the two predictions (roof + time) to write down BEFORE first run. Cite the source lesson per line and state what "prediction matched within 20%" certifies.</summary><div class="body">The card: (1) block ∈ {128, 256, 512}, multiple of 32 [4.4 gotcha]; (2) occ.py on (tpb, regs, smem) — know your binding budget [Ex.1/M2 L3]; (3) stall profile → warps-needed → is occupancy sufficient FOR THIS KERNEL [§1, P2]; (4) waves = ceil(blocks/(bpSM×SMs)) — flag &lt; 3 [§5]; (5) per-if: uniform/sorted/branchless verdict [quiz 2, P6]; (6) per-index: consecutive-thread stride in BYTES → sectors per warp [P3, 4.5]; (7) write down AI → which roof [M1 L3 §4/4.7] and predicted ms from roof arithmetic [worked example]; run; compare. Within 20% = your MODEL of the machine is calibrated — mismatches localize to exactly one checklist line, which converts profiling (5.10) from exploration into confirmation. The card is this module compressed to one screen — and it's what "senior kernel engineer intuition" actually is: a checklist, internalized.</div></details>
+
+<div class="pager">
+  <a href="lesson-03.html">← The parallelism taxonomy</a>
+  <a href="lesson-05.html">Next: The GPU memory system →</a>
+</div>
+<div class="footer">GPU Mastery · Module 4 · Lesson 4 — works offline · progress saved in your browser</div>
+</div>
+<script src="../assets/diagrams4.js"></script>
+<script src="../assets/app.js"></script>
+</body>
+</html>
