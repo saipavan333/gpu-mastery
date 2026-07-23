@@ -1,0 +1,5 @@
+node_modules/
+_shots/
+*.log
+# generated data artifacts (rebuilt by tools/) — add as they appear:
+# assets/review-data.json

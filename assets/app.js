@@ -1,5 +1,27 @@
 /* GPU Mastery — shared behavior: quizzes, progress, diagrams, copy. No dependencies. */
 (function () {
+  /* --- platform bootstrap: path-aware load of the shared layer (KaTeX + injector) --- */
+  var ME = document.currentScript;
+  var rel = (ME && ME.getAttribute("src")) || "assets/app.js";
+  var assetBase = rel.replace(/app\.js.*$/, "");
+  var rootBase = assetBase.replace(/assets\/$/, "");
+  window.GM = { assetBase: assetBase, rootBase: rootBase };
+  (function () {
+    function css(h) { var l = document.createElement("link"); l.rel = "stylesheet"; l.href = h; document.head.appendChild(l); }
+    function js(s, cb) { var x = document.createElement("script"); x.src = s; if (cb) x.onload = cb; document.head.appendChild(x); }
+    css(assetBase + "gm-site.css");
+    js(assetBase + "gm-site.js");
+    js(assetBase + "gm-search.js");
+    css(assetBase + "gm-glossary.css");
+    js(assetBase + "gm-glossary.js");
+    css(assetBase + "gm-assistant.css");
+    js(assetBase + "gm-assistant.js");
+    if (/\$\$|\\\(|\\\[/.test(document.documentElement.innerHTML)) {   // KaTeX only where math exists (§5.7)
+      css(assetBase + "katex/katex.min.css");
+      js(assetBase + "katex/katex.min.js", function () { js(assetBase + "katex/contrib/auto-render.min.js"); });
+    }
+  })();
+
   var store = {
     get: function (k, d) { try { var v = localStorage.getItem("gpum:" + k); return v === null ? d : JSON.parse(v); } catch (e) { return d; } },
     set: function (k, v) { try { localStorage.setItem("gpum:" + k, JSON.stringify(v)); } catch (e) {} }

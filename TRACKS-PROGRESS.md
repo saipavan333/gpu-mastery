@@ -112,6 +112,31 @@ requested by Pavan (visual labs + hands-on labs + widgets):
 - **Tier 5:** glossary/index, prereq+outcome headers, dark/light toggle, PDF, progress export.
 Build discipline unchanged: verify every tool's math (node), never ship truncated files.
 
+## Playbook alignment — FOUNDATION BATCH done (2026-07-07)
+Mapped to the Tutorial Hub master COURSE_BUILD_PLAYBOOK.md. Audited gpu-mastery vs it;
+executed Phase A (non-negotiables) + D1 (QA suite), all verified:
+- **Single-source injector** (assets/gm-site.js, bootstrapped by app.js which computes
+  asset/root base from its own currentScript). One edit now reaches all 94 pages. Verified
+  by a hand-rolled DOM-shim test (no jsdom — it hung the sandbox).
+- **Creator byline** "Built by U E Sai Pavan Vamshi Krishna" injected into nav (right-aligned)
+  + footer, single-source. **Favicon** (GPU-grid motif: svg/32/180/ico in assets/img/) injected
+  site-wide. **A11y**: skip-link, .wrap→#gm-main(role=main), diagram svg role=img+aria-label
+  from caption. All confirmed in the shim test.
+- **KaTeX** vendored offline (assets/katex/, reused from the Gradient Descent course). DECISION:
+  delimiters are **$$…$$ (display) and \(…\) \[…\] (inline)** — NO single-$ — so the course's
+  many currency/shell `$` (costs, $HOME) are always literal, eliminating the §5.1 collision class.
+  Inline math must use \(…\). KaTeX loads **only on pages containing math** (§5.7 perf budget).
+  No lessons use math yet → conversion of equation-heavy lessons to $$/\( is the remaining A2 work.
+- **tools/qa.js** living regression suite (§7.1): broken-link (case-sensitive), per-text-node
+  $$-parity, American-English locale, inline-script syntax, close-tag/div-balance, asset presence.
+  Fixed: 3 British spellings (grey→gray, colour→color, behaviour→behavior). **QA: ALL CLEAN.**
+- Also: app.js added to the 6 lab pages that lacked it (now 94/94).
+NEXT (Phase B, priority order): content-index generator → search → glossary+tooltips → review/
+flashcards → AI assistant (retrieval + Cloudflare Worker/Gemini; user will deploy the Worker) →
+interview bank → job-readiness exam → cheat-sheets → Pyodide runnable code+auto-grader → more
+visual labs → roadmap+concept-map+resume → read-aloud → PWA. Then C1 (prereqs/misconceptions),
+E2 (SEO/OG/sitemap). Run tools/qa.js before every push.
+
 ## Canonical numbers ledger (do not contradict — HANDOFF PART 5c)
 T4: sm_75 · 40 SMs · 8.1 TF fp32 · 320 GB/s spec / ~220 achievable · 64 KB
 smem/SM · 65,536 regs/SM · 1024 thr/SM · 2 copy engines · PCIe ≈ 11–12 GB/s
@@ -240,3 +265,42 @@ T4 (state honestly in lessons) · NCCL **2.28** added device API; **2.30.x** cur
   executed geometry (they'd been illustrative guesses; now D=3.94/G=0.99/F=0.04, matching
   the NumPy run). Rule reinforced (HANDOFF PART 4): eyes catch what geometry math can't —
   here, a whole class of missing-glyph bugs invisible to bounds-checking.
+
+---
+
+## Platform features (Phase B) — playbook parity build
+
+Single-source injector architecture: `assets/app.js` bootstraps shared platform
+assets on all 97 pages via computed base paths, so global changes = one edit.
+
+- **Search** (§3, §10) — `tools/build-index.js` -> `assets/search-data.js`
+  (97 pages, keyword+phrase+IDF+stemming ranked in `assets/gm-search.js`, VERIFIED in
+  node). Overlay (nav button, `/`, Cmd/Ctrl-K) + inline mode on `search.html`.
+- **Glossary** (§3) — 54 terms in `assets/gm-glossary-data.js`; A–Z filterable
+  `glossary.html` + inline hover/focus tooltips on first term occurrence per lesson
+  (`assets/gm-glossary.js`). All 54 term->lesson links resolve (QA-checked).
+- **Spaced-repetition Review** (§3) — `tools/build-review.js` harvests 222 cards
+  (54 glossary terms + 168 quiz Q&A) -> `assets/review-data.js`. Leitner engine
+  (`assets/gm-review.js`, boxes 1–5, intervals 1/2/4/8/16 d, localStorage), due-card
+  session UI on `review.html`. Scheduling logic VERIFIED (11 node assertions:
+  grade transitions, queue ordering + new-card cap, deck filter, stats).
+- **QA suite extended** — `tools/qa.js` now strips `<script>`/`<style>` before the
+  broken-link scan (fixed a false positive on inline-JS `href` strings) and adds a
+  glossary-link resolution check. Standard: `QA: ALL CLEAN`.
+- **Footer study strip** (single-source, `gm-site.js`) — Curriculum · Labs · Glossary ·
+  Review · Search on every page.
+
+Generated runtime data (`search-data.js`, `review-data.js`) IS committed — GitHub
+Pages is a static host with no build step, so the site depends on them at runtime.
+`.gitignore` excludes only `node_modules/`, `_shots/`, `*.log`.
+
+- **AI Course Assistant** (§3, §10) — site-wide "Ask AI" FAB + chat panel
+  (`assets/gm-assistant.js`, namespaced `.gma`). Offline mode works now: reuses
+  `GMSearch.rank` over `GM_INDEX` + `GM_GLOSSARY` for grounded, cited answers
+  (VERIFIED in node against real data — "memory coalescing" -> lesson 5.7 + the
+  coalescing lab; "roofline model" -> lesson 4.7 + Roofline Explorer; glossary
+  resolves occupancy / bank-conflict). Optional AI-written answers via an owner
+  Cloudflare Worker (`worker/assistant-proxy.js`, Gemini free tier) configured in
+  `assets/assistant-config.js` (empty = offline) — setup in `ASSISTANT-SETUP.md`.
+  Answer cache, follow-up memory, prompt-injection defense in the Worker prompt.
+  QA asset-presence check extended to 13 platform files.

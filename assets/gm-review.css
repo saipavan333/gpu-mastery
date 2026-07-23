@@ -1,0 +1,80 @@
+/* GPU Mastery — spaced-repetition review UI */
+#rv-app { margin-top: 22px; }
+
+/* deck tabs */
+.rv-decks { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 18px; }
+.rv-deck { font: inherit; font-size: 14px; color: var(--dim); background: var(--card2);
+  border: 1px solid var(--line); border-radius: 999px; padding: 7px 14px; cursor: pointer;
+  transition: color .15s var(--ease), border-color .15s var(--ease), background .15s var(--ease); }
+.rv-deck:hover { color: var(--ink); border-color: var(--lineHi); }
+.rv-deck.on { color: var(--ink); border-color: var(--acc); background: var(--accBg); }
+.rv-n { display: inline-block; margin-left: 5px; font-variant-numeric: tabular-nums;
+  color: var(--dim2); font-size: 12.5px; }
+.rv-deck.on .rv-n { color: var(--accT); }
+
+/* stat cards */
+.rv-stats { display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; margin-bottom: 20px; }
+.rv-stat { background: linear-gradient(180deg, var(--cardHi), var(--card));
+  border: 1px solid var(--line); border-radius: var(--r2); padding: 16px 14px; text-align: center; }
+.rv-stat-n { font-size: 30px; font-weight: 800; line-height: 1; font-variant-numeric: tabular-nums; color: var(--ink); }
+.rv-stat-l { font-size: 12.5px; color: var(--dim); margin-top: 6px; letter-spacing: .02em; }
+.rv-stat-n[data-kind="due"] { color: var(--accT); }
+.rv-stat-n[data-kind="new"] { color: var(--violet); }
+.rv-stat-n[data-kind="learning"] { color: var(--warn); }
+.rv-stat-n[data-kind="mastered"] { color: var(--good); }
+
+.rv-actions { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; margin: 8px 0 6px; }
+.rv-hint { margin-top: 14px; }
+#rv-app kbd { font: 12px var(--mono); background: var(--card2); border: 1px solid var(--line);
+  border-bottom-width: 2px; border-radius: 5px; padding: 1px 6px; color: var(--tx); }
+
+/* session progress */
+.rv-progress { height: 6px; background: var(--card2); border-radius: 999px; overflow: hidden; margin: 6px 0 14px; }
+.rv-bar { height: 100%; background: linear-gradient(90deg, var(--acc), var(--acc2)); border-radius: 999px;
+  transition: width .35s var(--ease); }
+.rv-meta { display: flex; justify-content: space-between; align-items: center; margin-bottom: 10px; }
+.rv-tag { font: 11px/1 var(--mono); text-transform: uppercase; letter-spacing: .08em;
+  padding: 4px 8px; border-radius: 6px; border: 1px solid var(--line); }
+.rv-tag-term { color: var(--violet); border-color: color-mix(in srgb, var(--violet) 45%, var(--line)); }
+.rv-tag-quiz { color: var(--acc2); border-color: color-mix(in srgb, var(--acc2) 40%, var(--line)); }
+
+/* card */
+.rv-card { background: linear-gradient(180deg, var(--cardHi), var(--card)); border: 1px solid var(--lineHi);
+  border-radius: var(--r3); padding: 34px 30px; min-height: 220px; box-shadow: var(--sh2);
+  display: flex; flex-direction: column; outline: none; }
+.rv-card:focus-visible { box-shadow: var(--glow), var(--sh2); }
+.rv-q { font-size: 21px; line-height: 1.5; color: var(--ink); font-weight: 600; }
+.rv-front { display: flex; flex-direction: column; gap: 22px; align-items: flex-start; }
+.rv-back { margin-top: 22px; padding-top: 22px; border-top: 1px dashed var(--line); }
+.rv-back.rv-in { animation: rvfade .28s var(--ease); }
+@keyframes rvfade { from { opacity: 0; transform: translateY(6px); } to { opacity: 1; transform: none; } }
+.rv-a { font-size: 17px; line-height: 1.65; color: var(--tx); }
+.rv-src { display: inline-block; margin-top: 12px; color: var(--acc); }
+
+/* grades */
+.rv-grades { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; margin-top: 22px; }
+.rv-grade { font: inherit; cursor: pointer; border-radius: var(--r2); padding: 13px 10px;
+  border: 1px solid var(--line); background: var(--card2); color: var(--ink);
+  display: flex; flex-direction: column; align-items: center; gap: 3px;
+  transition: transform .12s var(--ease), border-color .15s var(--ease), background .15s var(--ease); }
+.rv-grade b { font-size: 15px; }
+.rv-grade span { font: 11px var(--mono); color: var(--dim2); }
+.rv-grade:hover { transform: translateY(-2px); }
+.rv-again:hover { border-color: var(--bad); background: var(--badBg); }
+.rv-good:hover { border-color: var(--acc); background: var(--accBg); }
+.rv-easy:hover { border-color: var(--good); background: var(--goodBg); }
+
+.rv-done { text-align: center; padding: 34px 24px; }
+.rv-done h2 { margin-top: 0; }
+.rv-done .rv-actions { justify-content: center; }
+
+@media (max-width: 620px) {
+  .rv-stats { grid-template-columns: repeat(2, 1fr); }
+  .rv-card { padding: 24px 18px; }
+  .rv-q { font-size: 19px; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .rv-bar, .rv-grade, .rv-deck { transition: none; }
+  .rv-back.rv-in { animation: none; }
+}
+.rv-noanim .rv-back.rv-in { animation: none; }

@@ -1,0 +1,41 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Glossary — GPU Mastery</title>
+<link rel="stylesheet" href="assets/style.css">
+</head>
+<body data-lesson="glossary">
+<nav><div class="inner">
+  <a class="logo" href="index.html">GPU<span>Mastery</span></a>
+  <a class="item" href="index.html">Home</a>
+  <a class="item" href="curriculum.html">Curriculum</a>
+  <a class="item" href="labs.html">Labs</a>
+  <a class="item" href="setup.html">Lab setup</a>
+</div></nav>
+<div class="wrap">
+<h1>Glossary</h1>
+<p class="lead">Every core term, defined in plain English and linked to the lesson that teaches it. On any lesson, hover a <span style="border-bottom:1px dashed var(--acc)">dashed term</span> for its definition inline.</p>
+<div class="gl-controls"><input id="gl-search" type="search" placeholder="Filter terms… (e.g. coalescing, roofline)" aria-label="Filter glossary"></div>
+<div id="gl-list"></div>
+<div class="footer">GPU Mastery · Glossary</div>
+</div>
+<link rel="stylesheet" href="assets/gm-glossary.css">
+<script src="assets/gm-glossary-data.js"></script>
+<script>
+(function(){
+  var G=(window.GM_GLOSSARY||[]).slice().sort(function(a,b){return a.t.toLowerCase()<b.t.toLowerCase()?-1:1;});
+  var list=document.getElementById('gl-list'), inp=document.getElementById('gl-search');
+  function esc(s){return String(s).replace(/[&<>]/g,function(c){return{'&':'&amp;','<':'&lt;','>':'&gt;'}[c];});}
+  function render(q){ q=(q||'').toLowerCase().trim();
+    var items=G.filter(function(e){ if(!q)return true; return (e.t+' '+(e.a||[]).join(' ')+' '+e.d).toLowerCase().indexOf(q)>=0; });
+    list.innerHTML = items.length ? items.map(function(e){ return '<div class="gl-item"><h3>'+esc(e.t)+
+      (e.a&&e.a.length?' <span class="al">('+esc(e.a.join(', '))+')</span>':'')+'</h3><p>'+esc(e.d)+
+      (e.s?' <a href="'+esc(e.s)+'">→ lesson</a>':'')+'</p></div>'; }).join('')
+      : '<p class="dim">No terms match “'+esc(q)+'”.</p>'; }
+  inp.addEventListener('input',function(){render(inp.value);}); render('');
+})();
+</script>
+<script src="assets/app.js"></script>
+</body>
+</html>
