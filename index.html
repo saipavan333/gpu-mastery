@@ -2,189 +2,105 @@
 <html lang="en">
 <head>
 <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>GPU Mastery — from zero to deployed GPU code</title>
+<title>GPU Mastery — from school math to shipped GPU code</title>
+<meta name="description" content="A no-stone-unturned course: school mathematics to professional, deployed GPU code. 84 lessons, 254 verified diagrams, four career tracks — every number executed, every claim interview-defensible.">
 <link rel="stylesheet" href="assets/style.css">
 </head>
-<body>
+<body data-lesson="home">
 <nav><div class="inner">
   <a class="logo" href="index.html">GPU<span>Mastery</span></a>
   <a class="item on" href="index.html">Home</a>
   <a class="item" href="curriculum.html">Curriculum</a>
   <a class="item" href="labs.html">Labs</a>
   <a class="item" href="setup.html">Lab setup</a>
-  <a class="item" href="prompt.html">Generator prompt</a>
 </div></nav>
 <div class="wrap">
 
-<h1>GPU Mastery</h1>
-<p class="lead">A no-stone-unturned curriculum from school mathematics to professional, deployed GPU code — with four career tracks: ML/AI infrastructure, HPC & scientific computing, graphics & game engines, and vendor-neutral portable GPU. Built to a single standard: after each lesson, you can <em>do</em> the thing and defend it in an interview.</p>
+<section class="hero">
+  <div class="hero-grid">
+    <div>
+      <span class="eyebrow reveal">School math → shipped GPU code</span>
+      <h1 class="reveal d1">Master the GPU, from the <span class="grad">first principle to the shipped frame.</span></h1>
+      <p class="subhead reveal d2">Eighty-four lessons that carry you from slopes and sigma-notation to CUDA kernels, ML infrastructure, HPC simulation, real-time graphics, and portable GPU code — every number <em>executed</em>, every claim defensible in an interview.</p>
+      <div class="cta-row reveal d3">
+        <a class="btn btn-primary" href="curriculum.html">Start learning →</a>
+        <a class="btn btn-ghost" href="labs.html">Try the interactive Labs</a>
+      </div>
+      <p class="small dim reveal d3" style="margin-top:6px">New here? Begin at <a href="module-1/lesson-01.html">Module 1 · Lesson 1</a> — no prerequisites but school algebra.</p>
+    </div>
+    <img class="hero-art reveal d2" src="assets/hero-grid.svg" alt="A grid of compute threads with a wavefront of activation sweeping across it — grid, blocks, warps: the parallel machine.">
+  </div>
+  <div class="stats reveal d4">
+    <div class="stat"><div class="n">84</div><div class="l">LESSONS</div></div>
+    <div class="stat"><div class="n">254</div><div class="l">VERIFIED DIAGRAMS</div></div>
+    <div class="stat"><div class="n">100<span class="u">%</span></div><div class="l">CLAIMS EXECUTED</div></div>
+    <div class="stat"><div class="n">4</div><div class="l">CAREER TRACKS</div></div>
+    <div class="stat"><div class="n">0<span class="u">$</span></div><div class="l">DEPENDENCIES · OFFLINE</div></div>
+  </div>
+</section>
 
-<div class="diagram" data-diagram="roadmap" data-caption="43 shared core lessons, then four specializations — each ending in real, deployed GPU code."></div>
-<a class="card" href="labs.html" style="display:block;border-color:#2c5a3e;text-decoration:none"><strong style="color:var(--good)">New — Interactive Labs →</strong> <span class="dim">Roofline, occupancy, coalescing, and float-bit tools you poke at, plus a live WebGPU kernel that runs on your own GPU. Reason with the fundamentals, don't just read them.</span></a>
+<h2>One core, four careers</h2>
+<p class="lead">A single 43-lesson core takes you from mathematics to confident CUDA. Then choose a track — each an end-to-end course sharing that foundation. Pick where you want to end up.</p>
 
-<div class="grid2">
-<div class="card">
-<h3>Module 1 — Mathematical Foundations <span class="badge good">built</span></h3>
-<p class="small">Eight deep lessons rebuild all the math GPU work needs — from place value to IEEE-754. No setup required; works offline.</p>
-<p><a href="module-1/lesson-01.html"><strong>→ Start: 1.1 Numbers, Bases & Binary</strong></a></p>
-<div class="progressbar"><div></div></div>
-<p class="small dim" id="proglabel"></p>
-<ul class="lesson-list small">
-  <li data-lesson="m1l1"><span class="num">1.1</span><a href="module-1/lesson-01.html">Numbers, bases & binary</a><span class="tick">✓</span></li>
-  <li data-lesson="m1l2"><span class="num">1.2</span><a href="module-1/lesson-02.html">Algebra as computation</a><span class="tick">✓</span></li>
-  <li data-lesson="m1l3"><span class="num">1.3</span><a href="module-1/lesson-03.html">Exponents, logs & estimation</a><span class="tick">✓</span></li>
-  <li data-lesson="m1l4"><span class="num">1.4</span><a href="module-1/lesson-04.html">Geometry & trigonometry</a><span class="tick">✓</span></li>
-  <li data-lesson="m1l5"><span class="num">1.5</span><a href="module-1/lesson-05.html">Vectors & the dot product</a><span class="tick">✓</span></li>
-  <li data-lesson="m1l6"><span class="num">1.6</span><a href="module-1/lesson-06.html">Matrices</a><span class="tick">✓</span></li>
-  <li data-lesson="m1l7"><span class="num">1.7</span><a href="module-1/lesson-07.html">Probability & statistics</a><span class="tick">✓</span></li>
-  <li data-lesson="m1l8"><span class="num">1.8</span><a href="module-1/lesson-08.html">Floating point (capstone)</a><span class="tick">✓</span></li>
-</ul>
-</div>
-<div class="card">
-<h3>Module 2 — Programming from Zero <span class="badge good">built</span></h3>
-<p class="small">Python from your very first line to a tested, deployable image-processing tool — every lesson feeding the GPU road ahead.</p>
-<p><a href="module-2/lesson-01.html"><strong>→ Start: 2.1 Your First Program</strong></a></p>
-<ul class="lesson-list small">
-  <li data-lesson="m2l1"><span class="num">2.1</span><a href="module-2/lesson-01.html">Your first program — values & types</a><span class="tick">✓</span></li>
-  <li data-lesson="m2l2"><span class="num">2.2</span><a href="module-2/lesson-02.html">Control flow — decisions & loops</a><span class="tick">✓</span></li>
-  <li data-lesson="m2l3"><span class="num">2.3</span><a href="module-2/lesson-03.html">Functions, scope & purity</a><span class="tick">✓</span></li>
-  <li data-lesson="m2l4"><span class="num">2.4</span><a href="module-2/lesson-04.html">Lists, dicts & the matmul oracle</a><span class="tick">✓</span></li>
-  <li data-lesson="m2l5"><span class="num">2.5</span><a href="module-2/lesson-05.html">NumPy & vectorized thinking</a><span class="tick">✓</span></li>
-  <li data-lesson="m2l6"><span class="num">2.6</span><a href="module-2/lesson-06.html">Errors, debugging & pytest</a><span class="tick">✓</span></li>
-  <li data-lesson="m2l7"><span class="num">2.7</span><a href="module-2/lesson-07.html">Files, modules & environments</a><span class="tick">✓</span></li>
-  <li data-lesson="m2l8"><span class="num">2.8</span><a href="module-2/lesson-08.html">Capstone: image processing</a><span class="tick">✓</span></li>
-</ul>
-</div>
-</div>
+<a class="card hover" href="curriculum.html" style="display:block;border-left:4px solid var(--acc)">
+  <span class="eyebrow">The core · Modules 1–5</span>
+  <h3 style="margin:5px 0 6px;color:var(--ink)">Mathematical foundations → CUDA fundamentals</h3>
+  <p class="dim" style="margin:0;font-size:14.5px">Math from school level · programming from zero · C/C++ for GPU work · how computers &amp; GPUs actually work · CUDA — ending in a matmul kernel taken from 2 GFLOP/s to ~40% of peak. <span class="k" style="font-family:var(--mono);color:var(--dim2);font-size:12px">43 lessons · 132 diagrams</span></p>
+</a>
 
-<div class="grid2">
-<div class="card">
-<h3>Module 3 — C &amp; C++ for GPU Work <span class="badge good">built</span></h3>
-<p class="small">The metal: pointers, memory, undefined behavior, sanitizers — ending in a CPU matmul ladder (naive → blocked → all cores) that becomes the GPU's baseline.</p>
-<p><a href="module-3/lesson-01.html"><strong>→ Start: 3.1 Why C — Source to Binary</strong></a></p>
-<ul class="lesson-list small">
-  <li data-lesson="m3l1"><span class="num">3.1</span><a href="module-3/lesson-01.html">Why C — source to binary</a><span class="tick">✓</span></li>
-  <li data-lesson="m3l2"><span class="num">3.2</span><a href="module-3/lesson-02.html">Types, sizes & UB</a><span class="tick">✓</span></li>
-  <li data-lesson="m3l3"><span class="num">3.3</span><a href="module-3/lesson-03.html">Pointers (the keystone)</a><span class="tick">✓</span></li>
-  <li data-lesson="m3l4"><span class="num">3.4</span><a href="module-3/lesson-04.html">Arrays & pointer arithmetic</a><span class="tick">✓</span></li>
-  <li data-lesson="m3l5"><span class="num">3.5</span><a href="module-3/lesson-05.html">Stack, heap & malloc</a><span class="tick">✓</span></li>
-  <li data-lesson="m3l6"><span class="num">3.6</span><a href="module-3/lesson-06.html">Structs, headers & make</a><span class="tick">✓</span></li>
-  <li data-lesson="m3l7"><span class="num">3.7</span><a href="module-3/lesson-07.html">C++ essentials for CUDA</a><span class="tick">✓</span></li>
-  <li data-lesson="m3l8"><span class="num">3.8</span><a href="module-3/lesson-08.html">Segfaults, gdb & sanitizers</a><span class="tick">✓</span></li>
-  <li data-lesson="m3l9"><span class="num">3.9</span><a href="module-3/lesson-09.html">Capstone: CPU matmul ladder</a><span class="tick">✓</span></li>
-</ul>
-</div>
-<div class="card">
-<h3>Module 4 — How Computers &amp; GPUs Work <span class="badge good">built</span></h3>
-<p class="small">The hardware, explained from silicon up: pipelines, cache lines, Amdahl, SMs, warps, latency hiding, coalescing, PCIe economics — ending at the roofline model.</p>
-<p><a href="module-4/lesson-01.html"><strong>→ Start: 4.1 Inside a CPU Core</strong></a></p>
-<ul class="lesson-list small">
-  <li data-lesson="m4l1"><span class="num">4.1</span><a href="module-4/lesson-01.html">Inside a CPU core</a><span class="tick">✓</span></li>
-  <li data-lesson="m4l2"><span class="num">4.2</span><a href="module-4/lesson-02.html">The memory hierarchy</a><span class="tick">✓</span></li>
-  <li data-lesson="m4l3"><span class="num">4.3</span><a href="module-4/lesson-03.html">The parallelism taxonomy</a><span class="tick">✓</span></li>
-  <li data-lesson="m4l4"><span class="num">4.4</span><a href="module-4/lesson-04.html">Inside the GPU: SMs & warps</a><span class="tick">✓</span></li>
-  <li data-lesson="m4l5"><span class="num">4.5</span><a href="module-4/lesson-05.html">The GPU memory system</a><span class="tick">✓</span></li>
-  <li data-lesson="m4l6"><span class="num">4.6</span><a href="module-4/lesson-06.html">The host–device bridge</a><span class="tick">✓</span></li>
-  <li data-lesson="m4l7"><span class="num">4.7</span><a href="module-4/lesson-07.html">Spec sheets & the roofline</a><span class="tick">✓</span></li>
-</ul>
-</div>
-<div class="card">
-<h3>Module 5 — CUDA Fundamentals <span class="badge good">built — core complete</span></h3>
-<p class="small">The payoff: kernels, memory management, sanitizers, tiling, warps, coalescing, reductions, streams, Nsight — ending in the capstone matmul ladder (2 GFLOP/s → 40% of peak, fully audited). Finishing this completes the shared core; all four tracks open from here.</p>
-<p><a href="module-5/lesson-01.html"><strong>→ Start: 5.1 Lab Setup &amp; First Compile</strong></a></p>
-<ul class="lesson-list small">
-  <li data-lesson="m5l1"><span class="num">5.1</span><a href="module-5/lesson-01.html">Lab setup & first compile</a><span class="tick">✓</span></li>
-  <li data-lesson="m5l2"><span class="num">5.2</span><a href="module-5/lesson-02.html">Your first real kernel</a><span class="tick">✓</span></li>
-  <li data-lesson="m5l3"><span class="num">5.3</span><a href="module-5/lesson-03.html">Memory management</a><span class="tick">✓</span></li>
-  <li data-lesson="m5l4"><span class="num">5.4</span><a href="module-5/lesson-04.html">Errors & compute-sanitizer</a><span class="tick">✓</span></li>
-  <li data-lesson="m5l5"><span class="num">5.5</span><a href="module-5/lesson-05.html">Shared memory & tiling</a><span class="tick">✓</span></li>
-  <li data-lesson="m5l6"><span class="num">5.6</span><a href="module-5/lesson-06.html">Warps, divergence & occupancy</a><span class="tick">✓</span></li>
-  <li data-lesson="m5l7"><span class="num">5.7</span><a href="module-5/lesson-07.html">Coalescing in code</a><span class="tick">✓</span></li>
-  <li data-lesson="m5l8"><span class="num">5.8</span><a href="module-5/lesson-08.html">Reductions & atomics</a><span class="tick">✓</span></li>
-  <li data-lesson="m5l9"><span class="num">5.9</span><a href="module-5/lesson-09.html">Streams, events & async</a><span class="tick">✓</span></li>
-  <li data-lesson="m5l10"><span class="num">5.10</span><a href="module-5/lesson-10.html">Nsight profiling</a><span class="tick">✓</span></li>
-  <li data-lesson="m5l11"><span class="num">5.11</span><a href="module-5/lesson-11.html">Capstone: the matmul ladder</a><span class="tick">✓</span></li>
-</ul>
-</div>
-<div class="card">
-<h3>Track A — ML / AI Infrastructure <span class="badge good">built</span></h3>
-<p class="small">The biggest job market of the four: backprop from school math, PyTorch internals, custom ops, Triton, FlashAttention derived and verified, mixed precision measured, NCCL/DDP/FSDP, vLLM-era inference, torch.compile, deployment — ending in a fused-epilogue kernel served behind an endpoint.</p>
-<p><a href="track-a/lesson-01.html"><strong>→ Start: A1 Calculus for Backprop</strong></a></p>
-<ul class="lesson-list small">
-  <li data-lesson="al1"><span class="num">A1</span><a href="track-a/lesson-01.html">Calculus for backprop</a><span class="tick">✓</span></li>
-  <li data-lesson="al2"><span class="num">A2</span><a href="track-a/lesson-02.html">PyTorch internals</a><span class="tick">✓</span></li>
-  <li data-lesson="al3"><span class="num">A3</span><a href="track-a/lesson-03.html">Custom CUDA ops</a><span class="tick">✓</span></li>
-  <li data-lesson="al4"><span class="num">A4</span><a href="track-a/lesson-04.html">Triton kernels in Python</a><span class="tick">✓</span></li>
-  <li data-lesson="al5"><span class="num">A5</span><a href="track-a/lesson-05.html">Fusion, softmax, FlashAttention</a><span class="tick">✓</span></li>
-  <li data-lesson="al6"><span class="num">A6</span><a href="track-a/lesson-06.html">Mixed precision & tensor cores</a><span class="tick">✓</span></li>
-  <li data-lesson="al7"><span class="num">A7</span><a href="track-a/lesson-07.html">Multi-GPU: NCCL, DDP, FSDP</a><span class="tick">✓</span></li>
-  <li data-lesson="al8"><span class="num">A8</span><a href="track-a/lesson-08.html">Inference: KV-cache, vLLM</a><span class="tick">✓</span></li>
-  <li data-lesson="al9"><span class="num">A9</span><a href="track-a/lesson-09.html">torch.compile & Inductor</a><span class="tick">✓</span></li>
-  <li data-lesson="al10"><span class="num">A10</span><a href="track-a/lesson-10.html">Deployment & monitoring</a><span class="tick">✓</span></li>
-  <li data-lesson="al11"><span class="num">A11</span><a href="track-a/lesson-11.html">Capstone: fused epilogue, shipped</a><span class="tick">✓</span></li>
-</ul>
-</div>
-<div class="card">
-<h3>Track B — HPC / Scientific Computing <span class="badge good">built</span></h3>
-<p class="small">Science-grade computing: numerical calculus taught by experiment, GPU linear algebra with judgment, stencils and halos, Monte Carlo with calibrated error bars, MPI+GPUDirect, directive porting, SLURM citizenship, the numerics contract — ending in a defensible multi-node scaling study.</p>
-<p><a href="track-b/lesson-01.html"><strong>→ Start: B1 Numerical Calculus</strong></a></p>
-<ul class="lesson-list small">
-  <li data-lesson="bl1"><span class="num">B1</span><a href="track-b/lesson-01.html">Numerical calculus, measured</a><span class="tick">✓</span></li>
-  <li data-lesson="bl2"><span class="num">B2</span><a href="track-b/lesson-02.html">cuBLAS, cuSPARSE & cuSOLVER</a><span class="tick">✓</span></li>
-  <li data-lesson="bl3"><span class="num">B3</span><a href="track-b/lesson-03.html">Stencils & grid codes</a><span class="tick">✓</span></li>
-  <li data-lesson="bl4"><span class="num">B4</span><a href="track-b/lesson-04.html">Monte Carlo & cuRAND</a><span class="tick">✓</span></li>
-  <li data-lesson="bl5"><span class="num">B5</span><a href="track-b/lesson-05.html">MPI + CUDA & GPUDirect</a><span class="tick">✓</span></li>
-  <li data-lesson="bl6"><span class="num">B6</span><a href="track-b/lesson-06.html">OpenMP & OpenACC offload</a><span class="tick">✓</span></li>
-  <li data-lesson="bl7"><span class="num">B7</span><a href="track-b/lesson-07.html">Clusters: SLURM & Apptainer</a><span class="tick">✓</span></li>
-  <li data-lesson="bl8"><span class="num">B8</span><a href="track-b/lesson-08.html">Precision & reproducibility</a><span class="tick">✓</span></li>
-  <li data-lesson="bl9"><span class="num">B9</span><a href="track-b/lesson-09.html">Thrust, CUB & cuFFT</a><span class="tick">✓</span></li>
-  <li data-lesson="bl10"><span class="num">B10</span><a href="track-b/lesson-10.html">Capstone: the scaling study</a><span class="tick">✓</span></li>
-</ul>
-</div>
-<div class="card">
-<h3>Track C — Graphics / Game Engines <span class="badge good">built</span></h3>
-<p class="small">The visual track: coordinate math and the rasterization pipeline as SIMT hardware, first triangle from OpenGL to Vulkan 1.4, GLSL and the std140 trap, textures and gamma, PBR lighting derived and energy-checked, compute shaders (the core returns), Vulkan sync, ray tracing, and frame profiling — ending in a small renderer with a ray-traced effect, budgeted and PSNR-tested.</p>
-<p><a href="track-c/lesson-01.html"><strong>→ Start: C1 Graphics Math</strong></a></p>
-<ul class="lesson-list small">
-  <li data-lesson="cl1"><span class="num">C1</span><a href="track-c/lesson-01.html">Graphics math &amp; the normal trap</a><span class="tick">✓</span></li>
-  <li data-lesson="cl2"><span class="num">C2</span><a href="track-c/lesson-02.html">The rasterization pipeline</a><span class="tick">✓</span></li>
-  <li data-lesson="cl3"><span class="num">C3</span><a href="track-c/lesson-03.html">First triangle: OpenGL → Vulkan</a><span class="tick">✓</span></li>
-  <li data-lesson="cl4"><span class="num">C4</span><a href="track-c/lesson-04.html">GLSL shaders &amp; std140</a><span class="tick">✓</span></li>
-  <li data-lesson="cl5"><span class="num">C5</span><a href="track-c/lesson-05.html">Textures, sampling, gamma</a><span class="tick">✓</span></li>
-  <li data-lesson="cl6"><span class="num">C6</span><a href="track-c/lesson-06.html">Lighting: Phong → PBR</a><span class="tick">✓</span></li>
-  <li data-lesson="cl7"><span class="num">C7</span><a href="track-c/lesson-07.html">Compute shaders (the reunion)</a><span class="tick">✓</span></li>
-  <li data-lesson="cl8"><span class="num">C8</span><a href="track-c/lesson-08.html">Vulkan sync &amp; barriers</a><span class="tick">✓</span></li>
-  <li data-lesson="cl9"><span class="num">C9</span><a href="track-c/lesson-09.html">Ray tracing</a><span class="tick">✓</span></li>
-  <li data-lesson="cl10"><span class="num">C10</span><a href="track-c/lesson-10.html">Frame profiling</a><span class="tick">✓</span></li>
-  <li data-lesson="cl11"><span class="num">C11</span><a href="track-c/lesson-11.html">Capstone: a small renderer</a><span class="tick">✓</span></li>
-</ul>
-</div>
-<div class="card">
-<h3>Track D — Vendor-Neutral / Portable GPU <span class="badge good">built</span></h3>
-<p class="small">Your CUDA skills were never about CUDA: the same warps, tiles, and reductions run on AMD, Intel, and every browser under new names. HIP renames, SYCL and Kokkos recompile, Triton lowers through MLIR, WebGPU runs in a tab — ending in one reduction across four backends with an honest, cost-and-watt-normalized report.</p>
-<p><a href="track-d/lesson-01.html"><strong>→ Start: D1 The Portability Problem</strong></a> · <a href="track-d/lab-webgpu.html">Live WebGPU lab →</a></p>
-<ul class="lesson-list small">
-  <li data-lesson="dl1"><span class="num">D1</span><a href="track-d/lesson-01.html">The portability problem & 2026 landscape</a><span class="tick">✓</span></li>
-  <li data-lesson="dl2"><span class="num">D2</span><a href="track-d/lesson-02.html">ROCm & HIP — the wavefront-64 trap</a><span class="tick">✓</span></li>
-  <li data-lesson="dl3"><span class="num">D3</span><a href="track-d/lesson-03.html">SYCL & oneAPI — inferred scheduling</a><span class="tick">✓</span></li>
-  <li data-lesson="dl4"><span class="num">D4</span><a href="track-d/lesson-04.html">OpenCL today — the long tail</a><span class="tick">✓</span></li>
-  <li data-lesson="dl5"><span class="num">D5</span><a href="track-d/lesson-05.html">WebGPU & WGSL — the browser lab</a><span class="tick">✓</span></li>
-  <li data-lesson="dl6"><span class="num">D6</span><a href="track-d/lesson-06.html">Kokkos & RAJA — perf portability</a><span class="tick">✓</span></li>
-  <li data-lesson="dl7"><span class="num">D7</span><a href="track-d/lesson-07.html">Triton & MLIR — the compiler ports</a><span class="tick">✓</span></li>
-  <li data-lesson="dl8"><span class="num">D8</span><a href="track-d/lesson-08.html">Honest cross-vendor benchmarking</a><span class="tick">✓</span></li>
-  <li data-lesson="dl9"><span class="num">D9</span><a href="track-d/lesson-09.html">Capstone: four backends, one report</a><span class="tick">✓</span></li>
-</ul>
-</div>
-<div class="card">
-<h3>How this course works</h3>
-<p class="small"><strong>Every lesson has two layers:</strong> a card with the 80% you need — concept, a worked example with real numbers, key points, two quizzes, and hands-on exercises — then a "Go deeper" half with internals, field gotchas, a production scenario, and seven practice problems ending in the interview closer. Every number is executed, cited to an earlier lesson, or labeled representative.</p>
-<p class="small"><strong>Progress saves in your browser</strong> — mark a lesson complete and the tick persists. The whole site is static and works offline, no dependencies.</p>
+<div class="tracks" style="margin-top:14px">
+  <a class="trackcard ta" href="track-a/lesson-01.html">
+    <span class="eyebrow">Track A</span><h3>ML / AI Infrastructure</h3>
+    <p>Backprop from school math → PyTorch internals → Triton → FlashAttention derived &amp; verified → mixed precision → NCCL/FSDP → vLLM-era inference → a fused kernel served behind an endpoint.</p>
+    <div class="k" style="margin-top:8px">11 lessons · the biggest job market</div>
+  </a>
+  <a class="trackcard tb" href="track-b/lesson-01.html">
+    <span class="eyebrow">Track B</span><h3>HPC / Scientific Computing</h3>
+    <p>Numerical calculus by experiment → cuBLAS/cuSOLVER → stencils with physics fixtures → Monte Carlo → MPI + GPUDirect → clusters → a defensible multi-node scaling study.</p>
+    <div class="k" style="margin-top:8px">10 lessons · national labs, quant, engineering</div>
+  </a>
+  <a class="trackcard tc" href="track-c/lesson-01.html">
+    <span class="eyebrow">Track C</span><h3>Graphics / Game Engines</h3>
+    <p>Coordinate math → the rasterization pipeline as SIMT hardware → Vulkan 1.4 → PBR lighting (energy-checked) → compute shaders → ray tracing → a renderer with a ray-traced effect, budgeted &amp; PSNR-tested.</p>
+    <div class="k" style="margin-top:8px">11 lessons · games, engines, XR</div>
+  </a>
+  <a class="trackcard td" href="track-d/lesson-01.html">
+    <span class="eyebrow">Track D</span><h3>Vendor-Neutral / Portable GPU</h3>
+    <p>Your CUDA skills were never about CUDA: HIP, SYCL, OpenCL, WebGPU, Kokkos, Triton — one reduction across four backends with an honest, cost-and-watt benchmark. <span class="k">Includes a live WebGPU lab.</span></p>
+    <div class="k" style="margin-top:8px">9 lessons · run anywhere</div>
+  </a>
 </div>
 
+<h2>Built to a single standard</h2>
+<div class="steprow">
+  <div class="step card">
+    <div class="sn">01 — TWO LAYERS</div>
+    <h3 style="margin:6px 0">The 80%, then the depth</h3>
+    <p class="dim small" style="margin:0">Every lesson has a card — concept, a worked example with real numbers, key points, quizzes, exercises — then a "go deeper" half with internals, field gotchas, a production scenario, and seven practice problems.</p>
+  </div>
+  <div class="step card">
+    <div class="sn">02 — EXECUTED</div>
+    <h3 style="margin:6px 0">Measured, not asserted</h3>
+    <p class="dim small" style="margin:0">Every number is run in code, cited to an earlier lesson, or labeled representative. Reality is a sharper teacher than plausibility — the bugs found by running the numbers became the best lessons.</p>
+  </div>
+  <div class="step card">
+    <div class="sn">03 — DEFENSIBLE</div>
+    <h3 style="margin:6px 0">Job-ready, in your words</h3>
+    <p class="dim small" style="margin:0">Each lesson ends in employable speech — the interview closer to its canonical question. Three capstones (a tuned kernel, a portability report, a renderer) are the portfolio you put on GitHub.</p>
+  </div>
 </div>
-<div class="footer">GPU Mastery · from zero to deployed GPU code · works offline</div>
+
+<a class="card hover" href="labs.html" style="display:block;border-color:#2c5a3e;margin-top:22px">
+  <span class="eyebrow" style="color:var(--good)">New · Interactive Labs</span>
+  <h3 style="margin:5px 0 6px;color:var(--ink)">Reason with the fundamentals, don't just read them →</h3>
+  <p class="dim" style="margin:0;font-size:14.5px">A roofline explorer, an occupancy calculator, a coalescing/sector visualizer, and a float-format bit explorer you poke at — plus a live WebGPU kernel that runs a real reduction on <em>your</em> GPU. The mental models, made muscle memory.</p>
+</a>
+
+<h2>How to use it</h2>
+<p>Open <a href="index.html">index.html</a> in any browser — no install, no internet, no build step. Quizzes, progress tracking, and all 254 diagrams work from <code>file://</code>. Progress is saved in your browser. Work the core in order, then pick a track; budget 6–12 months part-time for the whole thing, or go straight to the track you need. Every lesson tells you which exercises run on free Colab, which need your own GPU, and which run in any browser.</p>
+
+<div class="footer">GPU Mastery · 84 lessons · 254 verified diagrams · four career tracks · built offline, no dependencies · every number executed.</div>
 </div>
-<script src="assets/diagrams.js"></script>
 <script src="assets/app.js"></script>
 </body>
 </html>

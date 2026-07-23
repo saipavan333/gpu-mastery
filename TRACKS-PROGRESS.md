@@ -93,6 +93,19 @@ requested by Pavan (visual labs + hands-on labs + widgets):
   94 HTML intact; div-balanced. NEXT in Tier 1: spaced-repetition review deck (~200
   cards from the lessons' key facts/formulas/gotchas), more hands-on WebGPU labs
   (saxpy, naive→tiled matmul, the measured stride cliff), a reduction/scan animator.
+- **DESIGN ELEVATION (2026-07-07, "make it master class"):** invoked the designer
+  method (precise · premium · alive). Rewrote assets/style.css into a premium design
+  system — layered surfaces, a signature accent→cyan→violet gradient, mono-eyebrow
+  identity, bigger/tighter type, depth (shadows), micro-interactions (hover lift, press,
+  focus-visible glow) with a prefers-reduced-motion guard, print styles — PRESERVING all
+  41 prior class selectors so no lesson breaks; base neutrals kept close so the 254
+  diagrams stay in harmony (they now lift with a soft shadow). Cascades to all 94 pages.
+  Redesigned index.html into a real landing: hero with a signature SVG "compute-grid
+  wavefront" motif (assets/hero-grid.svg, previewed via cairosvg), gradient headline,
+  key stats, CTAs, premium track cards, a "built to one standard" 3-step, and the Labs
+  callout. Verified: CSS braces balanced + selectors intact, all HTML closes, links
+  resolve, div-balanced. CAVEAT: sandbox browser CDN is allowlist-blocked, so full-page
+  pixels are unverified-by-me — needs a look on the live site (or a claude-in-chrome pass).
 - **Tier 2:** portfolio hub (5.11/D9/C11 scaffolds+rubrics) + interview dojo.
 - **Tier 3:** start-here roadmap, progress dashboard (streak/weak-topic flags), search.
 - **Tier 4:** a Frontier module (Blackwell/FP4/3D-parallelism/MoE/serving) + war stories.
