@@ -4,6 +4,23 @@
 <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>A1 Calculus for Backprop — GPU Mastery</title>
 <link rel="stylesheet" href="../assets/style.css">
+<!-- gm-seo:start -->
+<link rel="canonical" href="https://saipavan333.github.io/gpu-mastery/track-a/lesson-01.html">
+<link rel="manifest" href="https://saipavan333.github.io/gpu-mastery/manifest.webmanifest">
+<meta name="theme-color" content="#0b0e14">
+<link rel="apple-touch-icon" href="https://saipavan333.github.io/gpu-mastery/assets/img/favicon-180.png">
+<meta name="description" content="The core made you fast at running math on GPUs; Track A is about the math that TRAINS models — and it is one idea, taught in school, industrialized: the…">
+<meta property="og:type" content="article">
+<meta property="og:site_name" content="GPU Mastery">
+<meta property="og:title" content="A1 Calculus for Backprop — GPU Mastery">
+<meta property="og:description" content="The core made you fast at running math on GPUs; Track A is about the math that TRAINS models — and it is one idea, taught in school, industrialized: the…">
+<meta property="og:url" content="https://saipavan333.github.io/gpu-mastery/track-a/lesson-01.html">
+<meta property="og:image" content="https://saipavan333.github.io/gpu-mastery/assets/img/og.png">
+<meta name="twitter:card" content="summary_large_image">
+<meta name="twitter:title" content="A1 Calculus for Backprop — GPU Mastery">
+<meta name="twitter:description" content="The core made you fast at running math on GPUs; Track A is about the math that TRAINS models — and it is one idea, taught in school, industrialized: the…">
+<meta name="twitter:image" content="https://saipavan333.github.io/gpu-mastery/assets/img/og.png">
+<!-- gm-seo:end -->
 </head>
 <body data-lesson="al1">
 <nav><div class="inner">
@@ -22,6 +39,11 @@
 </div>
 <h1>Calculus for Backprop — from slopes to the algorithm that trains everything</h1>
 <p class="lead">The core made you fast at running math on GPUs; Track A is about the math that TRAINS models — and it is one idea, taught in school, industrialized: the slope. This lesson takes you from "what's a derivative" to "I can derive and verify backprop by hand," because every kernel you'll write in this track exists to move gradients.</p>
+<div class="gm-eq"><div class="gm-eq-h">Key equations</div>
+  <div class="gm-eq-row">\[ f'(x) = \lim_{h\to 0}\frac{f(x+h)-f(x)}{h} \]<span class="gm-eq-cap">the derivative — a local exchange rate</span></div>
+  <div class="gm-eq-row">\[ \frac{dy}{dx} = f'(g(x))\,g'(x) \]<span class="gm-eq-cap">chain rule — slopes multiply along a chain</span></div>
+  <div class="gm-eq-row">\[ \frac{\partial L}{\partial x} = \sum_{i}\frac{\partial L}{\partial y_i}\,\frac{\partial y_i}{\partial x} \]<span class="gm-eq-cap">reverse-mode: sum contributions over every path (backprop)</span></div>
+</div>
 
 <h2>Concept</h2>
 

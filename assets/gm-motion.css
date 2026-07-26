@@ -1,0 +1,20 @@
+/* GPU Mastery — motion layer styles. All states gated on html.gm-anim, which is
+   added by gm-motion.js ONLY when JS is on and prefers-reduced-motion is not set.
+   Without that class (JS off, or reduced motion) everything renders fully visible. */
+
+/* page entrance — opacity only, so fixed nav / FAB fade but never shift */
+html.gm-anim body { opacity: 0; }
+html.gm-anim body.gm-entered { opacity: 1; transition: opacity .5s var(--ease); }
+
+/* scroll reveal — a calm rise + fade, one consistent language site-wide */
+html.gm-anim .gm-reveal { opacity: 0; transform: translateY(16px); will-change: opacity, transform; }
+html.gm-anim .gm-reveal.gm-in {
+  opacity: 1; transform: none;
+  transition: opacity .6s var(--ease), transform .6s var(--ease);
+}
+
+/* belt-and-suspenders: if the OS flips reduced-motion after load, show everything */
+@media (prefers-reduced-motion: reduce) {
+  html.gm-anim body,
+  html.gm-anim .gm-reveal { opacity: 1 !important; transform: none !important; transition: none !important; }
+}

@@ -11,6 +11,8 @@
     function js(s, cb) { var x = document.createElement("script"); x.src = s; if (cb) x.onload = cb; document.head.appendChild(x); }
     css(assetBase + "gm-site.css");
     js(assetBase + "gm-site.js");
+    css(assetBase + "gm-motion.css");
+    js(assetBase + "gm-motion.js");
     js(assetBase + "gm-search.js");
     css(assetBase + "gm-glossary.css");
     js(assetBase + "gm-glossary.js");
@@ -19,6 +21,12 @@
     if (/\$\$|\\\(|\\\[/.test(document.documentElement.innerHTML)) {   // KaTeX only where math exists (§5.7)
       css(assetBase + "katex/katex.min.css");
       js(assetBase + "katex/katex.min.js", function () { js(assetBase + "katex/contrib/auto-render.min.js"); });
+    }
+    // PWA: register the service worker (offline / installable). Skips file:// safely.
+    if ("serviceWorker" in navigator && location.protocol.indexOf("http") === 0) {
+      window.addEventListener("load", function () {
+        navigator.serviceWorker.register(rootBase + "sw.js").catch(function () {});
+      });
     }
   })();
 

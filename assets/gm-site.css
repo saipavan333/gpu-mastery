@@ -18,3 +18,25 @@
 .gm-foot-links { margin-top: 10px; font-size: 13px; color: var(--dim2); }
 .gm-foot-links a { color: var(--dim); }
 .gm-foot-links a:hover { color: var(--accT); }
+
+/* per-lesson prerequisites + common-misconceptions callouts (injected by gm-site.js) */
+.gm-prereq { margin: 14px 0 20px; padding: 10px 14px; font-size: 14px; color: var(--dim);
+  background: var(--card); border: 1px solid var(--line); border-left: 3px solid var(--acc); border-radius: 8px; }
+.gm-prereq-l { font: 11px var(--mono); text-transform: uppercase; letter-spacing: .07em; color: var(--accT); margin-right: 6px; }
+.gm-misc { margin: 26px 0; padding: 16px 18px; background: var(--warnBg);
+  border: 1px solid color-mix(in srgb, var(--warn) 40%, var(--line)); border-radius: var(--r2); }
+.gm-misc-h { font-weight: 700; color: var(--warn); margin-bottom: 10px; display: flex; align-items: center; gap: 8px; }
+.gm-misc-x { display: inline-flex; align-items: center; justify-content: center; width: 20px; height: 20px;
+  border-radius: 50%; background: var(--warn); color: #201400; font-weight: 800; font-size: 13px; }
+.gm-misc-i { margin: 8px 0; line-height: 1.6; font-size: 14.5px; color: var(--tx); }
+.gm-misc-i b { color: var(--ink); font-weight: 600; }
+
+/* "Key equations" panel (KaTeX \[...\]) on equation-heavy lessons */
+.gm-eq { margin: 18px 0 24px; padding: 14px 18px; background: var(--card);
+  border: 1px solid var(--line); border-left: 3px solid var(--acc2); border-radius: var(--r2); }
+.gm-eq-h { font: 11px var(--mono); text-transform: uppercase; letter-spacing: .08em; color: var(--acc2); margin-bottom: 6px; }
+.gm-eq-row { display: flex; flex-wrap: wrap; align-items: baseline; gap: 6px 14px; padding: 6px 0; border-bottom: 1px solid var(--line); }
+.gm-eq-row:last-child { border-bottom: 0; }
+.gm-eq-row .katex-display { margin: 6px 0; text-align: left; }
+.gm-eq-cap { color: var(--dim); font-size: 13px; }
+@media (max-width: 620px){ .gm-eq-row { gap: 2px; } .gm-eq-row .katex-display { overflow-x: auto; overflow-y: hidden; } }

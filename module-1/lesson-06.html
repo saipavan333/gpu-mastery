@@ -4,6 +4,23 @@
 <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>1.6 Matrices & Matrix Multiplication — GPU Mastery</title>
 <link rel="stylesheet" href="../assets/style.css">
+<!-- gm-seo:start -->
+<link rel="canonical" href="https://saipavan333.github.io/gpu-mastery/module-1/lesson-06.html">
+<link rel="manifest" href="https://saipavan333.github.io/gpu-mastery/manifest.webmanifest">
+<meta name="theme-color" content="#0b0e14">
+<link rel="apple-touch-icon" href="https://saipavan333.github.io/gpu-mastery/assets/img/favicon-180.png">
+<meta name="description" content="A matrix is a grid of numbers that acts : it moves every point in space at once. Matrix multiplication is the single most-executed heavy computation on Earth…">
+<meta property="og:type" content="article">
+<meta property="og:site_name" content="GPU Mastery">
+<meta property="og:title" content="1.6 Matrices &amp; Matrix Multiplication — GPU Mastery">
+<meta property="og:description" content="A matrix is a grid of numbers that acts : it moves every point in space at once. Matrix multiplication is the single most-executed heavy computation on Earth…">
+<meta property="og:url" content="https://saipavan333.github.io/gpu-mastery/module-1/lesson-06.html">
+<meta property="og:image" content="https://saipavan333.github.io/gpu-mastery/assets/img/og.png">
+<meta name="twitter:card" content="summary_large_image">
+<meta name="twitter:title" content="1.6 Matrices &amp; Matrix Multiplication — GPU Mastery">
+<meta name="twitter:description" content="A matrix is a grid of numbers that acts : it moves every point in space at once. Matrix multiplication is the single most-executed heavy computation on Earth…">
+<meta name="twitter:image" content="https://saipavan333.github.io/gpu-mastery/assets/img/og.png">
+<!-- gm-seo:end -->
 </head>
 <body data-lesson="m1l6">
 <nav><div class="inner">
@@ -22,6 +39,10 @@
 </div>
 <h1>Matrices — the operation GPUs were built for</h1>
 <p class="lead">A matrix is a grid of numbers that <em>acts</em>: it moves every point in space at once. Matrix multiplication is the single most-executed heavy computation on Earth — every neural network layer, every 3D camera, every physics solve. Learn it slowly here; you'll optimize it for the rest of the course.</p>
+<div class="gm-eq"><div class="gm-eq-h">Key equations</div>
+  <div class="gm-eq-row">\[ C_{ij} = \sum_{k} A_{ik} B_{kj} \]<span class="gm-eq-cap">matrix multiply — one dot product per output cell</span></div>
+  <div class="gm-eq-row">\[ (AB)^{T} = B^{T} A^{T} \]<span class="gm-eq-cap">transpose reverses a product</span></div>
+</div>
 
 <h2>Concept</h2>
 

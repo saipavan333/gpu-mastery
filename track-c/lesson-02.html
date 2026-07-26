@@ -4,6 +4,23 @@
 <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>C2 The Rasterization Pipeline — GPU Mastery</title>
 <link rel="stylesheet" href="../assets/style.css">
+<!-- gm-seo:start -->
+<link rel="canonical" href="https://saipavan333.github.io/gpu-mastery/track-c/lesson-02.html">
+<link rel="manifest" href="https://saipavan333.github.io/gpu-mastery/manifest.webmanifest">
+<meta name="theme-color" content="#0b0e14">
+<link rel="apple-touch-icon" href="https://saipavan333.github.io/gpu-mastery/assets/img/favicon-180.png">
+<meta name="description" content="C1's vertices become pixels here. The rasterization pipeline is a fixed sequence of stages, two of which you program (vertex and fragment) and three of which…">
+<meta property="og:type" content="article">
+<meta property="og:site_name" content="GPU Mastery">
+<meta property="og:title" content="C2 The Rasterization Pipeline — GPU Mastery">
+<meta property="og:description" content="C1's vertices become pixels here. The rasterization pipeline is a fixed sequence of stages, two of which you program (vertex and fragment) and three of which…">
+<meta property="og:url" content="https://saipavan333.github.io/gpu-mastery/track-c/lesson-02.html">
+<meta property="og:image" content="https://saipavan333.github.io/gpu-mastery/assets/img/og.png">
+<meta name="twitter:card" content="summary_large_image">
+<meta name="twitter:title" content="C2 The Rasterization Pipeline — GPU Mastery">
+<meta name="twitter:description" content="C1's vertices become pixels here. The rasterization pipeline is a fixed sequence of stages, two of which you program (vertex and fragment) and three of which…">
+<meta name="twitter:image" content="https://saipavan333.github.io/gpu-mastery/assets/img/og.png">
+<!-- gm-seo:end -->
 </head>
 <body data-lesson="cl2">
 <nav><div class="inner">
@@ -22,6 +39,11 @@
 </div>
 <h1>The Rasterization Pipeline — where your shaders meet the silicon</h1>
 <p class="lead">C1's vertices become pixels here. The rasterization pipeline is a fixed sequence of stages, two of which you program (vertex and fragment) and three of which are fixed-function silicon. The whole thing runs on the same SIMT hardware you learned in Module 4 — fragments even come in 2×2 quads that create "helper lanes," a divergence cost hiding in plain sight. Understand the pipeline as hardware and the mysterious performance cliffs of real engines become named, predictable costs.</p>
+<div class="gm-eq"><div class="gm-eq-h">Key equations</div>
+  <div class="gm-eq-row">\[ E(\mathbf{p}) = (p_x-a_x)(b_y-a_y) - (p_y-a_y)(b_x-a_x) \]<span class="gm-eq-cap">edge function — sign tells inside vs outside</span></div>
+  <div class="gm-eq-row">\[ \mathbf{p} = \alpha\,\mathbf{a} + \beta\,\mathbf{b} + \gamma\,\mathbf{c}, \quad \alpha+\beta+\gamma = 1 \]<span class="gm-eq-cap">barycentric coordinates of a fragment</span></div>
+  <div class="gm-eq-row">\[ f = \frac{\alpha f_a/w_a + \beta f_b/w_b + \gamma f_c/w_c}{\alpha/w_a + \beta/w_b + \gamma/w_c} \]<span class="gm-eq-cap">perspective-correct interpolation</span></div>
+</div>
 
 <h2>Concept</h2>
 

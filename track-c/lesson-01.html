@@ -4,6 +4,23 @@
 <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>C1 Graphics Math — GPU Mastery</title>
 <link rel="stylesheet" href="../assets/style.css">
+<!-- gm-seo:start -->
+<link rel="canonical" href="https://saipavan333.github.io/gpu-mastery/track-c/lesson-01.html">
+<link rel="manifest" href="https://saipavan333.github.io/gpu-mastery/manifest.webmanifest">
+<meta name="theme-color" content="#0b0e14">
+<link rel="apple-touch-icon" href="https://saipavan333.github.io/gpu-mastery/assets/img/favicon-180.png">
+<meta name="description" content="Track C is throughput engineering with a new consumer: an eyeball, not a fixture. A frame is a 16.6 ms budget (5.9's max-lane law, where the pipeline IS the…">
+<meta property="og:type" content="article">
+<meta property="og:site_name" content="GPU Mastery">
+<meta property="og:title" content="C1 Graphics Math — GPU Mastery">
+<meta property="og:description" content="Track C is throughput engineering with a new consumer: an eyeball, not a fixture. A frame is a 16.6 ms budget (5.9's max-lane law, where the pipeline IS the…">
+<meta property="og:url" content="https://saipavan333.github.io/gpu-mastery/track-c/lesson-01.html">
+<meta property="og:image" content="https://saipavan333.github.io/gpu-mastery/assets/img/og.png">
+<meta name="twitter:card" content="summary_large_image">
+<meta name="twitter:title" content="C1 Graphics Math — GPU Mastery">
+<meta name="twitter:description" content="Track C is throughput engineering with a new consumer: an eyeball, not a fixture. A frame is a 16.6 ms budget (5.9's max-lane law, where the pipeline IS the…">
+<meta name="twitter:image" content="https://saipavan333.github.io/gpu-mastery/assets/img/og.png">
+<!-- gm-seo:end -->
 </head>
 <body data-lesson="cl1">
 <nav><div class="inner">
@@ -22,6 +39,11 @@
 </div>
 <h1>Graphics Math — the coordinate machinery that puts pixels on screen</h1>
 <p class="lead">Track C is throughput engineering with a new consumer: an eyeball, not a fixture. A frame is a 16.6 ms budget (5.9's max-lane law, where the pipeline IS the GPU), and "correct" becomes "measurably plausible" — a reference image within a PSNR budget, not a bitwise match. It all rests on four pieces of linear algebra, and this track's promise is that you'll never take them on faith: every formula here is executed in NumPy, and you'll re-run them all.</p>
+<div class="gm-eq"><div class="gm-eq-h">Key equations</div>
+  <div class="gm-eq-row">\[ \mathbf{p}' = M\,\mathbf{p}, \qquad \mathbf{p} = (x,\,y,\,z,\,1)^{T} \]<span class="gm-eq-cap">homogeneous coords make translation a matrix multiply</span></div>
+  <div class="gm-eq-row">\[ (x,\,y,\,z,\,w) \;\to\; \Big(\tfrac{x}{w},\ \tfrac{y}{w},\ \tfrac{z}{w}\Big) \]<span class="gm-eq-cap">the perspective divide</span></div>
+  <div class="gm-eq-row">\[ \mathbf{p}_{\text{clip}} = P\,V\,M\;\mathbf{p}_{\text{model}} \]<span class="gm-eq-cap">the model-view-projection pipeline</span></div>
+</div>
 
 <p class="small dim">Lab note: this course's sandbox can't open a window, so Track C's rendering exercises target YOUR machine (any GPU vendor works for C1–C8; ray tracing in C9/C11 needs an RTX or RDNA2+ GPU). But all the MATH is verifiable with nothing but NumPy — which is exactly what C1 is.</p>
 

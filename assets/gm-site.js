@@ -87,7 +87,47 @@
   function waitKatex(n) { if (renderMath()) return; if (n > 0) setTimeout(function () { waitKatex(n - 1); }, 100); }
 
   function hasMath(){ try { return /\$\$|\\\(|\\\[/.test(document.body.innerHTML); } catch(e){ return false; } }
-  function boot() { ensureFavicon(); ensureA11y(); retryByline(25); labelDiagrams(); if (hasMath()) waitKatex(40); }
+
+  function esc(s){ return String(s == null ? "" : s).replace(/[&<>]/g, function(c){ return {"&":"&amp;","<":"&lt;",">":"&gt;"}[c]; }); }
+  function loadScript(src, cb){ var s = document.createElement("script"); s.src = src; s.onload = cb; s.onerror = cb; document.head.appendChild(s); }
+  function pageKeys(){ var p = location.pathname.split("/").filter(Boolean); return [p.slice(-2).join("/"), p.slice(-1)[0] || ""]; }
+  function injectLessonMeta(){
+    if (!window.GM_LESSONMETA) return;
+    var keys = pageKeys(), meta = null;
+    for (var i = 0; i < keys.length; i++) if (window.GM_LESSONMETA[keys[i]]) { meta = window.GM_LESSONMETA[keys[i]]; break; }
+    if (!meta) return;
+    var main = document.getElementById("gm-main") || document.querySelector(".wrap");
+    if (!main) return;
+    if (meta.p && !main.querySelector(".gm-prereq")) {
+      var h1 = main.querySelector("h1");
+      var box = document.createElement("div"); box.className = "gm-prereq";
+      box.innerHTML = '<span class="gm-prereq-l">Prerequisites</span> <span>' + esc(meta.p) + "</span>";
+      if (h1 && h1.parentNode) h1.parentNode.insertBefore(box, h1.nextSibling);
+      else main.insertBefore(box, main.firstChild);
+    }
+    if (meta.m && meta.m.length && !main.querySelector(".gm-misc")) {
+      var mis = document.createElement("div"); mis.className = "gm-misc";
+      mis.innerHTML = '<div class="gm-misc-h"><span class="gm-misc-x" aria-hidden="true">!</span> Common misconceptions</div>' +
+        meta.m.map(function (x) { return '<div class="gm-misc-i"><b>&ldquo;' + esc(x.w) + '&rdquo;</b> <span>' + esc(x.r) + "</span></div>"; }).join("");
+      var kp = main.querySelector(".keypoints");
+      if (kp && kp.parentNode) {
+        var anchor = kp;                     // hoist above a "Key ideas/points" heading if present
+        var prev = kp.previousElementSibling;
+        if (prev && /^H[1-4]$/.test(prev.tagName || "") && /key/i.test(prev.textContent || "") && prev.parentNode) anchor = prev;
+        (anchor.parentNode || kp.parentNode).insertBefore(mis, anchor.parentNode ? anchor : kp);
+      } else {
+        var f = main.querySelector(".footer");
+        if (f && f.parentNode) f.parentNode.insertBefore(mis, f); else main.appendChild(mis);
+      }
+    }
+  }
+  function bootMeta(){
+    if (!/lesson-\d/.test(location.pathname)) return;       // only lesson pages carry this data
+    if (window.GM_LESSONMETA) { injectLessonMeta(); return; }
+    loadScript(asset + "gm-lessonmeta-data.js", injectLessonMeta);
+  }
+
+  function boot() { ensureFavicon(); ensureA11y(); retryByline(25); labelDiagrams(); bootMeta(); if (hasMath()) waitKatex(40); }
   if (document.readyState !== "loading") boot();
   else document.addEventListener("DOMContentLoaded", boot);
 })();

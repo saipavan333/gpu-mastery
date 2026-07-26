@@ -4,6 +4,23 @@
 <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>C6 Lighting: Phong to PBR — GPU Mastery</title>
 <link rel="stylesheet" href="../assets/style.css">
+<!-- gm-seo:start -->
+<link rel="canonical" href="https://saipavan333.github.io/gpu-mastery/track-c/lesson-06.html">
+<link rel="manifest" href="https://saipavan333.github.io/gpu-mastery/manifest.webmanifest">
+<meta name="theme-color" content="#0b0e14">
+<link rel="apple-touch-icon" href="https://saipavan333.github.io/gpu-mastery/assets/img/favicon-180.png">
+<meta name="description" content="Lighting is where a scene becomes believable, and it has a real history: Phong's cheap, plausible highlight gave way to physically based rendering (PBR),…">
+<meta property="og:type" content="article">
+<meta property="og:site_name" content="GPU Mastery">
+<meta property="og:title" content="C6 Lighting: Phong to PBR — GPU Mastery">
+<meta property="og:description" content="Lighting is where a scene becomes believable, and it has a real history: Phong's cheap, plausible highlight gave way to physically based rendering (PBR),…">
+<meta property="og:url" content="https://saipavan333.github.io/gpu-mastery/track-c/lesson-06.html">
+<meta property="og:image" content="https://saipavan333.github.io/gpu-mastery/assets/img/og.png">
+<meta name="twitter:card" content="summary_large_image">
+<meta name="twitter:title" content="C6 Lighting: Phong to PBR — GPU Mastery">
+<meta name="twitter:description" content="Lighting is where a scene becomes believable, and it has a real history: Phong's cheap, plausible highlight gave way to physically based rendering (PBR),…">
+<meta name="twitter:image" content="https://saipavan333.github.io/gpu-mastery/assets/img/og.png">
+<!-- gm-seo:end -->
 </head>
 <body data-lesson="cl6">
 <nav><div class="inner">
@@ -22,6 +39,11 @@
 </div>
 <h1>Lighting — from Phong's fake highlight to physically based rendering</h1>
 <p class="lead">Lighting is where a scene becomes believable, and it has a real history: Phong's cheap, plausible highlight gave way to physically based rendering (PBR), which models light as bouncing off microscopic mirrors and — crucially — conserves energy, so materials look right under any lighting. Every term here is a real formula you'll evaluate in NumPy, and the whole thing only works in the linear space C5 fought for.</p>
+<div class="gm-eq"><div class="gm-eq-h">Key equations</div>
+  <div class="gm-eq-row">\[ I = k_a + k_d\,(\mathbf{n}\cdot\mathbf{l}) + k_s\,(\mathbf{r}\cdot\mathbf{v})^{\alpha} \]<span class="gm-eq-cap">Phong — ambient + diffuse + specular</span></div>
+  <div class="gm-eq-row">\[ f_r = \frac{D\,F\,G}{4\,(\mathbf{n}\cdot\mathbf{l})(\mathbf{n}\cdot\mathbf{v})} \]<span class="gm-eq-cap">Cook-Torrance microfacet specular BRDF</span></div>
+  <div class="gm-eq-row">\[ D_{\text{GGX}} = \frac{\alpha^{2}}{\pi\big((\mathbf{n}\cdot\mathbf{h})^{2}(\alpha^{2}-1)+1\big)^{2}} \]<span class="gm-eq-cap">GGX normal-distribution function</span></div>
+</div>
 
 <p class="small dim">Lab note: all the lighting math is NumPy-executable (evaluated below), and energy conservation is checked with a Monte-Carlo integral (B4's method). No GPU needed to understand why PBR looks right and Phong doesn't. Assumes you're computing in LINEAR light (C5) — lighting on sRGB values is wrong before you start.</p>
 

@@ -4,6 +4,23 @@
 <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>B1 Numerical Calculus from Scratch — GPU Mastery</title>
 <link rel="stylesheet" href="../assets/style.css">
+<!-- gm-seo:start -->
+<link rel="canonical" href="https://saipavan333.github.io/gpu-mastery/track-b/lesson-01.html">
+<link rel="manifest" href="https://saipavan333.github.io/gpu-mastery/manifest.webmanifest">
+<meta name="theme-color" content="#0b0e14">
+<link rel="apple-touch-icon" href="https://saipavan333.github.io/gpu-mastery/assets/img/favicon-180.png">
+<meta name="description" content="Track B computes PHYSICAL quantities: heat, orbits, prices, fields. The calculus is school-level; the craft is knowing each method's ERROR LAW and STABILITY…">
+<meta property="og:type" content="article">
+<meta property="og:site_name" content="GPU Mastery">
+<meta property="og:title" content="B1 Numerical Calculus from Scratch — GPU Mastery">
+<meta property="og:description" content="Track B computes PHYSICAL quantities: heat, orbits, prices, fields. The calculus is school-level; the craft is knowing each method's ERROR LAW and STABILITY…">
+<meta property="og:url" content="https://saipavan333.github.io/gpu-mastery/track-b/lesson-01.html">
+<meta property="og:image" content="https://saipavan333.github.io/gpu-mastery/assets/img/og.png">
+<meta name="twitter:card" content="summary_large_image">
+<meta name="twitter:title" content="B1 Numerical Calculus from Scratch — GPU Mastery">
+<meta name="twitter:description" content="Track B computes PHYSICAL quantities: heat, orbits, prices, fields. The calculus is school-level; the craft is knowing each method's ERROR LAW and STABILITY…">
+<meta name="twitter:image" content="https://saipavan333.github.io/gpu-mastery/assets/img/og.png">
+<!-- gm-seo:end -->
 </head>
 <body data-lesson="bl1">
 <nav><div class="inner">
@@ -22,6 +39,11 @@
 </div>
 <h1>Numerical Calculus — the math of simulation, taught by experiment</h1>
 <p class="lead">Track B computes PHYSICAL quantities: heat, orbits, prices, fields. The calculus is school-level; the craft is knowing each method's ERROR LAW and STABILITY CONTRACT — and in this track we don't cite those laws, we measure them. Every order, wall, and drift below was executed for this lesson; you'll re-measure them all in the exercises.</p>
+<div class="gm-eq"><div class="gm-eq-h">Key equations</div>
+  <div class="gm-eq-row">\[ f'(x) \approx \frac{f(x+h)-f(x)}{h} \]<span class="gm-eq-cap">forward difference — first order, error O(h)</span></div>
+  <div class="gm-eq-row">\[ f'(x) \approx \frac{f(x+h)-f(x-h)}{2h} + O(h^{2}) \]<span class="gm-eq-cap">central difference — second order accuracy</span></div>
+  <div class="gm-eq-row">\[ \int_{a}^{b} f\,dx \approx \frac{h}{2}\Big(f_0 + 2\sum_{i=1}^{n-1} f_i + f_n\Big) \]<span class="gm-eq-cap">trapezoidal rule</span></div>
+</div>
 
 <h2>Concept</h2>
 

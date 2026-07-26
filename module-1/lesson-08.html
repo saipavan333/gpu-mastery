@@ -4,6 +4,23 @@
 <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>1.8 Floating Point — GPU Mastery</title>
 <link rel="stylesheet" href="../assets/style.css">
+<!-- gm-seo:start -->
+<link rel="canonical" href="https://saipavan333.github.io/gpu-mastery/module-1/lesson-08.html">
+<link rel="manifest" href="https://saipavan333.github.io/gpu-mastery/manifest.webmanifest">
+<meta name="theme-color" content="#0b0e14">
+<link rel="apple-touch-icon" href="https://saipavan333.github.io/gpu-mastery/assets/img/favicon-180.png">
+<meta name="description" content="Module 1's capstone, and the single most bug-generating topic in numerical computing. fp16 overflow NaN'd real training runs; reduction order makes GPU…">
+<meta property="og:type" content="article">
+<meta property="og:site_name" content="GPU Mastery">
+<meta property="og:title" content="1.8 Floating Point — GPU Mastery">
+<meta property="og:description" content="Module 1's capstone, and the single most bug-generating topic in numerical computing. fp16 overflow NaN'd real training runs; reduction order makes GPU…">
+<meta property="og:url" content="https://saipavan333.github.io/gpu-mastery/module-1/lesson-08.html">
+<meta property="og:image" content="https://saipavan333.github.io/gpu-mastery/assets/img/og.png">
+<meta name="twitter:card" content="summary_large_image">
+<meta name="twitter:title" content="1.8 Floating Point — GPU Mastery">
+<meta name="twitter:description" content="Module 1's capstone, and the single most bug-generating topic in numerical computing. fp16 overflow NaN'd real training runs; reduction order makes GPU…">
+<meta name="twitter:image" content="https://saipavan333.github.io/gpu-mastery/assets/img/og.png">
+<!-- gm-seo:end -->
 </head>
 <body data-lesson="m1l8">
 <nav><div class="inner">
@@ -22,6 +39,11 @@
 </div>
 <h1>Floating Point — how GPUs really store numbers</h1>
 <p class="lead">Module 1's capstone, and the single most bug-generating topic in numerical computing. fp16 overflow NaN'd real training runs; reduction order makes GPU results "randomly" differ from CPU; 0.1 + 0.2 ≠ 0.3. After this lesson, none of that will ever surprise you again.</p>
+<div class="gm-eq"><div class="gm-eq-h">Key equations</div>
+  <div class="gm-eq-row">\[ x = (-1)^{s}\,(1.m)\,2^{\,e-127} \]<span class="gm-eq-cap">IEEE-754 FP32: sign, mantissa, biased exponent</span></div>
+  <div class="gm-eq-row">\[ \varepsilon_{\text{FP32}} = 2^{-23} \approx 1.19\times10^{-7} \]<span class="gm-eq-cap">machine epsilon — the gap near 1.0</span></div>
+  <div class="gm-eq-row">\[ \left|\frac{\text{fl}(x)-x}{x}\right| \le \tfrac{1}{2}\,\varepsilon \]<span class="gm-eq-cap">relative error bound of one rounded operation</span></div>
+</div>
 
 <h2>Concept</h2>
 

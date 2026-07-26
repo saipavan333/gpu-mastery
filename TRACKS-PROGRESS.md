@@ -327,3 +327,31 @@ Pages is a static host with no build step, so the site depends on them at runtim
   graphics pipeline + PBR, and the cross-vendor warp-size trap. Jump-nav, and a
   light **@media print** stylesheet (hides nav/FAB, page-break per section) for a
   clean PDF. Content grounded in the verified lessons.
+
+## Polish wave — motion, SEO, PWA, pedagogy, math
+
+- **Motion layer** (`assets/gm-motion.js/.css`, single-source via app.js) — a calm,
+  coherent motion language per playbook §4: opacity-only page-entrance + gentle
+  IntersectionObserver scroll-reveal with a small stagger. Above-the-fold content
+  reveals immediately (no flash); everything is fully visible if JS is off or
+  `prefers-reduced-motion` is set (the hidden state is only armed by `html.gm-anim`,
+  added by JS only when motion is allowed). No particle backgrounds. VERIFIED (node
+  smoke: gm-anim armed, entrance, below-fold observed, above-fold pre-revealed).
+- **SEO/OG** (`tools/build-seo.js`, idempotent) — per-page canonical + description +
+  OpenGraph + Twitter-card on all 100 pages, a 1200×630 `assets/img/og.png`,
+  `sitemap.xml` (100 urls) and `robots.txt`. Idempotency fixed (strip prior block
+  before detecting the page's own description) — re-run changes 0.
+- **PWA** — `manifest.webmanifest` (+ 192/512/maskable icons), `sw.js` service worker
+  (precache shell, stale-while-revalidate assets, network-first HTML, cross-origin
+  passthrough so the AI Worker is untouched), registered from app.js (skips file://).
+  Manifest link + theme-color injected site-wide.
+- **Prerequisites + common-misconceptions** (playbook §2) — `tools/build-lessonmeta.py`
+  -> `assets/gm-lessonmeta-data.js` (49 lessons: all 43 core + 6 flagged track lessons,
+  50 misconceptions). Injected single-source by gm-site.js: a prereq line after the
+  title, a misconceptions callout before the key points. VERIFIED (node smoke inserts
+  both on a simulated lesson page).
+- **KaTeX math** (`tools/add-equations.js`) — a typeset "Key equations" panel added to
+  8 equation-heavy lessons (M1.6, M1.8, A1, B1, C1, C2, C6, C9); 23 display equations,
+  ALL 23 VERIFIED to parse with the vendored KaTeX in node. Static `\[` triggers the
+  existing conditional KaTeX loader; annotated code-block derivations kept intact.
+  Uses only `\[...\]`/`\(...\)` (never a bare `$`), so no currency/math collision.

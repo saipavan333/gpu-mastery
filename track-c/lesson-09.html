@@ -4,6 +4,23 @@
 <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>C9 Ray Tracing — GPU Mastery</title>
 <link rel="stylesheet" href="../assets/style.css">
+<!-- gm-seo:start -->
+<link rel="canonical" href="https://saipavan333.github.io/gpu-mastery/track-c/lesson-09.html">
+<link rel="manifest" href="https://saipavan333.github.io/gpu-mastery/manifest.webmanifest">
+<meta name="theme-color" content="#0b0e14">
+<link rel="apple-touch-icon" href="https://saipavan333.github.io/gpu-mastery/assets/img/favicon-180.png">
+<meta name="description" content="Ray tracing shoots rays into a scene and asks what they hit. Done naively it's O(rays × triangles) — impossible in real time. Three things make it feasible:…">
+<meta property="og:type" content="article">
+<meta property="og:site_name" content="GPU Mastery">
+<meta property="og:title" content="C9 Ray Tracing — GPU Mastery">
+<meta property="og:description" content="Ray tracing shoots rays into a scene and asks what they hit. Done naively it's O(rays × triangles) — impossible in real time. Three things make it feasible:…">
+<meta property="og:url" content="https://saipavan333.github.io/gpu-mastery/track-c/lesson-09.html">
+<meta property="og:image" content="https://saipavan333.github.io/gpu-mastery/assets/img/og.png">
+<meta name="twitter:card" content="summary_large_image">
+<meta name="twitter:title" content="C9 Ray Tracing — GPU Mastery">
+<meta name="twitter:description" content="Ray tracing shoots rays into a scene and asks what they hit. Done naively it's O(rays × triangles) — impossible in real time. Three things make it feasible:…">
+<meta name="twitter:image" content="https://saipavan333.github.io/gpu-mastery/assets/img/og.png">
+<!-- gm-seo:end -->
 </head>
 <body data-lesson="cl9">
 <nav><div class="inner">
@@ -22,6 +39,11 @@
 </div>
 <h1>Ray Tracing — log-N culling, fixed-function cores, and the denoising bargain</h1>
 <p class="lead">Ray tracing shoots rays into a scene and asks what they hit. Done naively it's O(rays × triangles) — impossible in real time. Three things make it feasible: a BVH that turns the triangle search into O(log N) (M1's log lesson finally cashing in), RT cores that do the traversal in fixed-function silicon (4.4's specialization story), and denoising, because a real-time budget affords only ~1 sample per pixel, which is pure noise. Today: the ray-triangle test executed in NumPy, the RT pipeline as the function-pointer table 3.6 promised, and the temporal-accumulation bargain.</p>
+<div class="gm-eq"><div class="gm-eq-h">Key equations</div>
+  <div class="gm-eq-row">\[ \mathbf{r}(t) = \mathbf{o} + t\,\mathbf{d}, \qquad t > 0 \]<span class="gm-eq-cap">a ray: origin plus direction</span></div>
+  <div class="gm-eq-row">\[ \lVert\, \mathbf{o} + t\,\mathbf{d} - \mathbf{c}\, \rVert^{2} = R^{2} \]<span class="gm-eq-cap">ray-sphere intersection</span></div>
+  <div class="gm-eq-row">\[ L_o = L_e + \int_{\Omega} f_r\,L_i\,(\mathbf{n}\cdot\boldsymbol{\omega}_i)\,d\omega_i \]<span class="gm-eq-cap">the rendering equation</span></div>
+</div>
 
 <p class="small dim">Lab note: the ray-triangle MATH runs in NumPy (executed below). But real GPU ray tracing needs an RTX (NVIDIA) or RDNA2+ (AMD) GPU with VK_KHR_ray_tracing_pipeline — so the C9/C11 rendering exercises target that hardware specifically; the algorithms and the pipeline structure you can learn anywhere.</p>
 

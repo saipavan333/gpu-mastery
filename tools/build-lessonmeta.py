@@ -1,0 +1,74 @@
+# Builds assets/gm-lessonmeta-data.js (window.GM_LESSONMETA): per-lesson
+# prerequisites (p) + common misconceptions (m:[{w:wrong belief, r:reality}]).
+# Run: python3 tools/build-lessonmeta.py
+import json, os
+ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+M = {
+# ---- Module 1 · Foundations ----
+"module-1/lesson-01.html": {"p":"None — this is the starting point.","m":[{"w":"0x10 is ten.","r":"Hex 0x10 is 1×16 = 16. Reading hex digits as decimal is the classic first-week mistake."}]},
+"module-1/lesson-02.html": {"p":"Lesson 1.1 (bases and binary).","m":[{"w":"A variable in code is a math unknown you solve for.","r":"It is named storage holding a value; x = x + 1 is an instruction, not an equation to solve."}]},
+"module-1/lesson-03.html": {"p":"Lessons 1.1–1.2.","m":[{"w":"\"log\" always means natural log.","r":"In computing, log is very often base-2 (bits, tree depth). Always check the base before trusting a number."}]},
+"module-1/lesson-04.html": {"p":"Lesson 1.1.","m":[{"w":"Screen y grows upward, like a math graph.","r":"Most image and screen coordinate systems put the origin at the top-left with y growing downward."}]},
+"module-1/lesson-05.html": {"p":"Lesson 1.4 (coordinates).","m":[{"w":"The dot product returns a vector.","r":"The dot product returns a scalar (it measures alignment). The cross product is the one that returns a vector."}]},
+"module-1/lesson-06.html": {"p":"Lesson 1.5 (vectors and the dot product).","m":[{"w":"Matrix multiplication is elementwise.","r":"It is rows-times-columns. Elementwise is the Hadamard product, and matrix multiply is not commutative: AB ≠ BA."}]},
+"module-1/lesson-07.html": {"p":"Lesson 1.3 (orders of magnitude).","m":[{"w":"A one-in-a-million event won't show up in your data.","r":"Across a billion GPU threads it happens ~1000 times. Rare per-element events are routine at scale."}]},
+"module-1/lesson-08.html": {"p":"Lessons 1.1 and 1.3.","m":[{"w":"Floats are just decimals that round a little.","r":"They are binary fractions, so 0.1 has no exact representation."},{"w":"A bigger float type is always safe.","r":"Precision loss and non-associative addition remain; parallel sums still vary."}]},
+# ---- Module 2 · Python ----
+"module-2/lesson-01.html": {"p":"None — no prior programming assumed.","m":[{"w":"print() reveals a value's true type.","r":"It shows a string form; 5 and \"5\" print the same but behave very differently."}]},
+"module-2/lesson-02.html": {"p":"Lesson 2.1.","m":[{"w":"== and is mean the same thing.","r":"== compares values; is compares identity (same object). They diverge for lists, and even some ints."}]},
+"module-2/lesson-03.html": {"p":"Lesson 2.2.","m":[{"w":"A mutable default argument is fresh on every call.","r":"It is created once at definition and shared across calls — a notorious bug. Use None as the default."}]},
+"module-2/lesson-04.html": {"p":"Lesson 2.3.","m":[{"w":"b = a makes a copy of the list.","r":"It makes another name for the same list; mutating b changes a. Use list(a) or a.copy()."}]},
+"module-2/lesson-05.html": {"p":"Lesson 2.4.","m":[{"w":"A NumPy slice is a copy.","r":"A basic slice is a view onto the same buffer; writing to it changes the original array."}]},
+"module-2/lesson-06.html": {"p":"Lesson 2.3.","m":[{"w":"If it runs without error, it's correct.","r":"A clean run only means no crash. Tests check that behavior matches intent — the actual bar."}]},
+"module-2/lesson-07.html": {"p":"Lesson 2.6.","m":[{"w":"pip installs packages once for every project.","r":"Without a virtual environment, projects fight over one global set of versions. Isolate per project."}]},
+"module-2/lesson-08.html": {"p":"Lesson 2.5 (NumPy).","m":[{"w":"uint8 arithmetic can't silently overflow.","r":"200 + 100 wraps to 44. Widen to int before arithmetic — the same trap you'll hit in kernels."}]},
+# ---- Module 3 · C / Memory ----
+"module-3/lesson-01.html": {"p":"Module 2 (programming basics).","m":[{"w":"C runs line-by-line like Python.","r":"C is compiled to machine code first; there is no interpreter reading your source at run time."}]},
+"module-3/lesson-02.html": {"p":"Lessons 3.1 and 1.8.","m":[{"w":"Signed overflow wraps around like unsigned.","r":"Signed overflow is undefined behavior — the compiler may assume it never happens and delete your checks."}]},
+"module-3/lesson-03.html": {"p":"Lesson 3.2 (types and sizes).","m":[{"w":"A pointer is the value it points to.","r":"A pointer holds an address. You must dereference it (*p) to read or write the value there."}]},
+"module-3/lesson-04.html": {"p":"Lesson 3.3 (pointers).","m":[{"w":"p + 1 moves forward one byte.","r":"It moves forward sizeof(*p) bytes — 4 for an int*. Pointer arithmetic is typed."}]},
+"module-3/lesson-05.html": {"p":"Lesson 3.3 (pointers).","m":[{"w":"Returning a pointer to a local variable is fine.","r":"The stack frame is reclaimed on return, leaving a dangling pointer. Heap-allocate what must outlive the call."}]},
+"module-3/lesson-06.html": {"p":"Lesson 3.4.","m":[{"w":"A struct's size is the sum of its fields.","r":"Alignment padding can make it larger; field order changes the size. This matters for GPU memory layout."}]},
+"module-3/lesson-07.html": {"p":"Lesson 3.6.","m":[{"w":"A C++ reference is just a pointer.","r":"A reference can't be null or reseated and needs no dereference — it's an alias, not an address you manipulate."}]},
+"module-3/lesson-08.html": {"p":"Lesson 3.5 (stack, heap, malloc).","m":[{"w":"A program that crashes only sometimes is random.","r":"It's almost always a deterministic memory bug (uninitialized read, out-of-bounds). Sanitizers make it reproducible."}]},
+"module-3/lesson-09.html": {"p":"Lessons 3.4 and 1.6.","m":[{"w":"Naive triple-loop matmul is limited by arithmetic.","r":"It's limited by cache misses. Blocking/tiling for reuse is the fix — a direct preview of GPU shared-memory tiling."}]},
+# ---- Module 4 · Architecture ----
+"module-4/lesson-01.html": {"p":"Module 3 (how code becomes instructions).","m":[{"w":"Higher clock speed always means faster.","r":"Caches, instruction-level parallelism, and memory stalls usually matter more than raw GHz."}]},
+"module-4/lesson-02.html": {"p":"Lesson 4.1.","m":[{"w":"Reading from RAM is fast.","r":"A cache miss to DRAM costs hundreds of cycles. The whole memory hierarchy exists to hide that latency."}]},
+"module-4/lesson-03.html": {"p":"Lesson 4.1.","m":[{"w":"More threads always means more speed.","r":"Only the parallel part speeds up (Amdahl's law), and coordination overhead can erase the gains."}]},
+"module-4/lesson-04.html": {"p":"Lessons 4.1 and 4.3.","m":[{"w":"GPUs are fast because each core is fast.","r":"Each GPU core is slower than a CPU's. Speed comes from thousands of threads whose memory waits overlap."}]},
+"module-4/lesson-05.html": {"p":"Lessons 4.2 and 4.4.","m":[{"w":"Each thread's memory access stands alone.","r":"A warp's 32 accesses are coalesced into shared transactions; the access pattern, not just the total bytes, sets the cost."}]},
+"module-4/lesson-06.html": {"p":"Lesson 4.4.","m":[{"w":"The GPU reads host RAM directly and cheaply.","r":"Data crosses the PCIe bus. Transfers are slow relative to compute and must be minimized or overlapped."}]},
+"module-4/lesson-07.html": {"p":"Lessons 4.2 and 4.5.","m":[{"w":"The GPU with more TFLOPs is the faster one.","r":"If your kernel is memory-bound, peak bandwidth — not peak FLOPs — sets the ceiling. The roofline shows which."}]},
+# ---- Module 5 · CUDA ----
+"module-5/lesson-01.html": {"p":"Module 3 and Lesson 4.4.","m":[{"w":"nvcc is just gcc for the GPU.","r":"It separates host and device code and compiles the device part to PTX, then architecture-specific SASS."}]},
+"module-5/lesson-02.html": {"p":"Lessons 5.1 and 4.4.","m":[{"w":"A kernel writes a loop over the data like on a CPU.","r":"Each thread runs once for its own index. You map threads to data; the hardware supplies the parallel \"loop\"."}]},
+"module-5/lesson-03.html": {"p":"Lessons 5.2 and 3.5.","m":[{"w":"You can dereference a device pointer on the host.","r":"It addresses device memory. Copy with cudaMemcpy, or use managed memory that migrates on demand."}]},
+"module-5/lesson-04.html": {"p":"Lesson 5.3.","m":[{"w":"No crash means the kernel succeeded.","r":"Launches are asynchronous and errors are silent. Check cudaGetLastError and synchronize; use compute-sanitizer."}]},
+"module-5/lesson-05.html": {"p":"Lessons 5.2 and 4.5.","m":[{"w":"Shared memory is an automatic cache.","r":"It's a programmer-managed scratchpad: you stage data into it and __syncthreads() yourself before others read."}]},
+"module-5/lesson-06.html": {"p":"Lessons 5.2 and 4.4.","m":[{"w":"Maximum occupancy means maximum speed.","r":"You need enough occupancy to hide latency; past that, more warps mean fewer registers each and can slow you down."}]},
+"module-5/lesson-07.html": {"p":"Lessons 5.5 and 4.5.","m":[{"w":"Any access pattern is fine as long as all data is read.","r":"Strided or misaligned reads fetch sectors you never use. Consecutive threads should touch consecutive addresses."}]},
+"module-5/lesson-08.html": {"p":"Lesson 5.5.","m":[{"w":"Just use atomicAdd for a global sum.","r":"Heavy contention serializes it. Reduce within the block (shared memory, warp shuffles), then combine a few partials."}]},
+"module-5/lesson-09.html": {"p":"Lesson 5.3.","m":[{"w":"Kernels and copies run in the order I call them.","r":"The default stream serializes, but separate streams overlap copies with compute — often a free speedup."}]},
+"module-5/lesson-10.html": {"p":"Lessons 5.6, 5.7 and 4.7.","m":[{"w":"You optimize by studying the code.","r":"You optimize by measuring. The profiler names the binding constraint — memory, occupancy, or stalls — so you fix the right thing."}]},
+"module-5/lesson-11.html": {"p":"Lessons 5.5, 5.7 and 4.7.","m":[{"w":"A correct kernel is already a fast kernel.","r":"Naive → tiled → library can span 100×. The roofline sets the real target for \"done\"."}]},
+# ---- Flagged track lessons ----
+"track-a/lesson-01.html": {"p":"Lessons 1.5 and 1.6 (vectors, matrices).","m":[{"w":"Backpropagation is a special-purpose algorithm.","r":"It's the chain rule applied in reverse across the computation graph — calculus you already know, run backwards."}]},
+"track-b/lesson-01.html": {"p":"Lessons 1.3 and 3.4.","m":[{"w":"A smaller step size always means less error.","r":"Too small and floating-point roundoff dominates the truncation error. There's a sweet spot, not a monotonic win."}]},
+"track-c/lesson-01.html": {"p":"Lessons 1.4 and 1.6.","m":[{"w":"A 3D point needs only three numbers.","r":"Homogeneous coordinates add a fourth (w) so translation and perspective become single matrix multiplies."}]},
+"track-c/lesson-02.html": {"p":"Lesson C1 (graphics math).","m":[{"w":"The GPU draws each whole triangle in one step.","r":"Rasterization tests coverage per pixel/fragment in parallel; one triangle becomes many independent fragments."}]},
+"track-c/lesson-06.html": {"p":"Lessons C1 and 1.5.","m":[{"w":"PBR is just a prettier Phong.","r":"PBR is energy-conserving and physically grounded (microfacets, Fresnel, a real BRDF), not ad-hoc highlight math."}]},
+"track-c/lesson-09.html": {"p":"Lessons C1 and 4.4.","m":[{"w":"Ray tracing tests every triangle against every ray.","r":"An acceleration structure (BVH) prunes each ray to a handful of candidates; brute force would be infeasible."}]},
+}
+
+banner = "/* AUTO-GENERATED by tools/build-lessonmeta.py — do not edit by hand. */\n"
+out = os.path.join(ROOT, "assets", "gm-lessonmeta-data.js")
+with open(out, "w", encoding="utf-8") as f:
+    f.write(banner + "window.GM_LESSONMETA = " + json.dumps(M, ensure_ascii=False) + ";\n")
+
+# verify every keyed lesson file exists
+missing = [k for k in M if not os.path.exists(os.path.join(ROOT, k))]
+n_mis = sum(len(v.get("m", [])) for v in M.values())
+print("wrote", len(M), "lessons,", n_mis, "misconceptions")
+print("missing lesson files:", missing if missing else "none")
