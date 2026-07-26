@@ -43,7 +43,8 @@
       var row = document.createElement("div"); row.className = "gm-foot-links";
       row.innerHTML = '<a href="' + root + 'curriculum.html">Curriculum</a> · <a href="' + root + 'labs.html">Labs</a> · ' +
         '<a href="' + root + 'glossary.html">Glossary</a> · <a href="' + root + 'review.html">Review</a> · ' +
-        '<a href="#" class="gm-open-search">Search</a>';
+        '<a href="' + root + 'interview.html">Interview</a> · <a href="' + root + 'exam.html">Exam</a> · ' +
+        '<a href="' + root + 'cheatsheet.html">Cheat sheets</a> · <a href="#" class="gm-open-search">Search</a>';
       foot.appendChild(row);
       var so = row.querySelector(".gm-open-search");
       if (so) so.addEventListener("click", function (e) { e.preventDefault(); if (window.GMSearch) window.GMSearch.open(); });

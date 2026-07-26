@@ -1,0 +1,126 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Interview Prep — GPU Mastery</title>
+<meta name="description" content="52 real GPU and CUDA interview questions with model answers, grouped by topic and difficulty, each linked to the lesson that teaches it.">
+<link rel="stylesheet" href="assets/style.css">
+<style>
+  .iv-controls { margin: 20px 0 8px; display: flex; flex-direction: column; gap: 10px; }
+  .iv-row { display: flex; flex-wrap: wrap; gap: 7px; }
+  .iv-chip { font: 13.5px var(--sans); color: var(--dim); background: var(--card2); border: 1px solid var(--line);
+    border-radius: 999px; padding: 6px 13px; cursor: pointer; transition: color .15s var(--ease), border-color .15s var(--ease), background .15s var(--ease); }
+  .iv-chip:hover { color: var(--ink); border-color: var(--lineHi); }
+  .iv-chip.on { color: var(--ink); border-color: var(--acc); background: var(--accBg); }
+  .iv-chip .c { color: var(--dim2); font-size: 12px; margin-left: 4px; }
+  .iv-chip.on .c { color: var(--accT); }
+  .iv-row2 { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; margin-top: 2px; }
+  .iv-row2 input { flex: 1; min-width: 200px; font: 15px var(--sans); color: var(--ink); background: var(--card);
+    border: 1px solid var(--line); border-radius: 10px; padding: 9px 13px; }
+  .iv-row2 input:focus { outline: none; border-color: var(--acc); box-shadow: var(--glow); }
+  .iv-count { margin: 4px 0 14px; }
+  .iv-card { background: linear-gradient(180deg, var(--cardHi), var(--card)); border: 1px solid var(--line);
+    border-radius: var(--r2); padding: 14px 16px; margin-bottom: 10px; }
+  .iv-qhead { display: flex; align-items: center; gap: 8px; margin-bottom: 8px; }
+  .iv-badge { font: 10.5px var(--mono); text-transform: uppercase; letter-spacing: .06em; padding: 3px 8px; border-radius: 6px; border: 1px solid var(--line); }
+  .iv-easy { color: var(--good); border-color: color-mix(in srgb, var(--good) 45%, var(--line)); }
+  .iv-medium { color: var(--warn); border-color: color-mix(in srgb, var(--warn) 45%, var(--line)); }
+  .iv-hard { color: var(--bad); border-color: color-mix(in srgb, var(--bad) 45%, var(--line)); }
+  .iv-topic { font-size: 12px; color: var(--dim2); text-transform: uppercase; letter-spacing: .05em; }
+  .iv-q { display: block; width: 100%; text-align: left; font: 600 16px var(--sans); color: var(--ink);
+    background: transparent; border: 0; cursor: pointer; padding: 0; position: relative; padding-right: 26px; }
+  .iv-q::after { content: "+"; position: absolute; right: 4px; top: 50%; transform: translateY(-50%); color: var(--acc); font-weight: 700; font-size: 18px; }
+  .iv-q[aria-expanded="true"]::after { content: "\2212"; }
+  .iv-q:hover { color: var(--accT); }
+  .iv-a { margin-top: 11px; padding-top: 11px; border-top: 1px dashed var(--line); color: var(--tx); line-height: 1.65; font-size: 14.8px; }
+  .iv-a a { display: inline-block; margin-top: 8px; color: var(--acc); font-size: 13.5px; }
+  .iv-none { color: var(--dim); padding: 20px 0; }
+  @media (prefers-reduced-motion: reduce) { .iv-chip, .iv-row2 input { transition: none; } }
+</style>
+</head>
+<body data-lesson="interview">
+<nav><div class="inner">
+  <a class="logo" href="index.html">GPU<span>Mastery</span></a>
+  <a class="item" href="index.html">Home</a>
+  <a class="item" href="curriculum.html">Curriculum</a>
+  <a class="item" href="labs.html">Labs</a>
+  <a class="item" href="setup.html">Lab setup</a>
+</div></nav>
+<div class="wrap">
+<h1>Interview Prep</h1>
+<p class="lead">Fifty-plus real GPU and CUDA interview questions, grouped by topic and difficulty, each with a model answer and a link to the lesson that teaches it. Reveal answers one at a time, or filter to the area you're drilling and reveal them all.</p>
+<div class="iv-controls">
+  <div class="iv-row" id="iv-topics" role="group" aria-label="Filter by topic"></div>
+  <div class="iv-row" id="iv-levels" role="group" aria-label="Filter by difficulty"></div>
+  <div class="iv-row2">
+    <input id="iv-q" type="search" placeholder="Filter questions… (e.g. coalescing, occupancy, attention)" aria-label="Filter questions">
+    <button id="iv-revealall" class="btn btn-ghost" type="button">Reveal all</button>
+  </div>
+  <div class="iv-count small dim" id="iv-count"></div>
+</div>
+<div id="iv-list"></div>
+<div class="footer">GPU Mastery · Interview prep</div>
+</div>
+<script src="assets/gm-interview-data.js"></script>
+<script>
+(function(){
+  var D = window.GM_INTERVIEW || [];
+  var ORDER = ["Architecture","Memory","CUDA","Performance","Foundations","ML Systems","HPC","Graphics","Portability"];
+  var topics = ["All"].concat(ORDER.filter(function(t){ return D.some(function(d){return d.topic===t;}); }));
+  var levels = ["All","easy","medium","hard"];
+  var ft="All", fl="All", fq="", revealAll=false;
+  var elTopics=document.getElementById("iv-topics"), elLevels=document.getElementById("iv-levels"),
+      elList=document.getElementById("iv-list"), elCount=document.getElementById("iv-count"),
+      elQ=document.getElementById("iv-q"), elReveal=document.getElementById("iv-revealall");
+  function esc(s){ return String(s).replace(/[&<>"]/g,function(c){return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c];}); }
+  function cap(s){ return s.charAt(0).toUpperCase()+s.slice(1); }
+  function count(t){ return t==="All" ? D.length : D.filter(function(d){return d.topic===t;}).length; }
+
+  function chips(host, arr, cur, isTopic){
+    host.innerHTML = arr.map(function(v){
+      var label = isTopic ? v : cap(v);
+      var c = isTopic ? '<span class="c">'+count(v)+'</span>' : '';
+      return '<button class="iv-chip'+(v===cur?' on':'')+'" data-v="'+esc(v)+'" aria-pressed="'+(v===cur)+'">'+esc(label)+c+'</button>';
+    }).join("");
+    [].forEach.call(host.querySelectorAll(".iv-chip"), function(b){
+      b.onclick=function(){ if(isTopic) ft=b.getAttribute("data-v"); else fl=b.getAttribute("data-v"); render(); };
+    });
+  }
+  function filtered(){
+    var q=fq.toLowerCase().trim();
+    return D.filter(function(d){
+      if(ft!=="All" && d.topic!==ft) return false;
+      if(fl!=="All" && d.level!==fl) return false;
+      if(q && (d.q+" "+d.a+" "+d.topic).toLowerCase().indexOf(q)<0) return false;
+      return true;
+    });
+  }
+  function render(){
+    chips(elTopics, topics, ft, true);
+    chips(elLevels, levels, fl, false);
+    var items=filtered();
+    elCount.textContent = items.length+" question"+(items.length===1?"":"s")+(ft==="All"&&fl==="All"&&!fq?"":" shown");
+    if(!items.length){ elList.innerHTML='<p class="iv-none">No questions match those filters.</p>'; return; }
+    elList.innerHTML = items.map(function(d){
+      return '<div class="iv-card"><div class="iv-qhead"><span class="iv-badge iv-'+d.level+'">'+cap(d.level)+
+        '</span><span class="iv-topic">'+esc(d.topic)+'</span></div>'+
+        '<button class="iv-q" aria-expanded="'+(revealAll?'true':'false')+'">'+esc(d.q)+'</button>'+
+        '<div class="iv-a"'+(revealAll?'':' hidden')+'><p>'+esc(d.a)+'</p>'+
+        '<a href="'+esc(d.url)+'">→ Read the lesson</a></div></div>';
+    }).join("");
+    [].forEach.call(elList.querySelectorAll(".iv-q"), function(btn){
+      btn.onclick=function(){
+        var a=btn.nextElementSibling, open=btn.getAttribute("aria-expanded")==="true";
+        btn.setAttribute("aria-expanded", open?"false":"true");
+        if(open) a.setAttribute("hidden",""); else a.removeAttribute("hidden");
+      };
+    });
+  }
+  elQ.addEventListener("input", function(){ fq=elQ.value; render(); });
+  elReveal.addEventListener("click", function(){ revealAll=!revealAll; elReveal.textContent=revealAll?"Hide all":"Reveal all"; render(); });
+  render();
+})();
+</script>
+<script src="assets/app.js"></script>
+</body>
+</html>

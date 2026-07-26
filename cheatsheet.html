@@ -1,0 +1,285 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Cheat Sheets — GPU Mastery</title>
+<meta name="description" content="Dense, printable reference cards for the whole GPU Mastery course — foundations, CUDA, architecture, ML systems, HPC, graphics, and portability.">
+<link rel="stylesheet" href="assets/style.css">
+<style>
+  .cs-jump { position: sticky; top: 52px; z-index: 10; display: flex; flex-wrap: wrap; gap: 6px;
+    padding: 10px 0; margin: 8px 0 6px; background: rgba(11,14,20,.9); backdrop-filter: blur(8px); border-bottom: 1px solid var(--line); }
+  .cs-jump a { font: 12.5px var(--mono); color: var(--dim); border: 1px solid var(--line); border-radius: 7px; padding: 4px 9px; }
+  .cs-jump a:hover { color: var(--ink); border-color: var(--acc); text-decoration: none; }
+  .cs-sec { margin: 30px 0; scroll-margin-top: 100px; }
+  .cs-sec > h2 { border-bottom: 2px solid var(--line); padding-bottom: 8px; }
+  .cs-sec > h2 .cs-tag { font: 12px var(--mono); color: var(--dim2); margin-left: 8px; text-transform: uppercase; letter-spacing: .05em; }
+  .cs-grid { display: grid; grid-template-columns: repeat(2, 1fr); gap: 14px; }
+  .cs-card { background: linear-gradient(180deg, var(--cardHi), var(--card)); border: 1px solid var(--line);
+    border-radius: var(--r2); padding: 14px 16px; break-inside: avoid; }
+  .cs-card h3 { margin: 0 0 8px; font-size: 15px; color: var(--accT); }
+  .cs-card ul { margin: 0; padding-left: 18px; } .cs-card li { margin: 4px 0; line-height: 1.5; font-size: 13.8px; color: var(--tx); }
+  .cs-card code { font: 12.5px var(--mono); background: var(--card2); padding: 1px 5px; border-radius: 5px; color: var(--ink); }
+  .cs-card b { color: var(--ink); }
+  .cs-kv { width: 100%; border-collapse: collapse; font-size: 13px; }
+  .cs-kv td { padding: 3px 6px; border-bottom: 1px solid var(--line); vertical-align: top; }
+  .cs-kv td:first-child { color: var(--dim); white-space: nowrap; font-family: var(--mono); font-size: 12.5px; }
+  .cs-print { margin: 6px 0 0; }
+  @media (max-width: 620px) { .cs-grid { grid-template-columns: 1fr; } .cs-jump { top: 48px; } }
+  @media print {
+    nav, .cs-jump, .cs-print, .gm-foot-links, .gm-credit, .gm-foot-credit, .gma-fab, #gm-search-btn { display: none !important; }
+    html, body { background: #fff !important; color: #111 !important; }
+    .wrap { max-width: 100%; padding: 0; }
+    .cs-sec { break-before: page; } .cs-sec:first-of-type { break-before: avoid; }
+    .cs-sec > h2 { color: #111; border-color: #999; } .cs-card h3 { color: #1a4a9c; }
+    .cs-card { background: #fff !important; border: 1px solid #bbb; }
+    .cs-card li, .cs-card b, .cs-card code { color: #111 !important; }
+    .cs-card code { background: #f0f0f0 !important; }
+    .cs-kv td { color: #333 !important; border-color: #ccc; }
+    h1, .lead { color: #111 !important; }
+  }
+</style>
+</head>
+<body data-lesson="cheatsheet">
+<nav><div class="inner">
+  <a class="logo" href="index.html">GPU<span>Mastery</span></a>
+  <a class="item" href="index.html">Home</a>
+  <a class="item" href="curriculum.html">Curriculum</a>
+  <a class="item" href="labs.html">Labs</a>
+  <a class="item" href="setup.html">Lab setup</a>
+</div></nav>
+<div class="wrap">
+<h1>Cheat Sheets</h1>
+<p class="lead">Dense, printable reference for the whole course — the numbers, formulas, APIs, and patterns worth keeping at your elbow. Use your browser's Print (or Save as PDF) for a clean paper copy.</p>
+<button class="btn btn-ghost cs-print" onclick="window.print()">⎙ Print / Save as PDF</button>
+
+<div class="cs-jump" aria-label="Jump to section">
+  <a href="#cs-found">Foundations</a>
+  <a href="#cs-c">C &amp; Memory</a>
+  <a href="#cs-arch">Architecture</a>
+  <a href="#cs-cuda">CUDA</a>
+  <a href="#cs-ml">Track A · ML</a>
+  <a href="#cs-hpc">Track B · HPC</a>
+  <a href="#cs-gfx">Track C · Graphics</a>
+  <a href="#cs-port">Track D · Portable</a>
+</div>
+
+<section class="cs-sec" id="cs-found">
+<h2>Foundations <span class="cs-tag">Module 1</span></h2>
+<div class="cs-grid">
+  <div class="cs-card"><h3>Bases &amp; bits</h3><ul>
+    <li>1 hex digit = <b>4 bits</b>; <code>0x</code> prefix. Byte = 2 hex digits.</li>
+    <li>Binary→dec: sum the weights of the 1-bits. Dec→binary: divide by 2, read remainders bottom-up.</li>
+    <li>Two's complement: <code>negate = invert + 1</code>; top bit is worth <code>−2ⁿ⁻¹</code>.</li>
+    <li>One adder handles all integers because of two's complement.</li>
+  </ul></div>
+  <div class="cs-card"><h3>Ranges &amp; magnitudes</h3><table class="cs-kv">
+    <tr><td>int32 max</td><td>2,147,483,647 (~2.1×10⁹)</td></tr>
+    <tr><td>uint32 max</td><td>4,294,967,295</td></tr>
+    <tr><td>2¹⁰</td><td>1,024 ≈ 10³ (KiB)</td></tr>
+    <tr><td>2²⁰ / 2³⁰</td><td>≈ 10⁶ (MiB) / ≈ 10⁹ (GiB)</td></tr>
+  </table></div>
+  <div class="cs-card"><h3>Floating point</h3><table class="cs-kv">
+    <tr><td>FP32</td><td>1 sign · 8 exp · 23 mantissa (~7 dec digits)</td></tr>
+    <tr><td>FP16</td><td>1 · 5 · 10 — small range, overflows</td></tr>
+    <tr><td>BF16</td><td>1 · 8 · 7 — FP32 range, less precision</td></tr>
+    <tr><td>Specials</td><td>±inf, NaN, subnormals, ±0</td></tr>
+  </table><ul><li>FP add is <b>non-associative</b>: parallel reductions vary run-to-run.</li></ul></div>
+  <div class="cs-card"><h3>Linear algebra</h3><ul>
+    <li>Dot product: <code>a·b = Σ aᵢbᵢ</code> = |a||b|cosθ.</li>
+    <li>Matmul <code>C[m,n] = Σₖ A[m,k]·B[k,n]</code>; inner dims must match.</li>
+    <li>Matmul is O(n³) work, O(n²) data → high arithmetic intensity (GPU-friendly).</li>
+  </ul></div>
+</div>
+</section>
+
+<section class="cs-sec" id="cs-c">
+<h2>C, Pointers &amp; Memory <span class="cs-tag">Module 3</span></h2>
+<div class="cs-grid">
+  <div class="cs-card"><h3>Pointers</h3><ul>
+    <li><code>T* p;</code> holds an address. <code>*p</code> dereferences; <code>&amp;x</code> takes an address.</li>
+    <li>Pointer arithmetic: <code>p + i</code> advances by <code>i × sizeof(T)</code> bytes.</li>
+    <li><code>a[i]</code> is <code>*(a + i)</code>. Arrays decay to pointers.</li>
+  </ul></div>
+  <div class="cs-card"><h3>Stack vs heap</h3><ul>
+    <li>Stack: automatic, fast, freed on return. Heap: <code>malloc</code>/<code>free</code>, manual, persists.</li>
+    <li>Leak = forgot <code>free</code>; use-after-free / double-free = UB.</li>
+    <li>CUDA mirrors this: <code>cudaMalloc</code>/<code>cudaFree</code> on the device heap.</li>
+  </ul></div>
+  <div class="cs-card"><h3>Undefined behavior</h3><ul>
+    <li><b>Signed</b> overflow = UB (compiler may assume it can't happen).</li>
+    <li><b>Unsigned</b> wraps modulo 2ⁿ (defined).</li>
+    <li>Out-of-bounds, uninitialized reads, null deref = UB → segfaults.</li>
+  </ul></div>
+  <div class="cs-card"><h3>Build &amp; debug</h3><table class="cs-kv">
+    <tr><td>gcc -O2 f.c -o p</td><td>compile C</td></tr>
+    <tr><td>nvcc -O2 k.cu -o p</td><td>compile CUDA</td></tr>
+    <tr><td>gdb / lldb</td><td>step, breakpoints, backtrace</td></tr>
+    <tr><td>-fsanitize=address</td><td>catch memory bugs</td></tr>
+  </table></div>
+</div>
+</section>
+
+<section class="cs-sec" id="cs-arch">
+<h2>Hardware &amp; the Roofline <span class="cs-tag">Module 4</span></h2>
+<div class="cs-grid">
+  <div class="cs-card"><h3>CPU vs GPU</h3><ul>
+    <li>CPU: few fat cores, big caches, out-of-order — <b>latency</b>.</li>
+    <li>GPU: many SMs × many ALUs, tiny per-thread state — <b>throughput</b>.</li>
+    <li>GPU hides memory latency by switching among many resident warps.</li>
+  </ul></div>
+  <div class="cs-card"><h3>Memory hierarchy</h3><table class="cs-kv">
+    <tr><td>Registers</td><td>per-thread, fastest</td></tr>
+    <tr><td>Shared / L1</td><td>per-SM, ~tens of KB, programmer-managed</td></tr>
+    <tr><td>L2</td><td>device-wide cache</td></tr>
+    <tr><td>Global / HBM</td><td>GBs, highest latency, the bottleneck</td></tr>
+  </table></div>
+  <div class="cs-card"><h3>Roofline</h3><ul>
+    <li><b>Arithmetic intensity</b> AI = FLOPs ÷ bytes moved.</li>
+    <li>Attainable = <code>min(peak FLOP/s, AI × peak BW)</code>.</li>
+    <li>Ridge point = peak FLOP/s ÷ peak BW. Left = memory-bound; right = compute-bound.</li>
+    <li>Raise AI with reuse (tiling), fusion, better algorithms.</li>
+  </ul></div>
+  <div class="cs-card"><h3>Host ↔ device</h3><ul>
+    <li>PCIe is slow vs HBM; NVLink is faster GPU↔GPU.</li>
+    <li>Use <b>pinned</b> host memory for fast, async DMA copies.</li>
+    <li>Overlap copy with compute using streams; minimize transfers.</li>
+  </ul></div>
+</div>
+</section>
+
+<section class="cs-sec" id="cs-cuda">
+<h2>CUDA Kernels <span class="cs-tag">Module 5</span></h2>
+<div class="cs-grid">
+  <div class="cs-card"><h3>Launch &amp; index</h3><ul>
+    <li><code>kernel&lt;&lt;&lt;grid, block&gt;&gt;&gt;(args);</code> — grid = blocks, block = threads (max <b>1024</b>/block).</li>
+    <li><code>int i = blockIdx.x*blockDim.x + threadIdx.x;</code></li>
+    <li>Grid-stride loop: <code>for(; i&lt;n; i += blockDim.x*gridDim.x)</code> covers any size.</li>
+  </ul></div>
+  <div class="cs-card"><h3>Qualifiers &amp; memory</h3><table class="cs-kv">
+    <tr><td>__global__</td><td>kernel (host-launched)</td></tr>
+    <tr><td>__device__</td><td>device-only function</td></tr>
+    <tr><td>__shared__</td><td>per-block on-chip memory</td></tr>
+    <tr><td>__constant__</td><td>cached read-only</td></tr>
+    <tr><td>cudaMalloc / cudaMemcpy</td><td>alloc / H2D · D2H copy</td></tr>
+  </table></div>
+  <div class="cs-card"><h3>Performance levers</h3><ul>
+    <li><b>Coalesce</b>: consecutive threads → consecutive addresses.</li>
+    <li><b>Occupancy</b>: capped by registers/thread, shared/block, threads/block. Enough &gt; maximum.</li>
+    <li><b>Divergence</b>: keep a warp on one branch path.</li>
+    <li><b>Shared-mem tiling</b>; pad arrays to dodge 32-way <b>bank conflicts</b>.</li>
+  </ul></div>
+  <div class="cs-card"><h3>Patterns &amp; tools</h3><ul>
+    <li>Reduction: tree in shared mem + <code>__shfl_down_sync</code> for the last warp.</li>
+    <li>Contended writes: <code>atomicAdd</code> — but minimize contention.</li>
+    <li>Barrier: <code>__syncthreads()</code> (never in divergent code).</li>
+    <li>Debug: <code>compute-sanitizer</code>. Profile: <code>ncu</code> (kernel), <code>nsys</code> (timeline).</li>
+  </ul></div>
+</div>
+</section>
+
+<section class="cs-sec" id="cs-ml">
+<h2>ML / AI Infrastructure <span class="cs-tag">Track A</span></h2>
+<div class="cs-grid">
+  <div class="cs-card"><h3>Core ideas</h3><ul>
+    <li>Everything is <b>GEMM</b> — linear layers, attention, conv (im2col). Tensor cores accelerate mixed-precision MMA.</li>
+    <li>Autograd = reverse-mode chain rule; store activations for the backward pass.</li>
+    <li><b>Fusion</b> keeps intermediates on-chip — the win for memory-bound ops.</li>
+  </ul></div>
+  <div class="cs-card"><h3>Precision &amp; attention</h3><ul>
+    <li>Mixed precision: compute FP16/BF16, keep FP32 master + accumulate; FP16 needs loss scaling.</li>
+    <li><b>FlashAttention</b>: tile + online softmax; never materialize the N×N scores in HBM.</li>
+  </ul></div>
+  <div class="cs-card"><h3>Scale-out</h3><table class="cs-kv">
+    <tr><td>DDP</td><td>replicate model, all-reduce grads</td></tr>
+    <tr><td>FSDP</td><td>shard params/opt state, gather JIT</td></tr>
+    <tr><td>NCCL</td><td>topology-aware collectives (all-reduce)</td></tr>
+  </table></div>
+  <div class="cs-card"><h3>Inference &amp; compile</h3><ul>
+    <li><b>KV cache</b> makes decoding O(1)/token but dominates memory (batch×seq×layers×hidden).</li>
+    <li>Levers: quantization (INT8/INT4), batching, paged attention (vLLM).</li>
+    <li><code>torch.compile</code> → TorchInductor → fused Triton kernels. Triton = block-level Python kernels.</li>
+  </ul></div>
+</div>
+</section>
+
+<section class="cs-sec" id="cs-hpc">
+<h2>HPC &amp; Scientific <span class="cs-tag">Track B</span></h2>
+<div class="cs-grid">
+  <div class="cs-card"><h3>Libraries first</h3><table class="cs-kv">
+    <tr><td>cuBLAS</td><td>dense linear algebra (GEMM)</td></tr>
+    <tr><td>cuSPARSE / cuSOLVER</td><td>sparse / solvers</td></tr>
+    <tr><td>cuFFT · cuRAND</td><td>FFTs · random numbers</td></tr>
+    <tr><td>Thrust / CUB</td><td>scan, sort, reduce primitives</td></tr>
+  </table></div>
+  <div class="cs-card"><h3>Patterns</h3><ul>
+    <li><b>Stencils</b>: load halos into shared memory, tile; memory-bound.</li>
+    <li><b>Monte Carlo</b>: cuRAND with independent per-thread streams (or samples correlate).</li>
+    <li>Dense linalg: call cuBLAS; only hand-roll to fuse.</li>
+  </ul></div>
+  <div class="cs-card"><h3>Multi-node</h3><ul>
+    <li>MPI + CUDA; NCCL for GPU collectives; <b>GPUDirect</b> RDMA avoids host staging.</li>
+    <li>Offload pragmas: OpenMP <code>target</code>, OpenACC.</li>
+  </ul></div>
+  <div class="cs-card"><h3>Clusters &amp; rigor</h3><table class="cs-kv">
+    <tr><td>sbatch / srun</td><td>SLURM submit / run</td></tr>
+    <tr><td>module load</td><td>toolchains</td></tr>
+    <tr><td>Apptainer</td><td>containers on HPC</td></tr>
+    <tr><td>Reproducible</td><td>seeds, deterministic reductions, fixed precision</td></tr>
+  </table></div>
+</div>
+</section>
+
+<section class="cs-sec" id="cs-gfx">
+<h2>Real-Time Graphics <span class="cs-tag">Track C</span></h2>
+<div class="cs-grid">
+  <div class="cs-card"><h3>The pipeline</h3><ul>
+    <li>Vertex → primitive assembly → <b>rasterize</b> → fragment → framebuffer.</li>
+    <li>Homogeneous coords (x,y,z,<b>w</b>); Model·View·Projection; then <b>perspective divide</b> (÷w).</li>
+  </ul></div>
+  <div class="cs-card"><h3>Shaders &amp; textures</h3><ul>
+    <li>Vertex (transform), fragment (color), compute (general). GLSL → SPIR-V; WGSL on the web.</li>
+    <li>Textures: UV sampling, filtering, <b>mipmaps</b> for minification.</li>
+  </ul></div>
+  <div class="cs-card"><h3>Lighting</h3><ul>
+    <li>Phong = ambient + diffuse (n·l) + specular.</li>
+    <li><b>PBR</b> (Cook-Torrance): <code>spec = D·G·F / (4·(n·l)(n·v))</code>; <b>GGX</b> is the normal-distribution D.</li>
+  </ul></div>
+  <div class="cs-card"><h3>Ray tracing &amp; Vulkan</h3><ul>
+    <li>Ray tracing: ray–triangle hits accelerated by a <b>BVH</b>; shadows, reflections.</li>
+    <li>Vulkan is explicit: command buffers, <b>barriers</b>, semaphores/fences for sync.</li>
+    <li>Profile frames: RenderDoc, Nsight Graphics.</li>
+  </ul></div>
+</div>
+</section>
+
+<section class="cs-sec" id="cs-port">
+<h2>Cross-Vendor &amp; Portable <span class="cs-tag">Track D</span></h2>
+<div class="cs-grid">
+  <div class="cs-card"><h3>The landscape</h3><table class="cs-kv">
+    <tr><td>CUDA</td><td>NVIDIA, most mature</td></tr>
+    <tr><td>HIP / ROCm</td><td>AMD; <code>hipify</code> ports CUDA</td></tr>
+    <tr><td>SYCL / oneAPI</td><td>Intel; single-source C++</td></tr>
+    <tr><td>OpenCL</td><td>older portable standard</td></tr>
+  </table></div>
+  <div class="cs-card"><h3>Warp-size trap</h3><ul>
+    <li>NVIDIA warp = <b>32</b>. AMD wavefront = <b>64</b> (GCN/CDNA) or <b>32</b> (RDNA).</li>
+    <li>Code hard-coding 32 (shuffles, lane masks) can break on 64-wide hardware.</li>
+  </ul></div>
+  <div class="cs-card"><h3>Portability layers</h3><ul>
+    <li><b>Kokkos / RAJA</b>: C++ templates, one source → many backends.</li>
+    <li><b>WebGPU / WGSL</b>: modern GPU compute in the browser, zero install.</li>
+    <li><b>Triton / MLIR</b>: compiler-based portability; lower ops through dialects.</li>
+  </ul></div>
+  <div class="cs-card"><h3>Honest benchmarking</h3><ul>
+    <li>Warm up; time many iters; report medians + variance.</li>
+    <li>Compare like-for-like (same precision, same problem).</li>
+    <li>Watch for vendor-tuned libraries doing the real work.</li>
+  </ul></div>
+</div>
+</section>
+
+<div class="footer">GPU Mastery · Cheat sheets</div>
+</div>
+<script src="assets/app.js"></script>
+</body>
+</html>

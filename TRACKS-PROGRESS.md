@@ -304,3 +304,26 @@ Pages is a static host with no build step, so the site depends on them at runtim
   `assets/assistant-config.js` (empty = offline) — setup in `ASSISTANT-SETUP.md`.
   Answer cache, follow-up memory, prompt-injection defense in the Worker prompt.
   QA asset-presence check extended to 13 platform files.
+
+- **Interview Prep** (`interview.html`) — 52 curated GPU/CUDA interview questions
+  (`tools/build-interview.js.py` -> `assets/gm-interview-data.js`), balanced across
+  9 topics (Architecture, Memory, CUDA, Performance, Foundations, ML Systems, HPC,
+  Graphics, Portability) and 3 levels (14 easy / 28 medium / 10 hard). Each has a
+  model answer and a link to the teaching lesson; all 52 links QA-verified. Filter
+  by topic + difficulty + text; reveal one or all.
+- **Job-Readiness Exam** (`exam.html`) — `tools/build-exam.js` harvests 168 full MCQs
+  (question + options + correct + explanation) -> `assets/exam-data.js`. Engine
+  (`assets/gm-exam.js`) samples by scope (All/Core/Track A–D) and length (10/25/50),
+  shuffles questions AND options, optional 1-min/question timer with auto-submit,
+  70% pass mark, best-score in localStorage, full per-question review with lesson
+  links. Core VERIFIED (9 node assertions: option-shuffle preserves the correct
+  answer across 50 seeds, scope/size caps, no duplicate questions, scoring + pass
+  threshold). QA link-resolution extended to interview + exam.
+
+- **Cheat Sheets** (`cheatsheet.html`) — one dense, printable reference page with a
+  section per module (1–5) and track (A–D): bases/bits, floating point, pointers/UB,
+  memory hierarchy + roofline formula, CUDA launch/qualifiers/perf levers, ML (GEMM,
+  mixed precision, FlashAttention, DDP/FSDP, KV-cache), HPC libraries + clusters,
+  graphics pipeline + PBR, and the cross-vendor warp-size trap. Jump-nav, and a
+  light **@media print** stylesheet (hides nav/FAB, page-break per section) for a
+  clean PDF. Content grounded in the verified lessons.

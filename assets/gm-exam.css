@@ -1,0 +1,50 @@
+/* GPU Mastery — job-readiness exam UI */
+#ex-app { margin-top: 22px; }
+.ex-config { padding: 24px; } .ex-config h2 { margin-top: 0; }
+.ex-field { margin: 16px 0; } .ex-field > label { display: block; font-size: 13px; color: var(--dim2); text-transform: uppercase; letter-spacing: .05em; margin-bottom: 8px; }
+.ex-chips { display: flex; flex-wrap: wrap; gap: 8px; }
+.ex-chip { font: 14px var(--sans); color: var(--dim); background: var(--card2); border: 1px solid var(--line); border-radius: 999px; padding: 8px 15px; cursor: pointer; transition: color .15s var(--ease), border-color .15s var(--ease), background .15s var(--ease); }
+.ex-chip:hover:not(:disabled) { color: var(--ink); border-color: var(--lineHi); }
+.ex-chip.on { color: var(--ink); border-color: var(--acc); background: var(--accBg); }
+.ex-chip:disabled { opacity: .4; cursor: not-allowed; }
+.ex-avail { display: inline-block; margin-top: 8px; }
+.ex-check { text-transform: none !important; letter-spacing: 0 !important; color: var(--tx) !important; font-size: 14.5px !important; display: flex; align-items: center; gap: 8px; cursor: pointer; }
+.ex-best { color: var(--good); }
+
+.ex-bar-wrap { height: 6px; background: var(--card2); border-radius: 999px; overflow: hidden; margin-bottom: 12px; }
+.ex-bar { height: 100%; background: linear-gradient(90deg, var(--acc), var(--acc2)); transition: width .3s var(--ease); }
+.ex-top { display: flex; justify-content: space-between; align-items: center; margin-bottom: 10px; }
+.ex-timer { font: 700 14px var(--mono); color: var(--accT); font-variant-numeric: tabular-nums; }
+.ex-card { padding: 22px; }
+.ex-qmeta { display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px; }
+.ex-group { font: 11px var(--mono); text-transform: uppercase; letter-spacing: .06em; color: var(--dim2); }
+.ex-flag { font: 12.5px var(--sans); color: var(--dim); background: transparent; border: 1px solid var(--line); border-radius: 7px; padding: 4px 10px; cursor: pointer; }
+.ex-flag.on { color: var(--warn); border-color: color-mix(in srgb, var(--warn) 45%, var(--line)); }
+.ex-q { font-size: 18.5px; line-height: 1.5; color: var(--ink); font-weight: 600; margin-bottom: 16px; }
+.ex-opts { display: flex; flex-direction: column; gap: 9px; }
+.ex-opt { display: flex; align-items: flex-start; gap: 11px; text-align: left; font: 15px var(--sans); color: var(--tx); background: var(--card2); border: 1px solid var(--line); border-radius: 10px; padding: 12px 14px; cursor: pointer; transition: border-color .12s var(--ease), background .12s var(--ease); }
+.ex-opt:hover { border-color: var(--lineHi); }
+.ex-opt.sel { border-color: var(--acc); background: var(--accBg); color: var(--ink); }
+.ex-key { flex: 0 0 auto; width: 22px; height: 22px; border-radius: 6px; background: var(--card); border: 1px solid var(--line); display: inline-flex; align-items: center; justify-content: center; font: 12px var(--mono); color: var(--dim); }
+.ex-opt.sel .ex-key { background: var(--acc); color: #06101f; border-color: var(--acc); }
+.ex-nav { display: flex; gap: 10px; margin-top: 16px; align-items: center; }
+.ex-nav .ex-end { margin-left: auto; }
+
+.ex-result { text-align: center; padding: 30px 24px; }
+.ex-result.pass { border-color: color-mix(in srgb, var(--good) 45%, var(--line)); }
+.ex-result.fail { border-color: color-mix(in srgb, var(--warn) 40%, var(--line)); }
+.ex-score { font-size: 58px; font-weight: 800; line-height: 1; font-variant-numeric: tabular-nums; }
+.ex-result.pass .ex-score { color: var(--good); } .ex-result.fail .ex-score { color: var(--warn); }
+.ex-verdict { font-size: 19px; font-weight: 700; color: var(--ink); margin: 6px 0 2px; }
+.ex-actions { display: flex; gap: 10px; justify-content: center; margin-top: 18px; }
+
+.ex-rev { background: var(--card); border: 1px solid var(--line); border-left-width: 3px; border-radius: var(--r2); padding: 14px 16px; margin-bottom: 10px; }
+.ex-rev.ok { border-left-color: var(--good); } .ex-rev.no { border-left-color: var(--bad); }
+.ex-rev-q { font-weight: 600; color: var(--ink); margin-bottom: 8px; }
+.ex-rev-a { display: flex; flex-direction: column; gap: 3px; font-size: 14px; margin-bottom: 6px; }
+.ex-good { color: var(--good); } .ex-bad { color: var(--bad); } .ex-skip { color: var(--dim2); }
+.ex-rev-x { font-size: 13.5px; color: var(--dim); line-height: 1.55; margin: 4px 0 6px; }
+.ex-rev-l { color: var(--acc); }
+
+@media (max-width: 620px) { .ex-nav { flex-wrap: wrap; } .ex-score { font-size: 46px; } }
+@media (prefers-reduced-motion: reduce) { .ex-bar, .ex-opt, .ex-chip { transition: none; } }

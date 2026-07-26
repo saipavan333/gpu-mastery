@@ -44,13 +44,18 @@ let FAIL = 0; const bad = (t,items)=>{ if(items.length){ FAIL+=items.length; con
   for(const a of ['assets/gm-site.js','assets/gm-site.css','assets/gm-search.js','assets/gm-search.css','assets/search-data.js',
       'assets/gm-glossary.js','assets/gm-glossary-data.js','assets/gm-review.js','assets/review-data.js',
       'assets/gm-assistant.js','assets/gm-assistant.css','assets/assistant-config.js','worker/assistant-proxy.js',
+      'assets/gm-interview-data.js','assets/gm-exam.js','assets/gm-exam.css','assets/exam-data.js',
       'assets/katex/katex.min.js','assets/katex/contrib/auto-render.min.js','assets/img/favicon.svg','assets/img/favicon-32.png','assets/img/favicon.ico'])
     if(!fs.existsSync(path.join(ROOT,a))) b.push('missing '+a); bad('platform assets present', b); })();
 
 (function(){ let b=[]; try{ global.window={}; require('../assets/search-data.js'); } catch(e){}
   try{ delete require.cache[require.resolve('../assets/gm-glossary-data.js')]; global.window={}; require('../assets/gm-glossary-data.js');
     (global.window.GM_GLOSSARY||[]).forEach(function(g){ if(g.s && !fs.existsSync(path.join(ROOT,g.s))) b.push('glossary "'+g.t+'" -> '+g.s); });
-  }catch(e){ b.push('glossary data load: '+e.message); } bad('glossary links resolve', b); })();
+  }catch(e){ b.push('glossary data load: '+e.message); }
+  try{ delete require.cache[require.resolve('../assets/gm-interview-data.js')]; global.window={}; require('../assets/gm-interview-data.js');
+    (global.window.GM_INTERVIEW||[]).forEach(function(q){ if(q.url && !fs.existsSync(path.join(ROOT,q.url))) b.push('interview '+q.id+' -> '+q.url); });
+  }catch(e){ b.push('interview data load: '+e.message); }
+  bad('glossary + interview links resolve', b); })();
 
 console.log('\n' + (FAIL? `QA: ${FAIL} issue(s) — NOT clean` : 'QA: ALL CLEAN ✓'));
 process.exit(FAIL?1:0);
