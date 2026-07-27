@@ -143,8 +143,8 @@
 
     function autoresize() { input.style.height = "auto"; input.style.height = Math.min(input.scrollHeight, 120) + "px"; }
     function updateMode() { var m = panel.querySelector(".gma-mode"); if (!m) return;
-      m.innerHTML = proxyUrl() ? '<span class="gma-dot on"></span> AI mode · grounded in course'
-                              : '<span class="gma-dot"></span> Offline mode · grounded in course'; }
+      m.innerHTML = proxyUrl() ? '<span class="gma-dot on"></span> AI answers · from the course lessons'
+                              : '<span class="gma-dot"></span> Answers drawn from the course lessons'; }
     function addBubble(who, html) {
       var b = el("div", "gma-msg gma-" + who, html); msgs.appendChild(b); msgs.scrollTop = msgs.scrollHeight;
       [].forEach.call(b.querySelectorAll(".gma-srch"), function (a) { a.onclick = function (e) { e.preventDefault(); toggle(false); if (window.GMSearch && window.GMSearch.open) window.GMSearch.open(); }; });

@@ -19,7 +19,7 @@
     var main = document.getElementById("gm-main") || document.querySelector(".wrap") || document.body;
     if (!main || !("IntersectionObserver" in window)) { root.classList.remove("gm-anim"); return; }
 
-    var sel = "h2, .card, .diagram, .quiz, .keypoints, details, table, .cs-card, .iv-card, .lab, .callout, .lesson-nav, .gm-prereq, .gm-misc";
+    var sel = "h2, .card, .trackcard, .step, .cm-node, .diagram, .quiz, .keypoints, details, table, .cs-card, .iv-card, .lab, .callout, .lesson-nav, .gm-prereq, .gm-misc";
     var nodes = [].slice.call(main.querySelectorAll(sel));
     var vh = window.innerHeight || 800, group = 0, gy = -1;
     nodes.forEach(function (el) {
