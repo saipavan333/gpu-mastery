@@ -28,17 +28,35 @@
     var main = document.getElementById("gm-main") || document.querySelector(".wrap") || document.body;
     if (!main || !("IntersectionObserver" in window)) return;   // entrance still runs; no reveal hiding
 
-    var sel = "h2, .card, .trackcard, .step, .cm-node, .diagram, .quiz, .keypoints, details, table, .cs-card, .iv-card, .lab, .callout, .lesson-nav, .gm-prereq, .gm-misc, .labcard, .gl-item";
+    var sel = "h2, .card, .trackcard, .step, .cm-node, .diagram, .quiz, .keypoints, details, table, .cs-card, .iv-card, .lab, .callout, .lesson-nav, .gm-prereq, .gm-misc, .labcard, .gl-item, .hero .eyebrow, .hero h1, .hero .subhead, .hero .cta-row, .hero .small, .hero-art, .stats";
     var nodes = [].slice.call(main.querySelectorAll(sel));
-    var vh = window.innerHeight || 800, group = 0, gy = -1;
+    var vh = window.innerHeight || 800, group = 0, gy = -1, onLoad = [];
     nodes.forEach(function (el) {
       var top = el.getBoundingClientRect().top;
       el.classList.add("gm-reveal");
-      if (top < vh * 0.92) { el.classList.add("gm-in"); return; }   // already on screen: show immediately, no flash
+      if (top < vh * 0.92) { onLoad.push(el); return; }   // already on screen: animate in on next paint (see below)
       var y = Math.round(top / 40);
       if (y !== gy) { group = 0; gy = y; } else { group++; }
       el.style.transitionDelay = Math.min(group * 45, 180) + "ms";
     });
+
+    // Elements already on screen at load still need to VISIBLY transition, not just
+    // snap to their end state. A class added in the same tick as gm-reveal never gets
+    // a painted "before" frame, so the browser skips the transition entirely. Force one
+    // real frame first (double rAF), stagger like the scroll case, THEN flip to gm-in.
+    if (onLoad.length) {
+      requestAnimationFrame(function () {
+        requestAnimationFrame(function () {
+          var g = 0, gy2 = -1;
+          onLoad.forEach(function (el) {
+            var y = Math.round(el.getBoundingClientRect().top / 40);
+            if (y !== gy2) { g = 0; gy2 = y; } else { g++; }
+            el.style.transitionDelay = Math.min(g * 45, 180) + "ms";
+            el.classList.add("gm-in");
+          });
+        });
+      });
+    }
 
     var io = new IntersectionObserver(function (entries) {
       entries.forEach(function (e) { if (e.isIntersecting) { e.target.classList.add("gm-in"); io.unobserve(e.target); } });

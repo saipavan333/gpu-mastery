@@ -196,9 +196,8 @@ details .body { padding: 6px 16px 13px; }
 .step .sn { font-family: var(--mono); color: var(--acc2); font-weight: 700; font-size: 13px; }
 
 @keyframes fade { from { opacity: 0; transform: translateY(-3px); } to { opacity: 1; transform: none; } }
-@keyframes rise { from { opacity: 0; transform: translateY(14px); } to { opacity: 1; transform: none; } }
-.reveal { animation: rise .5s var(--ease) both; }
-.reveal.d1{animation-delay:.06s} .reveal.d2{animation-delay:.12s} .reveal.d3{animation-delay:.18s} .reveal.d4{animation-delay:.24s}
+/* Hero entrance now runs through the single-source motion layer (assets/gm-motion.js) —
+   see that file. Do not reintroduce a page-specific .reveal/keyframe system here. */
 
 @media (prefers-reduced-motion: reduce) {
   * { animation: none !important; transition: none !important; scroll-behavior: auto !important; }
