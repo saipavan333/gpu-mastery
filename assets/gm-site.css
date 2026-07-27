@@ -40,3 +40,54 @@
 .gm-eq-row .katex-display { margin: 6px 0; text-align: left; }
 .gm-eq-cap { color: var(--dim); font-size: 13px; }
 @media (max-width: 620px){ .gm-eq-row { gap: 2px; } .gm-eq-row .katex-display { overflow-x: auto; overflow-y: hidden; } }
+
+/* "Resume where you left off" card (home page, injected by gm-site.js) */
+.gm-resume { display: flex; flex-direction: column; gap: 2px; margin: 16px 0 22px; padding: 12px 16px;
+  background: linear-gradient(100deg, var(--accBg), var(--card)); border: 1px solid color-mix(in srgb, var(--acc) 40%, var(--line));
+  border-radius: var(--r2); text-decoration: none; transition: border-color .15s var(--ease), transform .15s var(--ease); }
+.gm-resume:hover { border-color: var(--acc); transform: translateY(-1px); text-decoration: none; }
+.gm-resume-l { font: 11px var(--mono); text-transform: uppercase; letter-spacing: .07em; color: var(--accT); }
+.gm-resume-t { color: var(--ink); font-weight: 600; font-size: 15.5px; }
+@media (prefers-reduced-motion: reduce){ .gm-resume { transition: none; } }
+
+/* read-aloud control bar (lesson pages, injected by gm-readaloud.js) */
+.gm-ra { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; margin: 14px 0 20px; padding: 10px 12px;
+  background: var(--card); border: 1px solid var(--line); border-radius: var(--r2); }
+.gm-ra-btn { font: 600 13.5px var(--sans); color: #06101f; background: linear-gradient(100deg, var(--acc), #3f7fe6);
+  border: 0; border-radius: 8px; padding: 7px 13px; cursor: pointer; display: inline-flex; align-items: center; gap: 6px; }
+.gm-ra-stop { background: var(--card2); color: var(--ink); border: 1px solid var(--line); }
+.gm-ra-voice { font: 13px var(--sans); color: var(--ink); background: var(--card2); border: 1px solid var(--line);
+  border-radius: 7px; padding: 6px 8px; max-width: 190px; }
+.gm-ra-rate-l { font-size: 12.5px; color: var(--dim); display: inline-flex; align-items: center; gap: 6px; }
+.gm-ra-rate { accent-color: var(--acc); }
+.gm-ra-on { background: color-mix(in srgb, var(--acc) 16%, transparent); border-radius: 4px;
+  box-shadow: -6px 0 0 color-mix(in srgb, var(--acc) 16%, transparent), 6px 0 0 color-mix(in srgb, var(--acc) 16%, transparent); }
+@media (prefers-reduced-motion: reduce){ .gm-ra-on { box-shadow: none; } }
+
+/* syntax highlighting tokens (gm-highlight.js) — on-brand, readable on dark code bg */
+.gm-hl-c { color: var(--dim2); font-style: italic; }
+.gm-hl-s { color: #8fe0a6; }
+.gm-hl-n { color: var(--violet); }
+.gm-hl-k { color: var(--acc); font-weight: 600; }
+.gm-hl-t { color: var(--acc2); }
+.gm-hl-b { color: var(--accT); }
+.gm-hl-p { color: var(--violet); }
+@media print { .gm-hl-c { color: #5a7a5a; } .gm-hl-s { color: #1a7a3a; } .gm-hl-k { color: #1a4a9c; } .gm-hl-t { color: #0a6a6a; } .gm-hl-n, .gm-hl-p { color: #6a3aa0; } }
+
+/* runnable Python cells + auto-grader (gm-run.js, Module 2 lessons) */
+.gm-run-bar { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin: 6px 0 0; }
+.gm-run-btn, .gm-run-edit, .gm-run-grade-btn { font: 600 13px var(--sans); border-radius: 7px; padding: 6px 12px; cursor: pointer; border: 1px solid var(--line); }
+.gm-run-btn { background: linear-gradient(100deg, var(--acc), #3f7fe6); color: #06101f; border: 0; }
+.gm-run-btn:disabled { opacity: .55; cursor: default; }
+.gm-run-grade-btn { background: var(--card2); color: var(--good); border-color: color-mix(in srgb, var(--good) 40%, var(--line)); }
+.gm-run-edit { background: var(--card2); color: var(--ink); }
+.gm-run-status { font-size: 12px; color: var(--dim2); }
+.gm-run-ta { display: block; width: 100%; box-sizing: border-box; font: 13px/1.55 var(--mono); color: var(--ink);
+  background: #0b0e14; border: 1px solid var(--acc); border-radius: 8px; padding: 12px; margin: 8px 0; }
+.gm-run-out { font: 12.5px/1.55 var(--mono); white-space: pre-wrap; word-break: break-word; background: var(--bg2);
+  border: 1px solid var(--line); border-left: 3px solid var(--acc2); border-radius: 8px; padding: 10px 12px; margin: 8px 0 4px; color: var(--tx); }
+.gm-run-out.err { border-left-color: var(--bad); color: var(--bad); }
+.gm-run-out.grade.allok { border-left-color: var(--good); } .gm-run-out.grade.some { border-left-color: var(--warn); }
+.gm-run-verdict { font-weight: 700; margin-bottom: 4px; color: var(--ink); }
+.gm-run-case { padding: 1px 0; } .gm-run-case.ok { color: var(--good); } .gm-run-case.no { color: var(--bad); }
+.gm-run-print { color: var(--dim); margin-bottom: 6px; }

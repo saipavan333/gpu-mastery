@@ -1,0 +1,122 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Concept Map — GPU Mastery</title>
+<meta name="description" content="An interactive map of the whole GPU Mastery curriculum — the core path from foundations to CUDA, then the four specialization tracks — with every lesson one click away.">
+<link rel="stylesheet" href="assets/style.css">
+<style>
+  .cm-intro { margin-bottom: 18px; }
+  .cm-legend { display: flex; flex-wrap: wrap; gap: 14px; margin: 10px 0 24px; font-size: 13px; color: var(--dim); }
+  .cm-legend span { display: inline-flex; align-items: center; gap: 6px; }
+  .cm-dot { width: 12px; height: 12px; border-radius: 3px; display: inline-block; }
+  .cm-core .cm-dot { background: var(--acc); } .cm-track .cm-dot { background: var(--acc2); }
+  .cm-flow { display: flex; flex-direction: column; gap: 10px; }
+  .cm-rail-h { font: 11px var(--mono); text-transform: uppercase; letter-spacing: .08em; color: var(--dim2); margin: 18px 0 4px; }
+  .cm-node { border: 1px solid var(--line); border-radius: var(--r2); background: linear-gradient(180deg, var(--cardHi), var(--card)); overflow: hidden; }
+  .cm-core .cm-head { border-left: 3px solid var(--acc); } .cm-track .cm-head { border-left: 3px solid var(--acc2); }
+  .cm-head { width: 100%; display: flex; align-items: center; gap: 12px; padding: 13px 16px; background: transparent;
+    border: 0; cursor: pointer; text-align: left; color: var(--ink); font: inherit; }
+  .cm-head:hover { background: var(--card2); }
+  .cm-badge { flex: 0 0 auto; width: 34px; height: 34px; border-radius: 8px; display: inline-flex; align-items: center; justify-content: center;
+    font: 800 14px var(--mono); color: #06101f; }
+  .cm-core .cm-badge { background: linear-gradient(135deg, var(--acc), #3f7fe6); } .cm-track .cm-badge { background: linear-gradient(135deg, var(--acc2), #2bb39c); }
+  .cm-t { font-size: 16px; font-weight: 700; } .cm-sub { font-size: 12.5px; color: var(--dim2); }
+  .cm-meta { margin-left: auto; display: flex; align-items: center; gap: 12px; }
+  .cm-count { font: 12px var(--mono); color: var(--dim); }
+  .cm-caret { color: var(--acc); transition: transform .18s var(--ease); }
+  .cm-node.open .cm-caret { transform: rotate(90deg); }
+  .cm-lessons { list-style: none; margin: 0; padding: 0 16px 8px 62px; display: none; }
+  .cm-node.open .cm-lessons { display: block; }
+  .cm-lessons a { display: flex; gap: 10px; padding: 7px 0; border-top: 1px solid var(--line); color: var(--tx); text-decoration: none; font-size: 14px; }
+  .cm-lessons a:hover { color: var(--acc); } .cm-lessons a:first-child { border-top: 0; }
+  .cm-ln { font: 11.5px var(--mono); color: var(--dim2); flex: 0 0 auto; min-width: 30px; }
+  .cm-arrow { text-align: center; color: var(--dim2); font-size: 18px; line-height: 1; }
+  .cm-branch { text-align: center; color: var(--dim2); font-size: 13px; margin: 6px 0 2px; }
+  @media (prefers-reduced-motion: reduce) { .cm-caret { transition: none; } }
+</style>
+<!-- gm-seo:start -->
+<link rel="canonical" href="https://saipavan333.github.io/gpu-mastery/concept-map.html">
+<link rel="manifest" href="https://saipavan333.github.io/gpu-mastery/manifest.webmanifest">
+<meta name="theme-color" content="#0b0e14">
+<link rel="apple-touch-icon" href="https://saipavan333.github.io/gpu-mastery/assets/img/favicon-180.png">
+<meta property="og:type" content="website">
+<meta property="og:site_name" content="GPU Mastery">
+<meta property="og:title" content="Concept Map — GPU Mastery">
+<meta property="og:description" content="An interactive map of the whole GPU Mastery curriculum — the core path from foundations to CUDA, then the four specialization tracks — with every lesson one click away.">
+<meta property="og:url" content="https://saipavan333.github.io/gpu-mastery/concept-map.html">
+<meta property="og:image" content="https://saipavan333.github.io/gpu-mastery/assets/img/og.png">
+<meta name="twitter:card" content="summary_large_image">
+<meta name="twitter:title" content="Concept Map — GPU Mastery">
+<meta name="twitter:description" content="An interactive map of the whole GPU Mastery curriculum — the core path from foundations to CUDA, then the four specialization tracks — with every lesson one click away.">
+<meta name="twitter:image" content="https://saipavan333.github.io/gpu-mastery/assets/img/og.png">
+<!-- gm-seo:end -->
+</head>
+<body data-lesson="conceptmap">
+<nav><div class="inner">
+  <a class="logo" href="index.html">GPU<span>Mastery</span></a>
+  <a class="item" href="index.html">Home</a>
+  <a class="item" href="curriculum.html">Curriculum</a>
+  <a class="item" href="labs.html">Labs</a>
+  <a class="item" href="setup.html">Lab setup</a>
+</div></nav>
+<div class="wrap">
+<h1>Concept Map</h1>
+<p class="lead cm-intro">The whole curriculum as one dependency map: a core path that takes you from raw math to writing real CUDA, then four specialization tracks that branch from it. Click any stage to expand its lessons.</p>
+<div class="cm-legend"><span class="cm-core"><span class="cm-dot"></span> Core path (everyone)</span><span class="cm-track"><span class="cm-dot"></span> Specialization track (pick your direction)</span></div>
+<div id="cm-app"><noscript><p class="dim">Enable JavaScript to explore the interactive map, or use the <a href="curriculum.html">curriculum</a>.</p></noscript></div>
+<div class="footer">GPU Mastery · Concept map</div>
+</div>
+<script src="assets/search-data.js"></script>
+<script>
+(function(){
+  var I = window.GM_INDEX || [];
+  var CORE = { "1":["Foundations","Math & number sense from zero"], "2":["Python","Programming & NumPy"],
+    "3":["C, Pointers & Memory","How memory really works"], "4":["Hardware & the Roofline","CPU vs GPU, bandwidth, limits"],
+    "5":["CUDA Kernels","Writing & optimizing real kernels"] };
+  var TRACK = { "a":["Track A · ML / AI Infra","PyTorch, Triton, FlashAttention, serving"], "b":["Track B · HPC & Scientific","cuBLAS, MPI, clusters, reproducibility"],
+    "c":["Track C · Real-Time Graphics","Rasterization, shaders, PBR, ray tracing"], "d":["Track D · Portable & Cross-Vendor","HIP, SYCL, WebGPU, Triton/MLIR"] };
+  function esc(s){ return String(s).replace(/[&<>"]/g,function(c){return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c];}); }
+  function lessonsFor(re){ return I.filter(function(e){ return re.test(e.url); }).sort(function(a,b){ return a.url<b.url?-1:1; }); }
+  function shortNum(n){ return String(n||"").replace(/^Module\s+/,'').replace(/^Track\s+[A-D]\s*·?\s*/i,'').replace(/Lesson\s+/,'L'); }
+
+  function node(kind, badge, title, sub, lessons){
+    var id = "cm-"+kind+"-"+badge;
+    var items = lessons.map(function(e){
+      return '<li><a href="'+esc(e.url)+'"><span class="cm-ln">'+esc(shortNum(e.num))+'</span><span>'+esc(e.title.replace(/^\d[\d.]*\s*/,'').replace(/^[A-D]\d+\s*/,''))+'</span></a></li>';
+    }).join("");
+    return '<div class="cm-node cm-'+kind+'" id="'+id+'">'+
+      '<button class="cm-head" aria-expanded="false" aria-controls="'+id+'-l">'+
+        '<span class="cm-badge">'+esc(badge)+'</span>'+
+        '<span><span class="cm-t">'+esc(title)+'</span><br><span class="cm-sub">'+esc(sub)+'</span></span>'+
+        '<span class="cm-meta"><span class="cm-count">'+lessons.length+' lessons</span><span class="cm-caret">▸</span></span>'+
+      '</button>'+
+      '<ul class="cm-lessons" id="'+id+'-l">'+items+'</ul></div>';
+  }
+
+  var html = '<div class="cm-rail-h">The core path</div><div class="cm-flow">';
+  ["1","2","3","4","5"].forEach(function(k,idx){
+    var ls = lessonsFor(new RegExp("^module-"+k+"/lesson"));
+    html += node("core", k, CORE[k][0], CORE[k][1], ls);
+    if(idx<4) html += '<div class="cm-arrow">↓</div>';
+  });
+  html += '</div><div class="cm-branch">↓ then branch into a specialization ↓</div>';
+  html += '<div class="cm-rail-h">Specialization tracks</div><div class="cm-flow">';
+  ["a","b","c","d"].forEach(function(k){
+    var ls = lessonsFor(new RegExp("^track-"+k+"/lesson"));
+    html += node("track", k.toUpperCase(), TRACK[k][0], TRACK[k][1], ls);
+  });
+  html += '</div>';
+  var app = document.getElementById("cm-app"); app.innerHTML = html;
+
+  [].forEach.call(app.querySelectorAll(".cm-head"), function(btn){
+    btn.addEventListener("click", function(){
+      var node = btn.closest(".cm-node"); var open = node.classList.toggle("open");
+      btn.setAttribute("aria-expanded", open?"true":"false");
+    });
+  });
+})();
+</script>
+<script src="assets/app.js"></script>
+</body>
+</html>

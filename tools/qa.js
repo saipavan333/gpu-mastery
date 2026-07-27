@@ -41,7 +41,7 @@ let FAIL = 0; const bad = (t,items)=>{ if(items.length){ FAIL+=items.length; con
 
 // 6) external asset references resolve (favicon, katex, gm-site)
 (function(){ let b=[]; for(const f of ['index.html','module-5/lesson-07.html','lab-roofline.html']){ }
-  for(const a of ['assets/gm-site.js','assets/gm-site.css','assets/gm-motion.js','assets/gm-motion.css','assets/gm-search.js','assets/gm-search.css','assets/search-data.js',
+  for(const a of ['assets/gm-site.js','assets/gm-site.css','assets/gm-motion.js','assets/gm-motion.css','assets/gm-readaloud.js','assets/gm-highlight.js','assets/gm-run.js','assets/gm-search.js','assets/gm-search.css','assets/search-data.js',
       'assets/gm-glossary.js','assets/gm-glossary-data.js','assets/gm-review.js','assets/review-data.js',
       'assets/gm-assistant.js','assets/gm-assistant.css','assets/assistant-config.js','worker/assistant-proxy.js',
       'assets/gm-interview-data.js','assets/gm-lessonmeta-data.js','assets/gm-exam.js','assets/gm-exam.css','assets/exam-data.js',

@@ -355,3 +355,27 @@ Pages is a static host with no build step, so the site depends on them at runtim
   ALL 23 VERIFIED to parse with the vendored KaTeX in node. Static `\[` triggers the
   existing conditional KaTeX loader; annotated code-block derivations kept intact.
   Uses only `\[...\]`/`\(...\)` (never a bare `$`), so no currency/math collision.
+
+## Feature-completion wave — the last §3 items
+
+- **Resume where you left off** (§5.3) — app.js records the last lesson viewed
+  (localStorage); gm-site.js injects a path-aware Resume card on the home page.
+  VERIFIED (node smoke).
+- **Read-aloud** (§3) — `assets/gm-readaloud.js` (Web Speech API): control bar on
+  lesson pages with voice picker, speed, play/pause/stop, current-block highlight;
+  graceful no-op if unsupported; reduced-motion aware.
+- **Syntax highlighting** (§3) — `assets/gm-highlight.js`, a compact offline lexer
+  (C/CUDA/C++, Python, GLSL, bash) with on-brand token colors + a print palette.
+  VERIFIED escape-safe: 49/49 real code blocks round-trip to identical text.
+- **Interactive concept map** (§3) — `concept-map.html`: the curriculum as a
+  clickable dependency map (core path 1→5, then the four tracks), each node expands
+  to its lessons, built from GM_INDEX. Indexed + in the footer strip.
+- **Runnable Python + auto-grader** (§3, §3.1) — `assets/gm-run.js`: Module-2 Python
+  blocks become editable, runnable cells (shared lazy Pyodide, output panel, numpy on
+  demand, graceful offline fallback). Auto-grader via a sentinel-JSON harness
+  (`@@GMX@@`), with a demonstrator graded exercise in module-2/lesson-03. Grader
+  harness VERIFIED in real Python (wrong solution → partial, correct → all pass).
+  Note: CUDA can't run in a browser, so runnable code targets the Python lessons.
+
+Every §3 required feature is now built. Only §11 (access control / subscriptions)
+remains deferred by the owner's explicit "build product, defer selling" decision.

@@ -18,6 +18,9 @@
     js(assetBase + "gm-glossary.js");
     css(assetBase + "gm-assistant.css");
     js(assetBase + "gm-assistant.js");
+    js(assetBase + "gm-readaloud.js");
+    js(assetBase + "gm-highlight.js");
+    js(assetBase + "gm-run.js");
     if (/\$\$|\\\(|\\\[/.test(document.documentElement.innerHTML)) {   // KaTeX only where math exists (§5.7)
       css(assetBase + "katex/katex.min.css");
       js(assetBase + "katex/katex.min.js", function () { js(assetBase + "katex/contrib/auto-render.min.js"); });
@@ -115,7 +118,17 @@
     })(btns[i]);
   }
 
+  /* ---- remember the last lesson viewed, for "Resume where you left off" (§5.3) ---- */
+  function recordLastLesson() {
+    if (!/lesson-\d/.test(location.pathname)) return;
+    var parts = location.pathname.split("/").filter(Boolean);
+    var rel = parts.slice(-2).join("/");
+    var h1 = document.querySelector("#gm-main h1, .wrap h1, h1");
+    var title = ((h1 && h1.textContent) || document.title || "").replace(/\s*[—|·].*$/, "").trim();
+    if (rel) store.set("lastLesson", { rel: rel, title: title, at: Date.now() });
+  }
+
   document.addEventListener("DOMContentLoaded", function () {
-    injectDiagrams(); wireQuizzes(); wireDone(); paintProgress(); wireCopy();
+    injectDiagrams(); wireQuizzes(); wireDone(); paintProgress(); wireCopy(); recordLastLesson();
   });
 })();

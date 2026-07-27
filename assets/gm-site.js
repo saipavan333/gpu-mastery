@@ -44,7 +44,8 @@
       row.innerHTML = '<a href="' + root + 'curriculum.html">Curriculum</a> · <a href="' + root + 'labs.html">Labs</a> · ' +
         '<a href="' + root + 'glossary.html">Glossary</a> · <a href="' + root + 'review.html">Review</a> · ' +
         '<a href="' + root + 'interview.html">Interview</a> · <a href="' + root + 'exam.html">Exam</a> · ' +
-        '<a href="' + root + 'cheatsheet.html">Cheat sheets</a> · <a href="#" class="gm-open-search">Search</a>';
+        '<a href="' + root + 'cheatsheet.html">Cheat sheets</a> · <a href="' + root + 'concept-map.html">Concept map</a> · ' +
+        '<a href="#" class="gm-open-search">Search</a>';
       foot.appendChild(row);
       var so = row.querySelector(".gm-open-search");
       if (so) so.addEventListener("click", function (e) { e.preventDefault(); if (window.GMSearch) window.GMSearch.open(); });
@@ -127,7 +128,21 @@
     loadScript(asset + "gm-lessonmeta-data.js", injectLessonMeta);
   }
 
-  function boot() { ensureFavicon(); ensureA11y(); retryByline(25); labelDiagrams(); bootMeta(); if (hasMath()) waitKatex(40); }
+  function injectResume(){
+    if (document.body.getAttribute("data-lesson") !== "home") return;
+    var last; try { last = JSON.parse(localStorage.getItem("gpum:lastLesson")); } catch (e) {}
+    if (!last || !last.rel) return;
+    var main = document.getElementById("gm-main") || document.querySelector(".wrap");
+    if (!main || main.querySelector(".gm-resume")) return;
+    var a = document.createElement("a"); a.className = "gm-resume"; a.href = root + last.rel;
+    a.innerHTML = '<span class="gm-resume-l">↻ Resume where you left off</span>' +
+      '<span class="gm-resume-t">' + esc(last.title || "Continue the course") + " →</span>";
+    var h1 = main.querySelector("h1");
+    if (h1 && h1.parentNode) h1.parentNode.insertBefore(a, h1.nextSibling);
+    else main.insertBefore(a, main.firstChild);
+  }
+
+  function boot() { ensureFavicon(); ensureA11y(); retryByline(25); labelDiagrams(); bootMeta(); injectResume(); if (hasMath()) waitKatex(40); }
   if (document.readyState !== "loading") boot();
   else document.addEventListener("DOMContentLoaded", boot);
 })();

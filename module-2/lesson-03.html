@@ -124,6 +124,16 @@ if __name__ == "__main__":
 </div>
 
 <h2>Key points</h2>
+
+<h2>Try it live</h2>
+<p>Write and run real Python right here — no install. Fix the function, hit <b>Run</b> to see its output, then <b>Check</b> to grade it against hidden tests.</p>
+<div class="gm-lab" data-check='_check("0°C is 32°F", celsius_to_f(0)==32); _check("100°C is 212°F", celsius_to_f(100)==212); _check("-40° is the same", celsius_to_f(-40)==-40)'>
+<pre><code>def celsius_to_f(c):
+    # TODO: return the Fahrenheit value for c degrees Celsius
+    return c
+
+print(celsius_to_f(100))  # Run this, then click Check</code></pre>
+</div>
 <ul class="keypoints">
 <li><code>def</code> builds a machine: parameters in, <code>return</code> out; no return means <code>None</code>, silently — and half of all "why is my result None" bugs.</li>
 <li>Each call gets its own stack frame of locals; frames push on call, pop on return — recursion and non-colliding names both fall out of this picture.</li>
