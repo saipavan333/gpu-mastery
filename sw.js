@@ -2,7 +2,7 @@
    Precache the shell, stale-while-revalidate for assets, network-first for pages.
    Bump CACHE when shipping new content so clients refresh. */
 'use strict';
-var CACHE = 'gpu-mastery-v3';   /* bump on any asset change so clients refresh past the cache */
+var CACHE = 'gpu-mastery-v4';   /* bump on any asset change so clients refresh past the cache */
 
 /* Core shell — kept resilient: a single 404 won't fail the whole install. */
 var SHELL = [
@@ -10,7 +10,7 @@ var SHELL = [
   'glossary.html', 'search.html', 'review.html', 'interview.html', 'exam.html', 'cheatsheet.html', 'concept-map.html',
   'assets/style.css', 'assets/app.js',
   'assets/gm-readaloud.js', 'assets/gm-highlight.js', 'assets/gm-run.js', 'assets/gm-lessonmeta-data.js',
-  'assets/gm-site.js', 'assets/gm-site.css', 'assets/gm-motion.js', 'assets/gm-motion.css',
+  'assets/gm-site.js', 'assets/gm-site.css', 'assets/gm-motion.js', 'assets/gm-motion.css', 'assets/gm-hero.js',
   'assets/gm-search.js', 'assets/gm-search.css', 'assets/search-data.js',
   'assets/gm-glossary.js', 'assets/gm-glossary.css', 'assets/gm-glossary-data.js',
   'assets/gm-assistant.js', 'assets/gm-assistant.css', 'assets/assistant-config.js',

@@ -17,6 +17,18 @@ Also injected by `gm-site.js`: favicon, a11y (skip link + `#gm-main`), diagram
 `aria-label`s, KaTeX render pass, per-lesson prerequisites/misconceptions boxes
 (from `gm-lessonmeta-data.js`), and the home "Resume where you left off" card.
 
+## Animated hero — `assets/gm-hero.js` (home page only)
+The home hero is a live `<canvas id="hero-canvas" class="hero-art">`, not a static
+image. `gm-hero.js` (loaded by `app.js` only when `#hero-canvas` exists) draws a
+compute grid with an activation wavefront sweeping across it continuously — the
+course's core metaphor, animated. Canvas 2D, no deps, DPR-crisp, pauses on hidden
+tab. Honors `prefers-reduced-motion`: draws ONE static mid-sweep frame and never
+loops. The old `assets/hero-grid.svg` remains as the `<noscript>` fallback. This is
+a *continuous* animation on purpose — the earlier entrance-fade was a one-shot
+effect users kept reporting as "no animation" because it was too easy to miss.
+Verified in Node with a canvas shim: the wave's centroid strictly advances across
+the sweep, the loop re-schedules, and reduced-motion schedules zero frames.
+
 ## Motion — single source: `assets/gm-motion.js` (no separate CSS file)
 One script drives ALL entrance + scroll-reveal animation site-wide, including
 the home page hero (as of this session — previously the hero used a separate,

@@ -429,3 +429,26 @@ remains deferred by the owner's explicit "build product, defer selling" decision
   visualizers, matmul promoted out of "coming next") and `index.html`'s labs
   teaser. `tools/build-index.js` + `build-seo.js` re-run (104 pages indexed, SEO
   injected into the 4 changed pages).
+
+## Animated hero (the real "landing page animation" ask)
+
+- Root cause of the repeated "no animation on the home page" reports: the only
+  home-page motion was the site-wide *entrance* fade/rise (`gm-motion.js`) — a
+  one-shot ~0.5s effect on load that is genuinely easy to miss, especially since a
+  parallel local tool had committed a message ("Add WebGL hero, page effects, 14
+  widgets") describing a dynamic hero it never actually saved to the repo. So the
+  page really did lack any visible, lasting animation.
+- Fix: `assets/gm-hero.js` — the static `hero-grid.svg` is replaced by a live
+  `<canvas id="hero-canvas" class="hero-art">` that continuously animates the
+  course's core metaphor: a compute grid with an activation wavefront sweeping
+  diagonally across it (blue→teal→violet, matching the original art). Canvas 2D,
+  no dependencies, DPR-crisp, re-lays-out on resize, pauses on hidden tab. Loaded
+  by `app.js` only when `#hero-canvas` is present (home only). The SVG stays as the
+  `<noscript>` fallback. Honors `prefers-reduced-motion` (one static mid-sweep
+  frame, no loop) — which is also the #1 thing to check if a user still sees
+  nothing: OS-level "reduce motion" correctly disables it.
+- VERIFIED in Node with a canvas shim (not just `node --check`): across the sweep
+  the lit-cell centroid strictly advances (x+y: 153→269→377→478→580), the draw
+  loop re-schedules itself, and in reduced-motion mode it draws 234 cells once and
+  schedules ZERO animation frames. `sw.js` CACHE bumped v3→v4 (+ `gm-hero.js`
+  precached). QA clean.
