@@ -452,3 +452,25 @@ remains deferred by the owner's explicit "build product, defer selling" decision
   loop re-schedules itself, and in reduced-motion mode it draws 234 cells once and
   schedules ZERO animation frames. `sw.js` CACHE bumped v3→v4 (+ `gm-hero.js`
   precached). QA clean.
+
+### Hero upgrade — "The Dispatch Lattice" (wondersmith)
+
+- The plain 2D grid read as underwhelming ("animation is not good"), so the hero
+  was rebuilt with the wondersmith method around ONE signature technique: a **WebGL
+  fragment shader** computing a compute fabric the visitor *dispatches* with the
+  cursor (energy blooms from the pointer, activation wavefronts ripple through the
+  lattice; ambient waves in attract mode). Palette = brand ramp blue→teal→violet on
+  navy. `assets/gm-hero.js` rewritten; `<canvas>` unchanged.
+- **Robustness for blind-shipping (no browser in-sandbox):** a strict fallback
+  chain — WebGL+compile OK → shader; any WebGL/compile/link failure (checked via
+  `COMPILE_STATUS`/`LINK_STATUS` + try/catch) → the previous *verified* canvas-2D
+  lattice (swapping in a cloned canvas, since a `webgl`-vended canvas can't yield a
+  `2d` context); JS off → `<noscript>` SVG; reduced-motion → one still frame. The
+  user can never get a black box.
+- **Verification:** real WebGL compile isn't possible here (native `gl` build blocked
+  by the network), so: (1) GLSL syntax-validated with `@shaderfrog/glsl-parser`
+  (both stages parse; braces/parens balanced; all 4 uniforms declared+used); (2) a
+  DOM + fake-GL Node shim proves all three selection paths (WebGL / 2D-on-compile-
+  fail / 2D-on-no-WebGL), that the 2D wave centroid strictly advances, and that
+  reduced-motion schedules zero frames. `sw.js` CACHE v4→v5. QA clean. **Pixel-level
+  confirmation still requires a real browser** (Chrome extension wasn't connected).

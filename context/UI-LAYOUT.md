@@ -17,17 +17,31 @@ Also injected by `gm-site.js`: favicon, a11y (skip link + `#gm-main`), diagram
 `aria-label`s, KaTeX render pass, per-lesson prerequisites/misconceptions boxes
 (from `gm-lessonmeta-data.js`), and the home "Resume where you left off" card.
 
-## Animated hero — `assets/gm-hero.js` (home page only)
+## Animated hero — `assets/gm-hero.js` (home page only, "The Dispatch Lattice")
 The home hero is a live `<canvas id="hero-canvas" class="hero-art">`, not a static
-image. `gm-hero.js` (loaded by `app.js` only when `#hero-canvas` exists) draws a
-compute grid with an activation wavefront sweeping across it continuously — the
-course's core metaphor, animated. Canvas 2D, no deps, DPR-crisp, pauses on hidden
-tab. Honors `prefers-reduced-motion`: draws ONE static mid-sweep frame and never
-loops. The old `assets/hero-grid.svg` remains as the `<noscript>` fallback. This is
-a *continuous* animation on purpose — the earlier entrance-fade was a one-shot
-effect users kept reporting as "no animation" because it was too easy to miss.
-Verified in Node with a canvas shim: the wave's centroid strictly advances across
-the sweep, the loop re-schedules, and reduced-motion schedules zero frames.
+image. Built with the wondersmith method around one signature technique: a **WebGL
+fragment shader** ("The Dispatch Lattice") computing a compute fabric the visitor
+DISPATCHES with the cursor — energy blooms from the pointer and activation
+wavefronts ripple through the grid (course thesis: every pixel is a thread). It
+idles with ambient waves (attract mode) and visibly reacts to the pointer (the
+visitor is load-bearing).
+
+**Bulletproof fallback chain (because this ships without a browser to eyeball):**
+WebGL + shader compile OK → the shader; WebGL/compile fails → a verified canvas-2D
+lattice (same metaphor, CPU-drawn); JS off → the static `assets/hero-grid.svg` in
+`<noscript>`; `prefers-reduced-motion` → one composed still frame, no loop. The
+code detects `COMPILE_STATUS`/`LINK_STATUS` and any context error and degrades, so
+a shader that fails on some GPU never shows a black box — it shows the 2D lattice.
+If WebGL already bound the canvas, the 2D path swaps in a fresh cloned canvas
+(can't get a `2d` context from a canvas that vended `webgl`).
+
+Loaded by `app.js` only when `#hero-canvas` exists. Verified in Node (can't run
+WebGL in the sandbox — native `gl` build is blocked): GLSL syntax-validated with
+`@shaderfrog/glsl-parser`; a DOM+fake-GL shim proves the WebGL/2D/none selection,
+that the 2D wave centroid strictly advances, and that reduced-motion schedules zero
+frames. **Final visual confirmation still needs a real browser** — if it ever looks
+wrong, first rule out OS-level "reduce motion" (it intentionally disables the
+animation) and a stale service-worker cache (bump `sw.js` CACHE, hard-refresh).
 
 ## Motion — single source: `assets/gm-motion.js` (no separate CSS file)
 One script drives ALL entrance + scroll-reveal animation site-wide, including
