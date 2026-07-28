@@ -1,0 +1,290 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>WebGPU Matmul Lab — GPU Mastery</title>
+<link rel="stylesheet" href="assets/style.css">
+<style>
+  .lab-card{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:20px 22px;margin:16px 0}
+  .lab-row{display:flex;flex-wrap:wrap;gap:14px;align-items:center;margin:10px 0}
+  .lab-row label{font-size:14px;color:var(--dim)}
+  .lab-row select{background:#10141d;color:var(--tx);border:1px solid var(--line);border-radius:6px;padding:7px 9px;font-size:14px}
+  .runbtn{background:var(--accBg);color:var(--accT);border:1px solid rgba(91,155,255,.4);border-radius:7px;padding:9px 18px;font-weight:600;cursor:pointer;font-size:14px}
+  .runbtn:hover{background:#1c2f52} .runbtn:disabled{opacity:.5;cursor:not-allowed}
+  #status{font-size:13.5px;margin:8px 0;min-height:20px}
+  .ok{color:var(--good)}.bad{color:var(--bad)}.warn{color:var(--warn)}
+  table.res{border-collapse:collapse;width:100%;margin-top:10px;font-size:13.5px}
+  table.res td{border:1px solid var(--line);padding:7px 10px}
+  table.res td:first-child{color:var(--dim);width:44%}
+  table.res td:last-child{color:var(--tx);font-variant-numeric:tabular-nums}
+  .barwrap{margin-top:14px}
+  .bar{display:flex;align-items:center;gap:10px;margin:6px 0}
+  .bar .lbl{width:60px;font-size:12.5px;color:var(--dim);flex:0 0 auto}
+  .bar .track{flex:1;height:22px;background:#10141d;border:1px solid var(--line);border-radius:6px;overflow:hidden}
+  .bar .fill{height:100%;border-radius:5px 0 0 5px;transition:width .5s var(--ease)}
+  .bar.naive .fill{background:linear-gradient(90deg,var(--warn),#c98a2e)}
+  .bar.tiled .fill{background:linear-gradient(90deg,var(--good),#1f9e6e)}
+  .bar .val{width:120px;text-align:right;font-size:12.5px;font-variant-numeric:tabular-nums;color:var(--tx)}
+  .speedup{font-size:15px;border-radius:10px;padding:12px 14px;margin-top:10px;background:var(--goodBg);border:1px solid rgba(54,201,138,.3)}
+  code.kern{display:block;background:#0b0e14;border:1px solid var(--line);border-radius:8px;padding:12px 14px;font-size:12.8px;overflow-x:auto;white-space:pre}
+</style>
+<!-- gm-seo:start -->
+<link rel="canonical" href="https://saipavan333.github.io/gpu-mastery/lab-matmul.html">
+<link rel="manifest" href="https://saipavan333.github.io/gpu-mastery/manifest.webmanifest">
+<meta name="theme-color" content="#0b0e14">
+<link rel="apple-touch-icon" href="https://saipavan333.github.io/gpu-mastery/assets/img/favicon-180.png">
+<meta name="description" content="Naive vs. shared-memory-tiled matrix multiply, both running on your GPU via WebGPU. Watch the tiling win from lesson 5.5 happen live, with real GFLOP/s and a correctness check.">
+<meta property="og:type" content="website">
+<meta property="og:site_name" content="GPU Mastery">
+<meta property="og:title" content="WebGPU Matmul Lab — GPU Mastery">
+<meta property="og:description" content="Naive vs. shared-memory-tiled matrix multiply, both running on your GPU via WebGPU. Watch the tiling win from lesson 5.5 happen live, with real GFLOP/s and a correctness check.">
+<meta property="og:url" content="https://saipavan333.github.io/gpu-mastery/lab-matmul.html">
+<meta property="og:image" content="https://saipavan333.github.io/gpu-mastery/assets/img/og.png">
+<meta name="twitter:card" content="summary_large_image">
+<meta name="twitter:title" content="WebGPU Matmul Lab — GPU Mastery">
+<meta name="twitter:description" content="Naive vs. shared-memory-tiled matrix multiply, both running on your GPU via WebGPU. Watch the tiling win from lesson 5.5 happen live, with real GFLOP/s and a correctness check.">
+<meta name="twitter:image" content="https://saipavan333.github.io/gpu-mastery/assets/img/og.png">
+<!-- gm-seo:end -->
+</head>
+<body data-lesson="lab-matmul">
+<nav><div class="inner">
+  <a class="logo" href="index.html">GPU<span>Mastery</span></a>
+  <a class="item" href="index.html">Home</a>
+  <a class="item" href="curriculum.html">Curriculum</a>
+  <a class="item on" href="labs.html">Labs</a>
+  <a class="item" href="setup.html">Lab setup</a>
+</div></nav>
+<div class="wrap">
+
+<div class="lesson-top">
+  <div><span class="badge">Interactive Lab</span><span class="badge dim">5.5 · tiling</span><span class="badge dim">WebGPU · runs on your GPU</span></div>
+  <a class="badge good" href="labs.html">← all labs</a>
+</div>
+<h1>WebGPU Matmul Lab — the tiling win, live on your GPU</h1>
+<p class="lead">Two kernels compute the exact same matrix product on <em>your</em> GPU: <strong>naive</strong> (every thread re-reads its row and column straight from global memory) and <strong>tiled</strong> (every thread first stages a block into fast on-chip shared memory and reuses it). Same math, same answer — the only difference is how many times the GPU has to go to memory. That gap is lesson 5.5's whole point, made visible instead of asserted.</p>
+
+<div class="lab-card">
+  <div class="lab-row">
+    <label>Matrix size N (computes N×N × N×N):
+      <select id="n">
+        <option value="256">256 × 256</option>
+        <option value="512" selected>512 × 512</option>
+        <option value="1024">1024 × 1024</option>
+        <option value="2048">2048 × 2048</option>
+      </select>
+    </label>
+    <button class="runbtn" id="run">Run both kernels on GPU</button>
+  </div>
+  <div id="status">Checking for WebGPU&hellip;</div>
+
+  <div class="barwrap" id="bars" style="display:none">
+    <div class="bar naive"><span class="lbl">Naive</span><div class="track"><div class="fill" id="fill-naive" style="width:0%"></div></div><span class="val" id="val-naive">—</span></div>
+    <div class="bar tiled"><span class="lbl">Tiled</span><div class="track"><div class="fill" id="fill-tiled" style="width:0%"></div></div><span class="val" id="val-tiled">—</span></div>
+  </div>
+  <div class="speedup" id="speedup" style="display:none"></div>
+
+  <table class="res" id="restable" style="display:none">
+    <tr><td>device</td><td id="r-dev">&mdash;</td></tr>
+    <tr><td>N (matrix dimension)</td><td id="r-n">&mdash;</td></tr>
+    <tr><td>total work (2·N³ FLOPs)</td><td id="r-flops">&mdash;</td></tr>
+    <tr><td>correctness spot-check (12 random elements vs. CPU dot product)</td><td id="r-ok">&mdash;</td></tr>
+    <tr><td>max error at checked elements</td><td id="r-err">&mdash;</td></tr>
+  </table>
+</div>
+
+<h2>How to read it</h2>
+<p>Both kernels do <strong>identical arithmetic</strong> — same <code>2·N³</code> multiply-adds, same result. The naive kernel's arithmetic intensity is fixed and low: each thread streams <code>2·N</code> values in from global memory to do <code>2·N</code> flops, so it never rises above roughly <code>1</code> FLOP/byte-ish territory regardless of <code>N</code> — deep in the memory-bound region of the <a href="lab-roofline.html">Roofline Explorer</a>. The tiled kernel loads each <code>TILE×TILE</code> block into <code>var&lt;workgroup&gt;</code> shared memory once, then every thread in the workgroup reuses it <code>TILE</code> times before moving to the next block — that single change multiplies the arithmetic intensity by roughly <code>TILE</code> (16 here), which is usually enough to walk the kernel from the memory roof toward the compute roof. Bigger <code>N</code> makes the gap more visible: more reuse opportunities for tiling to exploit, so try 1024 or 2048 after the default.</p>
+<p class="dim" style="margin-top:0">The correctness check doesn't recompute the full <code>N×N</code> output on the CPU (for N=2048 that's 17 billion operations — too slow for a browser tab). Instead it spot-checks 12 random output elements against a direct CPU dot product at those exact indices. If both kernels agree with the CPU oracle at every sampled point, you can trust the rest — this is the same "fixture, not full replay" verification doctrine from M2 L6.</p>
+
+<h2>The kernels (WGSL)</h2>
+<p><strong>Naive</strong> — one thread per output element, reads straight from global memory every iteration:</p>
+<code class="kern" id="wgsl-naive"></code>
+<p style="margin-top:16px"><strong>Tiled</strong> — stages a <code>16×16</code> block of A and B into shared memory per iteration, with a barrier before and after use so no thread reads a half-written tile:</p>
+<code class="kern" id="wgsl-tiled"></code>
+
+<div class="footer">GPU Mastery · Labs · WebGPU Matmul Lab — works offline · needs a WebGPU browser (Chrome/Edge 113+, Firefox 141+, Safari 26+)</div>
+</div>
+
+<script>
+const TILE = 16;
+const NAIVE_WGSL = `
+struct Dims { N: u32, }
+@group(0) @binding(0) var<uniform> dims: Dims;
+@group(0) @binding(1) var<storage, read> A: array<f32>;
+@group(0) @binding(2) var<storage, read> B: array<f32>;
+@group(0) @binding(3) var<storage, read_write> C: array<f32>;
+
+@compute @workgroup_size(16, 16)
+fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
+  let N = dims.N;
+  let row = gid.y; let col = gid.x;
+  if (row >= N || col >= N) { return; }
+  var sum = 0.0;
+  for (var k: u32 = 0u; k < N; k = k + 1u) {
+    sum = sum + A[row * N + k] * B[k * N + col];   // re-fetched from global memory every iteration
+  }
+  C[row * N + col] = sum;
+}`;
+
+const TILED_WGSL = `
+struct Dims { N: u32, }
+@group(0) @binding(0) var<uniform> dims: Dims;
+@group(0) @binding(1) var<storage, read> A: array<f32>;
+@group(0) @binding(2) var<storage, read> B: array<f32>;
+@group(0) @binding(3) var<storage, read_write> C: array<f32>;
+
+var<workgroup> As: array<array<f32, 16>, 16>;
+var<workgroup> Bs: array<array<f32, 16>, 16>;
+
+@compute @workgroup_size(16, 16)
+fn main(@builtin(global_invocation_id) gid: vec3<u32>,
+        @builtin(local_invocation_id) lid: vec3<u32>) {
+  let N = dims.N;
+  let row = gid.y; let col = gid.x;
+  let tx = lid.x; let ty = lid.y;
+  var sum = 0.0;
+  let numTiles = N / 16u;                          // N is a multiple of TILE for every size offered here
+  for (var t: u32 = 0u; t < numTiles; t = t + 1u) {
+    As[ty][tx] = A[row * N + (t * 16u + tx)];        // each thread loads ONE element, once
+    Bs[ty][tx] = B[(t * 16u + ty) * N + col];
+    workgroupBarrier();                              // wait for the whole tile to land before reading it
+    for (var k: u32 = 0u; k < 16u; k = k + 1u) {
+      sum = sum + As[ty][k] * Bs[k][tx];              // reused 16x from fast shared memory, not global
+    }
+    workgroupBarrier();                              // wait before the next tile overwrites this one
+  }
+  C[row * N + col] = sum;
+}`;
+document.getElementById('wgsl-naive').textContent = NAIVE_WGSL.trim();
+document.getElementById('wgsl-tiled').textContent = TILED_WGSL.trim();
+
+const $ = id => document.getElementById(id);
+const fmt = x => x.toLocaleString(undefined,{maximumFractionDigits:2});
+
+function cpuDot(A,B,N,row,col){ let s=0; for(let k=0;k<N;k++) s += A[row*N+k]*B[k*N+col]; return s; }
+
+async function runKernel(device, module, N, A, B) {
+  const uni = device.createBuffer({ size: 16, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST }); // padded to 16B (uniform alignment safety margin); only the first 4 are used
+  device.queue.writeBuffer(uni, 0, new Uint32Array([N]));
+  const aBuf = device.createBuffer({ size: A.byteLength, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST });
+  device.queue.writeBuffer(aBuf, 0, A);
+  const bBuf = device.createBuffer({ size: B.byteLength, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST });
+  device.queue.writeBuffer(bBuf, 0, B);
+  const cBuf = device.createBuffer({ size: N*N*4, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC });
+  const readBuf = device.createBuffer({ size: N*N*4, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ });
+
+  const pipeline = device.createComputePipeline({ layout:'auto', compute:{ module, entryPoint:'main' } });
+  const bind = device.createBindGroup({ layout: pipeline.getBindGroupLayout(0), entries:[
+    { binding:0, resource:{ buffer: uni } }, { binding:1, resource:{ buffer: aBuf } },
+    { binding:2, resource:{ buffer: bBuf } }, { binding:3, resource:{ buffer: cBuf } } ]});
+
+  const canTime = device.features.has('timestamp-query');
+  let querySet, tsResolve, tsRead;
+  const enc = device.createCommandEncoder();
+  const passDesc = {};
+  if (canTime) {
+    querySet = device.createQuerySet({ type:'timestamp', count:2 });
+    tsResolve = device.createBuffer({ size:16, usage: GPUBufferUsage.QUERY_RESOLVE | GPUBufferUsage.COPY_SRC });
+    tsRead    = device.createBuffer({ size:16, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ });
+    passDesc.timestampWrites = { querySet, beginningOfPassWriteIndex:0, endOfPassWriteIndex:1 };
+  }
+  const pass = enc.beginComputePass(passDesc);
+  pass.setPipeline(pipeline); pass.setBindGroup(0, bind);
+  pass.dispatchWorkgroups(Math.ceil(N/16), Math.ceil(N/16));
+  pass.end();
+  enc.copyBufferToBuffer(cBuf, 0, readBuf, 0, N*N*4);
+  if (canTime){ enc.resolveQuerySet(querySet,0,2,tsResolve,0); enc.copyBufferToBuffer(tsResolve,0,tsRead,0,16); }
+  const t0 = performance.now();
+  device.queue.submit([enc.finish()]);
+  await readBuf.mapAsync(GPUMapMode.READ);
+  const C = new Float32Array(readBuf.getMappedRange().slice(0));
+  readBuf.unmap();
+  const wallMs = performance.now() - t0;
+
+  let gpuMs = null;
+  if (canTime) {
+    await tsRead.mapAsync(GPUMapMode.READ);
+    const t = new BigUint64Array(tsRead.getMappedRange().slice(0)); tsRead.unmap();
+    const ns = Number(t[1]-t[0]);
+    if (ns > 0) gpuMs = ns/1e6;
+  }
+  return { C, ms: gpuMs != null ? gpuMs : wallMs, timedPrecisely: gpuMs != null };
+}
+
+async function main(){
+  const status = $('status');
+  if (!('gpu' in navigator)) {
+    status.innerHTML = '<span class="bad">WebGPU not available in this browser.</span> Use Chrome/Edge 113+, Firefox 141+, or Safari 26+ (see the footer). The WGSL below still shows exactly how both kernels work.';
+    $('run').disabled = true; return;
+  }
+  let adapter;
+  try { adapter = await navigator.gpu.requestAdapter(); } catch(e){ adapter = null; }
+  if (!adapter) { status.innerHTML = '<span class="bad">No GPU adapter.</span> WebGPU is present but no adapter was granted.'; $('run').disabled = true; return; }
+  const canTime = adapter.features.has('timestamp-query');
+  const device = await adapter.requestDevice({ requiredFeatures: canTime ? ['timestamp-query'] : [] });
+  const info = adapter.info || {};
+  const devName = [info.vendor, info.architecture, info.description].filter(Boolean).join(' ') || 'WebGPU device (name hidden by browser)';
+  status.innerHTML = '<span class="ok">WebGPU ready.</span> Adapter acquired' + (canTime ? ' (timestamp-query supported — timings are real GPU time).' : ' (no timestamp-query — timings fall back to wall-clock, which includes readback).');
+  $('r-dev').textContent = devName;
+
+  const naiveModule = device.createShaderModule({ code: NAIVE_WGSL });
+  const tiledModule = device.createShaderModule({ code: TILED_WGSL });
+
+  $('run').onclick = async () => {
+    $('run').disabled = true; status.innerHTML = 'Running&hellip;';
+    try {
+      const N = parseInt($('n').value);
+      const A = new Float32Array(N*N), B = new Float32Array(N*N);
+      for (let i=0;i<N*N;i++){ A[i] = Math.random()*2-1; B[i] = Math.random()*2-1; }
+
+      const rNaive = await runKernel(device, naiveModule, N, A, B);
+      const rTiled = await runKernel(device, tiledModule, N, A, B);
+
+      const flops = 2 * Math.pow(N,3);
+      const gflopsNaive = flops / (rNaive.ms/1000) / 1e9;
+      const gflopsTiled = flops / (rTiled.ms/1000) / 1e9;
+      const maxG = Math.max(gflopsNaive, gflopsTiled, 1);
+
+      $('bars').style.display = '';
+      $('fill-naive').style.width = (gflopsNaive/maxG*100).toFixed(1)+'%';
+      $('fill-tiled').style.width = (gflopsTiled/maxG*100).toFixed(1)+'%';
+      $('val-naive').textContent = fmt(gflopsNaive)+' GFLOP/s ('+rNaive.ms.toFixed(2)+' ms)';
+      $('val-tiled').textContent = fmt(gflopsTiled)+' GFLOP/s ('+rTiled.ms.toFixed(2)+' ms)';
+
+      const speedup = gflopsTiled/gflopsNaive;
+      $('speedup').style.display = '';
+      $('speedup').innerHTML = '<b>Tiled is ' + speedup.toFixed(2) + '× the throughput of naive</b> at N=' + N +
+        (rNaive.timedPrecisely ? ' (GPU-timed).' : ' (wall-clock timed — includes readback, so treat as a floor on the real gap, not the ceiling).') +
+        ' Same ' + fmt(flops) + ' FLOPs computed by both — the only difference is memory traffic.';
+
+      // Correctness: spot-check 12 random elements against a CPU dot product, for BOTH kernels.
+      let maxErr = 0, allOk = true;
+      for (let i=0;i<12;i++){
+        const row = Math.floor(Math.random()*N), col = Math.floor(Math.random()*N);
+        const expected = cpuDot(A,B,N,row,col);
+        const idx = row*N+col;
+        const eN = Math.abs(rNaive.C[idx]-expected), eT = Math.abs(rTiled.C[idx]-expected);
+        maxErr = Math.max(maxErr, eN, eT);
+        const budget = Math.max(1e-2, Math.abs(expected)*1e-3*Math.sqrt(N));  // fp32 accumulation over N terms
+        if (eN > budget || eT > budget) allOk = false;
+      }
+      $('r-n').textContent = N + ' × ' + N;
+      $('r-flops').textContent = fmt(flops);
+      $('r-err').textContent = maxErr.toExponential(3);
+      $('r-ok').innerHTML = allOk ? '<span class="ok">passed — naive and tiled agree with the CPU oracle</span>' : '<span class="bad">mismatch — see console</span>';
+      $('restable').style.display = '';
+      if (!allOk) console.error('Matmul lab: correctness check failed', {N, maxErr});
+      status.innerHTML = allOk
+        ? '<span class="ok">Done.</span> Both kernels verified correct; see the throughput gap above.'
+        : '<span class="warn">Done, but the correctness spot-check failed — see the console.</span>';
+    } catch(e){
+      status.innerHTML = '<span class="bad">Error:</span> ' + e.message;
+      console.error(e);
+    } finally { $('run').disabled = false; }
+  };
+}
+main();
+</script>
+<script src="assets/app.js"></script>
+</body>
+</html>

@@ -1,0 +1,203 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Monte Carlo Convergence Lab — GPU Mastery</title>
+<link rel="stylesheet" href="assets/style.css">
+<style>
+  .tool{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:18px 20px;margin:16px 0}
+  .row{display:flex;flex-wrap:wrap;gap:16px;align-items:center;margin:10px 0}
+  .row label{font-size:13px;color:var(--dim);display:flex;flex-direction:column;gap:4px}
+  .row select{background:#10141d;color:var(--tx);border:1px solid var(--line);border-radius:6px;padding:7px 8px;font-size:14px}
+  .chip{background:var(--card2);color:var(--dim);border:1px solid var(--line);border-radius:999px;padding:5px 12px;font-size:13px;cursor:pointer}
+  .chip:hover{border-color:var(--acc);color:var(--tx)}
+  .runbtn{background:var(--accBg);color:var(--accT);border:1px solid rgba(91,155,255,.4);border-radius:7px;padding:9px 18px;font-weight:600;cursor:pointer;font-size:14px}
+  .runbtn:hover{background:#1c2f52}
+  .mcgrid{display:grid;grid-template-columns:1fr 1fr;gap:18px;align-items:start}
+  @media (max-width:760px){ .mcgrid{grid-template-columns:1fr} }
+  canvas{width:100%;height:auto;background:#10141d;border:1px solid var(--line);border-radius:10px;display:block}
+  .stats{display:grid;grid-template-columns:repeat(2,1fr);gap:8px 16px;margin-top:12px;font-size:13.5px}
+  .stats div b{color:var(--tx);font-variant-numeric:tabular-nums}
+  .stats div{color:var(--dim)}
+  .verdict{font-size:14.5px;border-radius:10px;padding:12px 14px;margin-top:12px;background:var(--accBg);border:1px solid rgba(91,155,255,.28)}
+</style>
+<!-- gm-seo:start -->
+<link rel="canonical" href="https://saipavan333.github.io/gpu-mastery/lab-montecarlo.html">
+<link rel="manifest" href="https://saipavan333.github.io/gpu-mastery/manifest.webmanifest">
+<meta name="theme-color" content="#0b0e14">
+<link rel="apple-touch-icon" href="https://saipavan333.github.io/gpu-mastery/assets/img/favicon-180.png">
+<meta name="description" content="Watch a Monte Carlo estimate converge live: throw random points, watch pi emerge, and see the 1/sqrt(N) error law hold exactly — the core idea behind every Monte Carlo method in HPC.">
+<meta property="og:type" content="website">
+<meta property="og:site_name" content="GPU Mastery">
+<meta property="og:title" content="Monte Carlo Convergence Lab — GPU Mastery">
+<meta property="og:description" content="Watch a Monte Carlo estimate converge live: throw random points, watch pi emerge, and see the 1/sqrt(N) error law hold exactly — the core idea behind every Monte Carlo method in HPC.">
+<meta property="og:url" content="https://saipavan333.github.io/gpu-mastery/lab-montecarlo.html">
+<meta property="og:image" content="https://saipavan333.github.io/gpu-mastery/assets/img/og.png">
+<meta name="twitter:card" content="summary_large_image">
+<meta name="twitter:title" content="Monte Carlo Convergence Lab — GPU Mastery">
+<meta name="twitter:description" content="Watch a Monte Carlo estimate converge live: throw random points, watch pi emerge, and see the 1/sqrt(N) error law hold exactly — the core idea behind every Monte Carlo method in HPC.">
+<meta name="twitter:image" content="https://saipavan333.github.io/gpu-mastery/assets/img/og.png">
+<!-- gm-seo:end -->
+</head>
+<body data-lesson="lab-montecarlo">
+<nav><div class="inner">
+  <a class="logo" href="index.html">GPU<span>Mastery</span></a>
+  <a class="item" href="index.html">Home</a>
+  <a class="item" href="curriculum.html">Curriculum</a>
+  <a class="item on" href="labs.html">Labs</a>
+  <a class="item" href="setup.html">Lab setup</a>
+</div></nav>
+<div class="wrap">
+
+<div class="lesson-top">
+  <div><span class="badge">Interactive Lab</span><span class="badge dim">Track B · Monte Carlo</span></div>
+  <a class="badge good" href="labs.html">← all labs</a>
+</div>
+<h1>Monte Carlo Convergence Lab</h1>
+<p class="lead">Every Monte Carlo method — pricing an option, simulating neutron transport, integrating a function nobody can solve in closed form — rests on one law: throw enough random samples at a problem and the average converges to the truth, with error shrinking as <code>1/&radic;N</code>. This lab makes that law visible instead of asserted: watch <code>&pi;</code> emerge from random points, and watch the error track its predicted curve exactly.</p>
+
+<div class="tool">
+  <div class="row">
+    <label>points per frame
+      <select id="speed">
+        <option value="20">slow — 20/frame</option>
+        <option value="200" selected>normal — 200/frame</option>
+        <option value="2000">fast — 2,000/frame</option>
+      </select>
+    </label>
+    <button class="runbtn" id="toggle">Start throwing points</button>
+    <button class="chip" id="reset">Reset</button>
+  </div>
+
+  <div class="mcgrid">
+    <div>
+      <canvas id="square" width="380" height="380"></canvas>
+      <p class="dim" style="font-size:12.5px;margin:6px 0 0">Each point is uniform-random in the unit square. Green = inside the quarter circle (<code>x&sup2;+y&sup2;&le;1</code>), gray = outside. <code>&pi; &asymp; 4 &times; (green &divide; total)</code> because the quarter circle's area is exactly <code>&pi;/4</code> of the square's.</p>
+    </div>
+    <div>
+      <canvas id="errplot" width="380" height="380"></canvas>
+      <p class="dim" style="font-size:12.5px;margin:6px 0 0">Measured error (dots) vs. sample count, log-log. The line is the <em>predicted</em> error, <code>SE(N) = 4&radic;(p(1-p)/N)</code> — not fit to the data, just the formula. Watch the dots hug the line.</p>
+    </div>
+  </div>
+
+  <div class="stats">
+    <div>samples thrown: <b id="s-n">0</b></div>
+    <div>&pi; estimate: <b id="s-pi">—</b></div>
+    <div>true error: <b id="s-err">—</b></div>
+    <div>predicted std. error: <b id="s-se">—</b></div>
+  </div>
+  <div class="verdict" id="verdict">Press "Start throwing points" — watch the square fill in and the estimate below settle toward 3.14159&hellip;</div>
+</div>
+
+<h2>How to read it</h2>
+<p>The scatter canvas is the method itself: a point lands uniformly in the unit square, and it's colored green if it also falls inside the quarter circle. Over many points, the <em>fraction</em> that land inside approximates the ratio of the two areas — circle-area ÷ square-area = <code>(&pi;/4) &divide; 1</code> — so multiplying that fraction by 4 estimates <code>&pi;</code>. Nothing about <code>&pi;</code> was assumed going in; it falls out of counting random points.</p>
+<p>The error plot is the more important one for HPC work. Both axes are logarithmic, and the predicted-error line has slope <code>-1/2</code> — that slope <em>is</em> the <code>1/&radic;N</code> law. Read it as a budget: to cut your error in half, you don't need 2&times; the samples, you need <strong>4&times;</strong>. To gain one more decimal digit of accuracy (10&times; smaller error), you need <strong>100&times;</strong> the samples. This is exactly why Monte Carlo methods are simple to write but expensive to run precisely, and exactly why they're such a natural fit for a GPU: the work is <a href="curriculum.html">embarrassingly parallel</a> (every sample is independent — no communication between them), so throwing more threads at the problem directly buys more decimal places.</p>
+<p class="dim" style="margin-top:0">Variance reduction (stratified sampling, importance sampling, quasi-random / Sobol sequences) exists specifically to beat the plain <code>1/&radic;N</code> rate without changing the sample count — a preview of what Track B's Monte Carlo lessons cover after this.</p>
+
+<div class="footer">GPU Mastery · Labs · Monte Carlo Convergence Lab — works offline</div>
+</div>
+
+<script>
+const $ = id => document.getElementById(id);
+const sq = $('square'), sqx = sq.getContext('2d');
+const ep = $('errplot'), epx = ep.getContext('2d');
+const C = { line:'#2a3245', tx:'#e8edf5', dim:'#7e8aa0', acc:'#5b9bff', good:'#36c98a', warn:'#f5b850', bad:'#ff6b6b', dot:'#3a4356' };
+
+const W = 380, H = 380, M = 8;
+function toPx(x,y){ return [ M + x*(W-2*M), (H-M) - y*(H-2*M) ]; }
+
+let n = 0, inside = 0, running = false, raf = null;
+const errHistory = [];   // {n, err}
+let lastRecordAt = 0;
+
+function drawSquare(){
+  sqx.clearRect(0,0,W,H);
+  sqx.strokeStyle = C.line; sqx.lineWidth = 1.5;
+  sqx.strokeRect(M, M, W-2*M, H-2*M);
+  // quarter circle arc, centered at (0,0) i.e. bottom-left corner in pixel space, radius = full square side
+  const [cx,cy] = toPx(0,0);
+  sqx.beginPath();
+  sqx.arc(cx, cy, W-2*M, Math.PI*1.5, Math.PI*2);   // top-right quadrant sweep in canvas angle terms
+  sqx.strokeStyle = C.acc; sqx.lineWidth = 2; sqx.stroke();
+}
+
+function samplePoint(){
+  const x = Math.random(), y = Math.random();
+  const isIn = (x*x + y*y) <= 1;
+  n++; if (isIn) inside++;
+  const [px,py] = toPx(x,y);
+  sqx.fillStyle = isIn ? C.good : C.dot;
+  sqx.globalAlpha = isIn ? 0.85 : 0.55;
+  sqx.beginPath(); sqx.arc(px, py, 1.6, 0, 7); sqx.fill();
+  sqx.globalAlpha = 1;
+}
+
+// --- log-log error plot ---
+const xmin=10, xmax=300000, ymin=1e-4, ymax=1;
+function Xp(nv){ return M+30 + (Math.log10(nv)-Math.log10(xmin))/(Math.log10(xmax)-Math.log10(xmin))*(W-M-30-M); }
+function Yp(e){ return H-M-20 - (Math.log10(Math.max(e,ymin))-Math.log10(ymin))/(Math.log10(ymax)-Math.log10(ymin))*(H-M-20-M); }
+
+function drawErrPlot(){
+  epx.clearRect(0,0,W,H);
+  epx.font = '10.5px ui-monospace, monospace';
+  epx.strokeStyle = C.line; epx.fillStyle = C.dim; epx.lineWidth = 1;
+  for (let e=1; e<=5; e++){ const nv = Math.pow(10,e); if (nv<xmin||nv>xmax) continue;
+    const x = Xp(nv); epx.globalAlpha=.5; epx.beginPath(); epx.moveTo(x,M); epx.lineTo(x,H-M-20); epx.stroke(); epx.globalAlpha=1;
+    epx.textAlign='center'; epx.fillText('1e'+e, x, H-M-6); }
+  for (let e=-4; e<=0; e++){ const ev = Math.pow(10,e);
+    const y = Yp(ev); epx.globalAlpha=.5; epx.beginPath(); epx.moveTo(M+30,y); epx.lineTo(W-M,y); epx.stroke(); epx.globalAlpha=1;
+    epx.textAlign='right'; epx.fillText('1e'+e, M+27, y+3); }
+  epx.textAlign='center'; epx.fillStyle=C.dim; epx.fillText('samples (N)', W/2+15, H-4);
+  epx.save(); epx.translate(10,H/2); epx.rotate(-Math.PI/2); epx.fillText('|error|',0,0); epx.restore();
+
+  // predicted 1/sqrt(N) line: SE(N) = 4*sqrt(p(1-p)/N), p = pi/4
+  const p = Math.PI/4, coeff = 4*Math.sqrt(p*(1-p));
+  epx.strokeStyle = C.warn; epx.lineWidth = 2; epx.beginPath();
+  let started = false;
+  for (let lx = Math.log10(xmin); lx <= Math.log10(xmax); lx += 0.03) {
+    const nv = Math.pow(10,lx); const se = coeff/Math.sqrt(nv);
+    const X = Xp(nv), Y = Yp(se);
+    if (!started){ epx.moveTo(X,Y); started = true; } else epx.lineTo(X,Y);
+  }
+  epx.stroke();
+
+  // measured error points
+  epx.fillStyle = C.acc;
+  errHistory.forEach(pt => { const X=Xp(pt.n), Y=Yp(Math.max(pt.err,1e-6)); epx.beginPath(); epx.arc(X,Y,2.6,0,7); epx.fill(); });
+}
+
+function fmtE(x){ return x.toExponential(3); }
+
+function frame(){
+  const speed = parseInt($('speed').value);
+  for (let i=0;i<speed && n<300000;i++) samplePoint();
+  const piEst = 4*inside/Math.max(n,1);
+  const err = Math.abs(piEst - Math.PI);
+  const p = piEst/4, se = 4*Math.sqrt(Math.max(p*(1-p),0)/Math.max(n,1));
+
+  if (n - lastRecordAt >= Math.max(20, n*0.06) || errHistory.length===0) { errHistory.push({n, err}); lastRecordAt = n; }
+
+  $('s-n').textContent = n.toLocaleString();
+  $('s-pi').textContent = piEst.toFixed(6);
+  $('s-err').textContent = fmtE(err);
+  $('s-se').textContent = '±' + fmtE(se);
+  drawErrPlot();
+
+  if (n >= 300000) { stop(); $('verdict').innerHTML = '<b>Stopped at 300,000 samples</b> — error is now on the order of ' + fmtE(err) + '. Reset and try "fast" to get there quicker, or watch how much longer it takes to shave off one more digit.'; return; }
+  if (running) raf = requestAnimationFrame(frame);
+}
+
+function start(){ if (running) return; running = true; $('toggle').textContent = 'Pause'; $('verdict').textContent = 'Throwing points…'; raf = requestAnimationFrame(frame); }
+function stop(){ running = false; $('toggle').textContent = 'Resume'; if (raf) cancelAnimationFrame(raf); }
+function reset(){ stop(); n=0; inside=0; errHistory.length=0; lastRecordAt=0; $('toggle').textContent='Start throwing points';
+  $('s-n').textContent='0'; $('s-pi').textContent='—'; $('s-err').textContent='—'; $('s-se').textContent='—';
+  $('verdict').textContent = 'Press "Start throwing points" — watch the square fill in and the estimate below settle toward 3.14159…';
+  drawSquare(); drawErrPlot(); }
+
+$('toggle').addEventListener('click', () => running ? stop() : start());
+$('reset').addEventListener('click', reset);
+drawSquare(); drawErrPlot();
+</script>
+<script src="assets/app.js"></script>
+</body>
+</html>

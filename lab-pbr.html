@@ -1,0 +1,225 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>PBR Material Explorer — GPU Mastery</title>
+<link rel="stylesheet" href="assets/style.css">
+<style>
+  .tool{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:18px 20px;margin:16px 0}
+  .row{display:flex;flex-wrap:wrap;gap:16px;align-items:center;margin:10px 0}
+  .row label{font-size:13px;color:var(--dim);display:flex;flex-direction:column;gap:4px;min-width:150px}
+  .row input[type=range]{width:100%}
+  .chip{background:var(--card2);color:var(--dim);border:1px solid var(--line);border-radius:999px;padding:5px 12px;font-size:13px;cursor:pointer;display:inline-flex;align-items:center;gap:6px}
+  .chip:hover{border-color:var(--acc);color:var(--tx)}
+  .chip.on{background:var(--accBg);color:var(--accT);border-color:var(--acc)}
+  .swatch{width:11px;height:11px;border-radius:50%;display:inline-block;border:1px solid rgba(255,255,255,.25)}
+  .pbrgrid{display:grid;grid-template-columns:280px 1fr;gap:20px;align-items:start}
+  @media (max-width:700px){ .pbrgrid{grid-template-columns:1fr} }
+  #sphere{width:280px;height:280px;background:#0b0e14;border:1px solid var(--line);border-radius:10px;display:block}
+  .ladder{display:flex;gap:10px;margin-top:8px;flex-wrap:wrap}
+  .ladder canvas{width:70px;height:70px;background:#0b0e14;border:1px solid var(--line);border-radius:8px}
+  .ladder div{text-align:center;font-size:11px;color:var(--dim)}
+  .kv{font-variant-numeric:tabular-nums;color:var(--tx)}
+  .termbox{background:var(--card2);border:1px solid var(--line);border-radius:8px;padding:8px 12px;font-size:12.5px;color:var(--dim);margin-top:10px}
+  .termbox b{color:var(--tx)}
+</style>
+<!-- gm-seo:start -->
+<link rel="canonical" href="https://saipavan333.github.io/gpu-mastery/lab-pbr.html">
+<link rel="manifest" href="https://saipavan333.github.io/gpu-mastery/manifest.webmanifest">
+<meta name="theme-color" content="#0b0e14">
+<link rel="apple-touch-icon" href="https://saipavan333.github.io/gpu-mastery/assets/img/favicon-180.png">
+<meta name="description" content="A live Cook-Torrance BRDF, computed per pixel in your browser. Dial roughness, metallic, base color, and light position, and watch a physically based material respond in real time.">
+<meta property="og:type" content="website">
+<meta property="og:site_name" content="GPU Mastery">
+<meta property="og:title" content="PBR Material Explorer — GPU Mastery">
+<meta property="og:description" content="A live Cook-Torrance BRDF, computed per pixel in your browser. Dial roughness, metallic, base color, and light position, and watch a physically based material respond in real time.">
+<meta property="og:url" content="https://saipavan333.github.io/gpu-mastery/lab-pbr.html">
+<meta property="og:image" content="https://saipavan333.github.io/gpu-mastery/assets/img/og.png">
+<meta name="twitter:card" content="summary_large_image">
+<meta name="twitter:title" content="PBR Material Explorer — GPU Mastery">
+<meta name="twitter:description" content="A live Cook-Torrance BRDF, computed per pixel in your browser. Dial roughness, metallic, base color, and light position, and watch a physically based material respond in real time.">
+<meta name="twitter:image" content="https://saipavan333.github.io/gpu-mastery/assets/img/og.png">
+<!-- gm-seo:end -->
+</head>
+<body data-lesson="lab-pbr">
+<nav><div class="inner">
+  <a class="logo" href="index.html">GPU<span>Mastery</span></a>
+  <a class="item" href="index.html">Home</a>
+  <a class="item" href="curriculum.html">Curriculum</a>
+  <a class="item on" href="labs.html">Labs</a>
+  <a class="item" href="setup.html">Lab setup</a>
+</div></nav>
+<div class="wrap">
+
+<div class="lesson-top">
+  <div><span class="badge">Interactive Lab</span><span class="badge dim">Track C · PBR shading</span></div>
+  <a class="badge good" href="labs.html">← all labs</a>
+</div>
+<h1>PBR Material Explorer</h1>
+<p class="lead">Every physically based renderer — game engine, offline movie renderer, this course's Track C capstone — shades a surface with the same three-term <strong>Cook-Torrance BRDF</strong>: a distribution term, a geometry term, and a Fresnel term. This lab computes that exact math, per pixel, live in your browser (no WebGL, just canvas pixels), so you can watch what each parameter actually does instead of taking the formula on faith.</p>
+
+<div class="tool">
+  <div class="pbrgrid">
+    <div>
+      <canvas id="sphere" width="280" height="280"></canvas>
+      <div class="ladder" id="ladder"></div>
+      <p class="dim" style="font-size:11.5px;margin:4px 0 0">Roughness ladder at fixed metallic/light — the same material, five roughness values, side by side.</p>
+    </div>
+    <div>
+      <div class="row"><span class="dim" style="font-size:13px">Material preset:</span></div>
+      <div class="row" id="chips"></div>
+      <div class="row">
+        <label>roughness = <span class="kv" id="v-rough">0.35</span>
+          <input type="range" id="rough" min="0.045" max="1" step="0.005" value="0.35"></label>
+        <label>metallic = <span class="kv" id="v-metal">0.0</span>
+          <input type="range" id="metal" min="0" max="1" step="0.01" value="0"></label>
+      </div>
+      <div class="row">
+        <label>light azimuth = <span class="kv" id="v-az">40</span>&deg;
+          <input type="range" id="az" min="0" max="360" step="1" value="40"></label>
+        <label>light elevation = <span class="kv" id="v-el">55</span>&deg;
+          <input type="range" id="el" min="8" max="88" step="1" value="55"></label>
+      </div>
+      <div class="termbox" id="terms">D = — · G = — · F = —</div>
+    </div>
+  </div>
+</div>
+
+<h2>How to read it</h2>
+<p>Each term answers a different physical question about the surface at the point you're looking at:</p>
+<p><b>D — the normal distribution function (GGX/Trowbridge-Reitz).</b> A rough surface is really billions of tiny mirror facets pointing in slightly different directions. <code>D</code> is the fraction of those facets pointing exactly halfway between the light and your eye — the only orientation that can bounce light from the light source straight to you. Low roughness means most facets agree on one direction, so <code>D</code> spikes into a tight, bright highlight; high roughness spreads facets over many directions, so <code>D</code> is low everywhere but nonzero over a wide area — a soft, broad highlight. Try dragging roughness from 1 down to 0.045 and watch the highlight go from a soft glow to a tiny hard point.</p>
+<p><b>G — geometric shadowing/masking (Smith).</b> Even a facet pointed the right way can be blocked: shadowed from the light by a neighboring facet, or masked from your eye by one in front of it. This effect gets worse at grazing angles and on rougher surfaces (taller, more occluding facets), so <code>G</code> quietly dims the response as the surface tilts away from you or the light — without it, rough surfaces would look unrealistically bright at grazing angles.</p>
+<p><b>F — Fresnel (Schlick's approximation).</b> Every material, metal or not, reflects almost all light at a glancing enough angle — it's why still water looks like a mirror at a shallow viewing angle but transparent looking straight down. <code>F0</code> (reflectance straight-on) is what actually differs: about 0.02–0.05 for non-metals regardless of color, and the material's own color for metals. That's the entire metallic/non-metallic split in one number — drag <code>metallic</code> from 0 to 1 on a colored preset and watch the tint move from "colored diffuse surface with a faint white highlight" to "colorless diffuse gone, color now lives entirely in the reflection."</p>
+<p class="dim" style="margin-top:0">Honest limitation, not a bug: at very low roughness with only a single point light and no environment reflections, a "mirror" material looks almost black except for one tiny bright dot — because a perfect mirror only ever reflects the one direction the light is actually in. Real renders add image-based lighting (a full environment to reflect) precisely so smooth metals look shiny everywhere, not just at the highlight; that's beyond this lab's single-light scope, but now you know why a chrome ball under one lamp looks mostly dark in a plain photo too.</p>
+
+<div class="footer">GPU Mastery · Labs · PBR Material Explorer — works offline</div>
+</div>
+
+<script>
+const $ = id => document.getElementById(id);
+
+function D_GGX(NoH, a){ const a2=a*a; const d=(NoH*NoH)*(a2-1)+1; return a2/(Math.PI*Math.max(d*d,1e-12)); }
+function G_Smith(NoV, NoL, rough){ const k=(rough+1)*(rough+1)/8; const G1=x=>x/(x*(1-k)+k); return G1(NoV)*G1(NoL); }
+function F_Schlick(VoH, F0){ return F0+(1-F0)*Math.pow(1-VoH,5); }
+function dot(a,b){ return a[0]*b[0]+a[1]*b[1]+a[2]*b[2]; }
+function norm(v){ const l=Math.hypot(v[0],v[1],v[2])||1; return [v[0]/l,v[1]/l,v[2]/l]; }
+const LIGHT = 3.2, AMBIENT = 0.15;
+
+function shadeSphere(canvas, roughness, metallic, base, azDeg, elDeg){
+  const ctx = canvas.getContext('2d');
+  const W = canvas.width, H = canvas.height;
+  const img = ctx.createImageData(W,H);
+  const cx=W/2, cy=H/2, R=Math.min(W,H)/2-1;
+  const rough = Math.max(roughness,0.045), alpha = rough*rough;
+  const F0 = [0,1,2].map(i => 0.04 + (base[i]-0.04)*metallic);
+  const az = azDeg*Math.PI/180, el = elDeg*Math.PI/180;
+  const L = [Math.cos(el)*Math.cos(az), Math.cos(el)*Math.sin(az), Math.sin(el)];
+  const V = [0,0,1];
+  for (let py=0; py<H; py++){
+    for (let px=0; px<W; px++){
+      const idx=(py*W+px)*4;
+      const nx=(px-cx)/R, ny=-(py-cy)/R, r2=nx*nx+ny*ny;
+      if (r2>1){ img.data[idx+3]=0; continue; }
+      const N=[nx,ny,Math.sqrt(Math.max(1-r2,0))];
+      const NoL=Math.max(dot(N,L),0), NoV=Math.max(dot(N,V),1e-4);
+      const Hh=norm([V[0]+L[0],V[1]+L[1],V[2]+L[2]]);
+      const NoH=Math.max(dot(N,Hh),0), VoH=Math.max(dot(V,Hh),0);
+      const D=D_GGX(NoH,alpha), G=G_Smith(NoV,NoL,rough);
+      let r=0,g=0,b=0;
+      for (let i=0;i<3;i++){
+        const Fr=F_Schlick(VoH,F0[i]);
+        const spec=(D*G*Fr)/Math.max(4*NoV*NoL,1e-4);
+        const kd=(1-metallic)*(1-Fr);
+        const diff=kd*base[i]/Math.PI;
+        let Lo=(diff+spec)*NoL*LIGHT + AMBIENT*base[i]*(1-metallic)*0.5;
+        Lo = Lo/(1+Lo); Lo = Math.pow(Lo,1/2.2);
+        if(i===0)r=Lo; else if(i===1)g=Lo; else b=Lo;
+      }
+      img.data[idx]=r*255; img.data[idx+1]=g*255; img.data[idx+2]=b*255; img.data[idx+3]=255;
+    }
+  }
+  ctx.putImageData(img,0,0);
+}
+
+function centerTerms(roughness, metallic, base, azDeg, elDeg){
+  // report D/G/F right at the sphere's front-center point, a stable reference for the readout
+  const rough=Math.max(roughness,0.045), alpha=rough*rough;
+  const F0=[0,1,2].map(i=>0.04+(base[i]-0.04)*metallic);
+  const az=azDeg*Math.PI/180, el=elDeg*Math.PI/180;
+  const L=[Math.cos(el)*Math.cos(az),Math.cos(el)*Math.sin(az),Math.sin(el)];
+  const V=[0,0,1], N=[0,0,1];
+  const NoL=Math.max(dot(N,L),0), NoV=1;
+  const Hh=norm([V[0]+L[0],V[1]+L[1],V[2]+L[2]]);
+  const NoH=Math.max(dot(N,Hh),0), VoH=Math.max(dot(V,Hh),0);
+  const D=D_GGX(NoH,alpha), G=G_Smith(NoV,NoL,rough), F=F_Schlick(VoH,F0[0]);
+  return {D,G,F};
+}
+
+const PRESETS = {
+  'Red plastic':  { base:[0.80,0.15,0.15], metallic:0, rough:0.35 },
+  'White ceramic':{ base:[0.90,0.90,0.88], metallic:0, rough:0.25 },
+  'Black rubber': { base:[0.05,0.05,0.05], metallic:0, rough:0.75 },
+  'Gold':         { base:[1.00,0.85,0.57], metallic:1, rough:0.20 },
+  'Copper':       { base:[0.95,0.64,0.54], metallic:1, rough:0.28 },
+  'Aluminum':     { base:[0.91,0.92,0.92], metallic:1, rough:0.35 },
+};
+
+let state = { base:[0.80,0.15,0.15], metallic:0, rough:0.35, az:40, el:55 };
+
+function render(){
+  shadeSphere($('sphere'), state.rough, state.metallic, state.base, state.az, state.el);
+  const t = centerTerms(state.rough, state.metallic, state.base, state.az, state.el);
+  $('terms').innerHTML = 'At sphere center: <b>D</b> = ' + t.D.toFixed(2) + ' &middot; <b>G</b> = ' + t.G.toFixed(3) + ' &middot; <b>F</b> = ' + t.F.toFixed(3) +
+    ' &middot; <b>F0</b> = ' + (0.04+(state.base[0]-0.04)*state.metallic).toFixed(3);
+  $('v-rough').textContent = state.rough.toFixed(3);
+  $('v-metal').textContent = state.metallic.toFixed(2);
+  $('v-az').textContent = Math.round(state.az);
+  $('v-el').textContent = Math.round(state.el);
+}
+
+function buildChips(){
+  const c = $('chips'); c.innerHTML='';
+  Object.keys(PRESETS).forEach(name=>{
+    const p = PRESETS[name];
+    const b = document.createElement('span'); b.className='chip';
+    const sw = document.createElement('span'); sw.className='swatch';
+    sw.style.background = 'rgb('+Math.round(p.base[0]*255)+','+Math.round(p.base[1]*255)+','+Math.round(p.base[2]*255)+')';
+    b.appendChild(sw); b.appendChild(document.createTextNode(name));
+    b.onclick = () => {
+      state.base=p.base.slice(); state.metallic=p.metallic; state.rough=p.rough;
+      $('rough').value=state.rough; $('metal').value=state.metallic;
+      [...c.children].forEach(x=>x.classList.remove('on')); b.classList.add('on');
+      render(); buildLadder();
+    };
+    c.appendChild(b);
+  });
+  c.firstChild.classList.add('on');
+}
+
+function buildLadder(){
+  const l = $('ladder'); l.innerHTML='';
+  [0.06, 0.2, 0.4, 0.65, 0.95].forEach(r=>{
+    const wrap = document.createElement('div');
+    const cv = document.createElement('canvas'); cv.width=70; cv.height=70;
+    shadeSphere(cv, r, state.metallic, state.base, state.az, state.el);
+    wrap.appendChild(cv);
+    const lbl = document.createElement('div'); lbl.textContent = 'r=' + r.toFixed(2);
+    wrap.appendChild(lbl);
+    l.appendChild(wrap);
+  });
+}
+
+['rough','metal','az','el'].forEach(id=>{
+  $(id).addEventListener('input', ()=>{
+    state.rough=parseFloat($('rough').value); state.metallic=parseFloat($('metal').value);
+    state.az=parseFloat($('az').value); state.el=parseFloat($('el').value);
+    render();
+    if (id==='az' || id==='el' || id==='metal') buildLadder();   // ladder shows fixed roughness steps, but tracks metallic/light like the main sphere
+  });
+});
+
+buildChips(); render(); buildLadder();
+</script>
+<script src="assets/app.js"></script>
+</body>
+</html>
