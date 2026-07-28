@@ -19,16 +19,16 @@
 <link rel="manifest" href="https://saipavan333.github.io/gpu-mastery/manifest.webmanifest">
 <meta name="theme-color" content="#0b0e14">
 <link rel="apple-touch-icon" href="https://saipavan333.github.io/gpu-mastery/assets/img/favicon-180.png">
-<meta name="description" content="Knowledge you only read decays. The way to make the fundamentals yours is to poke at them until the mental models are muscle memory. These labs come in three…">
+<meta name="description" content="Knowledge you only read decays. The way to make the fundamentals yours is to poke at them until the mental models are muscle memory. These labs come in four…">
 <meta property="og:type" content="website">
 <meta property="og:site_name" content="GPU Mastery">
 <meta property="og:title" content="Interactive Labs — GPU Mastery">
-<meta property="og:description" content="Knowledge you only read decays. The way to make the fundamentals yours is to poke at them until the mental models are muscle memory. These labs come in three…">
+<meta property="og:description" content="Knowledge you only read decays. The way to make the fundamentals yours is to poke at them until the mental models are muscle memory. These labs come in four…">
 <meta property="og:url" content="https://saipavan333.github.io/gpu-mastery/labs.html">
 <meta property="og:image" content="https://saipavan333.github.io/gpu-mastery/assets/img/og.png">
 <meta name="twitter:card" content="summary_large_image">
 <meta name="twitter:title" content="Interactive Labs — GPU Mastery">
-<meta name="twitter:description" content="Knowledge you only read decays. The way to make the fundamentals yours is to poke at them until the mental models are muscle memory. These labs come in three…">
+<meta name="twitter:description" content="Knowledge you only read decays. The way to make the fundamentals yours is to poke at them until the mental models are muscle memory. These labs come in four…">
 <meta name="twitter:image" content="https://saipavan333.github.io/gpu-mastery/assets/img/og.png">
 <!-- gm-seo:end -->
 </head>
@@ -43,7 +43,7 @@
 <div class="wrap">
 
 <h1>Interactive Labs</h1>
-<p class="lead">Knowledge you only read decays. The way to make the fundamentals <em>yours</em> is to poke at them until the mental models are muscle memory. These labs come in three flavors: <strong>calculators &amp; visualizers</strong> you reason with, <strong>hands-on labs</strong> that run real GPU code in your browser, and a full <strong>study loop</strong> — spaced repetition, interview prep, and reference — that keeps it all in your head.</p>
+<p class="lead">Knowledge you only read decays. The way to make the fundamentals <em>yours</em> is to poke at them until the mental models are muscle memory. These labs come in four flavors: <strong>calculators &amp; visualizers</strong> for the core mental models, <strong>hands-on labs</strong> that run real GPU code in your browser, <strong>track visualizers</strong> that make a specialization's core idea live instead of asserted, and a full <strong>study loop</strong> — spaced repetition, interview prep, and reference — that keeps it all in your head.</p>
 
 <h2>Reason with it — calculators &amp; visualizers</h2>
 <p class="dim" style="margin-top:0">Live tools for the course's core mental models. No install, no GPU — just you and the numbers.</p>
@@ -58,8 +58,15 @@
 <p class="dim" style="margin-top:0">Real compute kernels executing on <em>your</em> hardware, straight from a web page (WebGPU — Chrome/Edge 113+, Firefox 141+, Safari 26+).</p>
 <div class="grid">
   <a class="labcard" href="track-d/lab-webgpu.html"><h3>WebGPU Reduction Lab →</h3><p>The 5.8 sum reduction, running on your GPU, checked against a CPU oracle. Read the WGSL against CUDA — same ideas, new keywords.</p><span class="tag">5.8 · D5 · WebGPU</span></a>
-  <div class="labcard soon"><h3>WebGPU SAXPY &amp; Matmul</h3><p>Your first kernel and a naive→tiled matrix multiply, edit-and-run, with timing. Feel the tiling win from 5.5 live.</p><span class="tag">coming next</span></div>
+  <a class="labcard" href="lab-matmul.html"><h3>WebGPU Matmul Lab →</h3><p>Naive vs. shared-memory-tiled matrix multiply, both running on your GPU. Same answer, real GFLOP/s gap — the 5.5 tiling win, measured live.</p><span class="tag">5.5 · tiling · WebGPU</span></a>
   <div class="labcard soon"><h3>The Stride Cliff, measured</h3><p>Run the coalescing experiment on real hardware and watch bandwidth fall off the 1/8 floor — 5.7's executed cliff, on your GPU.</p><span class="tag">coming next</span></div>
+</div>
+
+<h2>Go deeper on your track — visualizers</h2>
+<p class="dim" style="margin-top:0">A specialization's central idea, made interactive. No GPU needed — just the concept, live.</p>
+<div class="grid">
+  <a class="labcard" href="lab-montecarlo.html"><h3>Monte Carlo Convergence Lab →</h3><p>Throw random points, watch &pi; emerge, and watch the error track the 1/&radic;N law exactly — the idea behind every Monte Carlo method in HPC.</p><span class="tag">Track B · HPC</span></a>
+  <a class="labcard" href="lab-pbr.html"><h3>PBR Material Explorer →</h3><p>A live Cook-Torrance BRDF, shaded per pixel in your browser. Dial roughness, metallic, and light position and watch a real material respond.</p><span class="tag">Track C · Graphics</span></a>
 </div>
 
 <h2>Remember it &amp; get hired — study tools</h2>
@@ -73,7 +80,7 @@
   <a class="labcard" href="concept-map.html"><h3>Concept Map →</h3><p>The whole curriculum as one interactive dependency map — the core path, then the four tracks, every lesson a click away.</p><span class="tag">interactive</span></a>
 </div>
 
-<p class="dim" style="margin-top:24px">More hands-on labs on the way: WebGPU SAXPY &amp; matmul, and the stride-cliff bandwidth experiment on your own GPU. This page grows as the labs land.</p>
+<p class="dim" style="margin-top:24px">More hands-on labs on the way: the stride-cliff bandwidth experiment on your own GPU, plus more track visualizers (ML mixed-precision/attention, HPC MPI patterns). This page grows as the labs land.</p>
 
 <div class="footer">GPU Mastery · Interactive Labs — works offline</div>
 </div>

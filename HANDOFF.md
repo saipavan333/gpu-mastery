@@ -8,6 +8,7 @@ needs, instead of one large file every time:
 | `context/ARCHITECTURE.md` | file map, bootstrap order, "how does X wire up", new pages |
 | `context/UI-LAYOUT.md` | nav, footer, byline, animation/motion, page chrome |
 | `context/STUDY-TOOLS.md` | review, interview, exam, glossary, cheatsheet, concept map, search |
+| `context/LABS.md` | interactive labs, calculators, WebGPU pages, track visualizers |
 | `context/ASSISTANT.md` | the "Ask AI" assistant, going online, Worker setup |
 | `context/DEPLOY.md` | commands, QA, push process, service worker cache, current state |
 

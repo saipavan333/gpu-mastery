@@ -379,3 +379,53 @@ Pages is a static host with no build step, so the site depends on them at runtim
 
 Every §3 required feature is now built. Only §11 (access control / subscriptions)
 remains deferred by the owner's explicit "build product, defer selling" decision.
+
+## Motion fix + context split + three new labs
+
+- **Real animation root cause found and fixed.** The home hero ran on a separate,
+  page-only `.reveal`/`.d1-d4` CSS animation (`style.css`); everything else used
+  `gm-motion.js`, which added the "hidden" class and the "reveal it" class to
+  already-on-screen elements in the SAME synchronous tick — no frame is ever
+  painted in between, so the browser skips the transition entirely (reads as "no
+  animation" even though the code runs). Fixed: hero folded into `gm-motion.js`
+  (one motion system, site-wide), on-screen elements now flip to `.gm-in` inside a
+  double `requestAnimationFrame` so a real hidden frame paints first. VERIFIED with
+  a hand-rolled DOM shim: before the rAF flush no on-screen node has `.gm-in`; after
+  it, all on-screen nodes do, below-fold nodes still wait for `IntersectionObserver`.
+  Dead `.reveal`/`.d1-d4`/`@keyframes rise` removed from `style.css`. `sw.js` CACHE
+  bumped v2→v3.
+- **Context split into `context/*.md`** — `HANDOFF.md` was a single ~900-word file
+  read every session regardless of task. Split into `ARCHITECTURE.md`,
+  `UI-LAYOUT.md`, `STUDY-TOOLS.md`, `ASSISTANT.md`, `DEPLOY.md`, `LABS.md`;
+  `HANDOFF.md` is now a 1-page index. A session now reads only the topic file(s)
+  its task needs.
+- **WebGPU Matmul Lab** (`lab-matmul.html`) — finishes the labs.html "coming next"
+  backlog item. Naive vs. shared-memory-tiled matmul, both on the user's GPU,
+  GFLOP/s bar comparison, 12-point correctness spot-check against a CPU dot
+  product (full N×N CPU replay would be too slow to run in a tab at N=2048).
+  VERIFIED: the tiling algorithm (accumulate across k-tiles from local sub-blocks)
+  checked against naive in Node across 5 shapes incl. non-multiple-of-tile sizes,
+  all exact matches; `cpuDot` checked against a hand-computed 2×2 product; the
+  no-WebGPU graceful-degradation path exercised in Node (stubbed `navigator`).
+- **Monte Carlo Convergence Lab** (`lab-montecarlo.html`, Track B) — dart-throwing
+  π estimator with a live log-log error-vs-N plot against the analytic
+  `SE(N)=4√(p(1-p)/N)` curve. VERIFIED the 1/√N law empirically in Node (40-trial
+  average error roughly halves per 4× N) before shipping; full start/pump-frames/
+  reset/run-to-300k-cap state machine executed in a DOM-shimmed Node harness with
+  zero exceptions.
+- **PBR Material Explorer** (`lab-pbr.html`, Track C) — live per-pixel Cook-Torrance
+  BRDF (GGX distribution, Smith geometry, Schlick Fresnel) on a canvas-shaded
+  sphere; 6 material presets, roughness/metallic/light sliders, a 5-step roughness
+  ladder. VERIFIED the BRDF math in Node first (Fresnel(VoH=1)=F0 exactly, GGX
+  normalization integral ≈1 via Monte Carlo, G_Smith ∈ (0,1]) — this caught a real
+  bug (an epsilon sized for typical roughness silently dominated and DIMMED the
+  highlight at very low roughness instead of sharpening it; fixed with a smaller
+  epsilon + a monotonicity re-check). A second runtime pass then caught a genuine
+  scope bug (`shadeSphere` returned block-scoped `D`/`G` from outside the pixel
+  loop — a `ReferenceError` `node --check` cannot see since it only parses syntax);
+  fixed, then re-verified across 180 slider-range parameter combinations in a
+  DOM-shimmed Node harness with zero exceptions.
+- Wired into `labs.html` (new "Go deeper on your track" section for the two
+  visualizers, matmul promoted out of "coming next") and `index.html`'s labs
+  teaser. `tools/build-index.js` + `build-seo.js` re-run (104 pages indexed, SEO
+  injected into the 4 changed pages).
