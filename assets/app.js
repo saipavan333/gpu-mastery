@@ -13,6 +13,7 @@
     js(assetBase + "gm-site.js");
     css(assetBase + "gm-motion.css");
     js(assetBase + "gm-motion.js");
+    js(assetBase + "gm-backdrop.js");                                            // course-wide ambient backdrop (every page)
     if (document.getElementById("hero-canvas")) js(assetBase + "gm-hero.js");   // animated hero (home only)
     js(assetBase + "gm-search.js");
     css(assetBase + "gm-glossary.css");

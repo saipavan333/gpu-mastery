@@ -53,6 +53,31 @@ rings** gated on `u_active`, and **two crossing wavefront highlight lines** that
 keep it alive at rest. Colors are the site's blue→teal→violet ramp; a vignette
 frames it. `u_time` is pre-warmed (starts at 40s) so frame 0 is already full.
 
+## Course-wide backdrop — `assets/gm-backdrop.js` (every page)
+The whole course sits on a dim, ambient version of the Dispatch Lattice: a **fixed
+full-viewport WebGL layer** injected behind all content by `app.js` on every page.
+It is deliberately far dimmer than the home hero (a separate, vivid, interactive
+instance in the `#hero-canvas` panel) and **ambient-only** (no cursor) so it never
+competes with reading.
+
+Readability + performance (this runs on 100+ content pages, so it's conservative):
+- **WebGL only.** If WebGL or the shader fails, it changes NOTHING — the page keeps
+  its normal CSS gradient background (`body` is only set transparent *after* the
+  context + shader succeed and the first frame is drawn). Zero-regression by design.
+- **Scrim** (`#gm-backdrop-scrim`, `z-index:-1`) mutes the lattice behind the centered
+  `.wrap` reading column (which is transparent) and lets it breathe in the side
+  gutters: a horizontal gradient darker at 26–74% (behind the ≤900px column), lighter
+  at the edges, plus a vertical ease top/bottom.
+- Low-res backing (`SCALE 0.62`), **~30fps throttle**, `powerPreference:"low-power"`,
+  pause on hidden tab, and it **skips phones** (`max-width:520px`) entirely.
+- `prefers-reduced-motion` → one static frame, no loop.
+
+Two tuning knobs: `LATTICE_DIM` in `gm-backdrop.js` (lattice brightness, default 0.62)
+and the `#gm-backdrop-scrim` gradient (how hard it mutes behind text). Precached in
+`sw.js`; bump CACHE when either changes. Verified: `node --check`, GLSL parsed with
+`@shaderfrog/glsl-parser`, and rendered live in a `visualize` widget behind sample
+lesson prose to confirm text stays crisp.
+
 ## Motion — single source: `assets/gm-motion.js` (no separate CSS file)
 One script drives ALL entrance + scroll-reveal animation site-wide, including
 the home page hero (as of this session — previously the hero used a separate,

@@ -497,3 +497,24 @@ remains deferred by the owner's explicit "build product, defer selling" decision
 - Scope held to the home hero only; other pages keep the shared `gm-motion.js`
   entrance/scroll-reveal. A course-wide "motion DNA" accent remains available as a
   future pass if wanted.
+
+## Course-wide backdrop (user override of the "home hero only" scope)
+
+- The user asked for the Dispatch Lattice "as the entire course backdrop." I'd earlier
+  advised against a full animated background on a learning site (readability/battery);
+  they chose it anyway, so I built it the way that actually holds up:
+  `assets/gm-backdrop.js` — a FIXED full-viewport **WebGL** layer injected behind every
+  page by `app.js`. A dim, ambient-only variant of the lattice (no cursor), covered by
+  a readability scrim.
+- Safeguards: WebGL-only with a zero-regression fallback (body background is swapped to
+  transparent ONLY after context+shader+first-frame succeed; otherwise the page keeps
+  its CSS gradient). Scrim darkens the centered `.wrap` reading lane and lets the lattice
+  breathe in the gutters. Low-res (0.62x) + ~30fps + low-power context + pause-on-hidden;
+  phones (`max-width:520px`) skip it. `prefers-reduced-motion` → one static frame.
+- Two tuning knobs surfaced (`LATTICE_DIM`, the scrim gradient) so intensity is a
+  one-line change. VERIFIED: `node --check`, GLSL parsed with `@shaderfrog/glsl-parser`,
+  and rendered live in a `visualize` widget behind realistic lesson prose (heading,
+  paragraphs, a card, inline code) to confirm readability before shipping. `sw.js` CACHE
+  bumped to v7 (+ `gm-backdrop.js` precached). QA clean. The home hero panel stays as the
+  vivid, interactive instance; the backdrop is the calm site-wide layer — same visual
+  language, two intensities.
