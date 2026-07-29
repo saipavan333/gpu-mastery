@@ -39,9 +39,19 @@ Loaded by `app.js` only when `#hero-canvas` exists. Verified in Node (can't run
 WebGL in the sandbox — native `gl` build is blocked): GLSL syntax-validated with
 `@shaderfrog/glsl-parser`; a DOM+fake-GL shim proves the WebGL/2D/none selection,
 that the 2D wave centroid strictly advances, and that reduced-motion schedules zero
-frames. **Final visual confirmation still needs a real browser** — if it ever looks
-wrong, first rule out OS-level "reduce motion" (it intentionally disables the
-animation) and a stale service-worker cache (bump `sw.js` CACHE, hard-refresh).
+frames. The shader was additionally **rendered live in a `visualize` widget (real
+WebGL) and chosen by the user from three interactive previews** — the visual
+verification channel when the Chrome extension isn't connected. **Final in-page
+confirmation still needs a real browser** — if it ever looks wrong, first rule out
+OS-level "reduce motion" (it intentionally disables the animation) and a stale
+service-worker cache (bump `sw.js` CACHE, hard-refresh).
+
+Shader composition (elevated, user-approved): a dim **parallax depth layer**
+(denser far grid that drifts toward the cursor) behind the **main lattice**
+(warped cells, ambient diagonal waves, per-cell shimmer), a **cursor bloom + ripple
+rings** gated on `u_active`, and **two crossing wavefront highlight lines** that
+keep it alive at rest. Colors are the site's blue→teal→violet ramp; a vignette
+frames it. `u_time` is pre-warmed (starts at 40s) so frame 0 is already full.
 
 ## Motion — single source: `assets/gm-motion.js` (no separate CSS file)
 One script drives ALL entrance + scroll-reveal animation site-wide, including

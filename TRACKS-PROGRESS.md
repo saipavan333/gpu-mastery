@@ -474,3 +474,26 @@ remains deferred by the owner's explicit "build product, defer selling" decision
   fail / 2D-on-no-WebGL), that the 2D wave centroid strictly advances, and that
   reduced-motion schedules zero frames. `sw.js` CACHE v4→v5. QA clean. **Pixel-level
   confirmation still requires a real browser** (Chrome extension wasn't connected).
+
+## World-class hero — wondersmith pass (Concept A, user-chosen)
+
+- Reworked the home hero to a **WebGL fragment-shader "Dispatch Lattice"** built to
+  the wondersmith standard (one signature technique, the visitor is load-bearing).
+  Process fix that finally broke the blind-shipping cycle: rendered **three live,
+  cursor-interactive concept previews in `visualize` widgets** (A Dispatch Lattice /
+  B Silicon Die / C Wavefront flow field); the user picked **A**, then I rendered the
+  exact production hero (real two-column layout) as a fourth widget before committing.
+- Elevated shader (over the automation's first Dispatch Lattice): a dim **parallax
+  depth layer** behind the **main lattice** (warped cells + ambient diagonal waves +
+  per-cell shimmer), **cursor bloom + ripple rings** on `u_active`, and **two crossing
+  wavefront highlight lines**; blue→teal→violet ramp, vignette, pre-warmed clock.
+- Robustness kept from the existing scaffold: WebGL → canvas-2D lattice → `<noscript>`
+  SVG → reduced-motion still frame. Loaded by `app.js` only when `#hero-canvas` exists
+  (home only, per the user's "home hero only, for now").
+- VERIFIED: `node --check`; GLSL syntax-validated with `@shaderfrog/glsl-parser`
+  (46 lines, all six elevation features asserted present); and — the key one — the
+  exact production shader **compiled and rendered live in a real browser** via the
+  visualize widget. `sw.js` CACHE bumped to v6. QA clean.
+- Scope held to the home hero only; other pages keep the shared `gm-motion.js`
+  entrance/scroll-reveal. A course-wide "motion DNA" accent remains available as a
+  future pass if wanted.
