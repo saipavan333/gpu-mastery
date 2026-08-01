@@ -567,3 +567,25 @@ remains deferred by the owner's explicit "build product, defer selling" decision
 - Note: the labs.html "Stride Cliff (coming next)" WebGPU placeholder is deliberately
   still pending — a hardware-timed microbenchmark whose result can't be verified from
   the sandbox; deferred rather than shipped unverified.
+
+## Two more labs + live GPU validation (Chrome connected)
+
+- **lab-stride.html — The Stride Cliff (WebGPU, lesson 5.7)**: measures achieved
+  memory bandwidth vs access stride; bar chart to the ~1/8 fp32 sector floor. The
+  last labs.html "coming next" placeholder, now shipped. Address model + wrap logic
+  verified in Node. **LIVE-VALIDATED on a real GPU** by running the exact benchmark
+  via Chrome javascript_tool on the deployed https context (GPU-timed): 97.5 GB/s at
+  stride 1 → 1.1 GB/s at stride 128 (floor 1.1% of peak) — a clean, dramatic cliff.
+- **lab-softmax.html — Softmax Stability Explorer (Track A)**: naive softmax overflows
+  to NaN on large logits vs the stable max-subtraction (the FlashAttention trick);
+  editable logits + presets + naive/stable probability bars + verdict. Fills the
+  Track A lab gap. Deterministic; 12 numeric checks verified in Node (naive→NaN on big
+  logits, stable exact & sums to 1, argmax correct, fp32-overflow boundary ≈88.7).
+- **LIVE VISUAL VALIDATION this session (Chrome):** deployed home page probed —
+  reducedMotion:false, hero canvas heroWebGL:true with reveal complete, backdrop+scrim
+  active (body transparent), 90-lesson stat, start-here→Module 0; two frames showed the
+  hero wavefront MOVING (animation confirmed); search overlay opens fixed/centered
+  (searchBoxTop 63px, not bottom); Module 0 lesson injects prereq + 2 misconceptions +
+  2 diagrams; Amdahl lab renders with correct numbers (8.48×, ceiling 10×); Module 2
+  shows 3 runnable Python cells; zero console errors. Both new labs wired into labs.html
+  + search + SEO (113 sitemap urls); SW cache v17.
