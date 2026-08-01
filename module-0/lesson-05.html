@@ -1,0 +1,197 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>0.5 How the GPU Evolved — GPU Mastery</title>
+<link rel="stylesheet" href="../assets/style.css">
+<!-- gm-seo:start -->
+<link rel="canonical" href="https://saipavan333.github.io/gpu-mastery/module-0/lesson-05.html">
+<link rel="manifest" href="https://saipavan333.github.io/gpu-mastery/manifest.webmanifest">
+<meta name="theme-color" content="#0b0e14">
+<link rel="apple-touch-icon" href="https://saipavan333.github.io/gpu-mastery/assets/img/favicon-180.png">
+<meta name="description" content="The GPU was born to draw triangles and became the engine of the AI revolution. This lesson traces the journey — fixed-function graphics, programmable shaders, the GPGPU hack, CUDA, and deep learning — so today's AI accelerators make sense.">
+<meta property="og:type" content="article">
+<meta property="og:site_name" content="GPU Mastery">
+<meta property="og:title" content="0.5 How the GPU Evolved — GPU Mastery">
+<meta property="og:description" content="The GPU was born to draw triangles and became the engine of the AI revolution. This lesson traces the journey — fixed-function graphics, programmable shaders, the GPGPU hack, CUDA, and deep learning — so today's AI accelerators make sense.">
+<meta property="og:url" content="https://saipavan333.github.io/gpu-mastery/module-0/lesson-05.html">
+<meta property="og:image" content="https://saipavan333.github.io/gpu-mastery/assets/img/og.png">
+<meta name="twitter:card" content="summary_large_image">
+<meta name="twitter:title" content="0.5 How the GPU Evolved — GPU Mastery">
+<meta name="twitter:description" content="The GPU was born to draw triangles and became the engine of the AI revolution. This lesson traces the journey — fixed-function graphics, programmable shaders, the GPGPU hack, CUDA, and deep learning — so today's AI accelerators make sense.">
+<meta name="twitter:image" content="https://saipavan333.github.io/gpu-mastery/assets/img/og.png">
+<!-- gm-seo:end -->
+</head>
+<body data-lesson="m0l5">
+<nav><div class="inner">
+  <a class="logo" href="../index.html">GPU<span>Mastery</span></a>
+  <a class="item" href="../index.html">Home</a>
+  <a class="item on" href="../curriculum.html">Curriculum</a>
+  <a class="item" href="../labs.html">Labs</a>
+  <a class="item" href="../setup.html">Lab setup</a>
+</div></nav>
+<div class="wrap">
+
+<div class="lesson-top">
+  <div><span class="badge">Module 0 · Lesson 5</span><span class="badge dim">≈ 1–2 h · prereq: 0.1–0.4</span></div>
+  <button id="donebtn" class="donebtn">Mark lesson complete</button>
+</div>
+<h1>How the GPU evolved — from drawing triangles to running the AI world</h1>
+<p class="lead">The chip that trains today's largest AI models was invented to make video games look good. Understanding how a graphics accelerator became the engine of the AI revolution isn't just history — it explains why GPUs are shaped the way they are, why one company's software ended up dominating, and why the skills in this course sit exactly where the value is.</p>
+
+<h2>Concept</h2>
+
+<h3>Born to draw triangles (1999)</h3>
+<p>In 1999, NVIDIA shipped the <strong>GeForce 256</strong> and marketed it as the world's first "GPU." Its job was narrow and fixed: take 3D geometry — millions of triangles — and turn them into the colored pixels on your screen, fast enough for a smooth game. The crucial detail for us: this is <em>naturally parallel</em>. Every pixel's color can be computed independently of every other pixel; every vertex can be transformed on its own. The GPU was a throughput machine from birth (Lesson 0.3) — but its parallelism was locked inside a rigid, graphics-only pipeline. You couldn't tell it to do <em>your</em> math; you could only feed it triangles.</p>
+
+<h3>Programmable shaders crack the box open (early 2000s)</h3>
+<p>Around 2001, GPUs gained <strong>programmable shaders</strong>: small programs the graphics chip would run for every vertex or every pixel. The purpose was richer visuals — custom lighting, water, shadows — but the implication was explosive. For the first time, a programmer could put <em>arbitrary little programs</em> onto the GPU's thousands of parallel units. The machine was still pretending to do graphics, but a door had opened.</p>
+
+<h3>The GPGPU hack: computing in disguise (mid-2000s)</h3>
+<p>Clever researchers noticed that door and walked through it sideways. If the GPU will run a small program on every pixel, then — they reasoned — I can <em>disguise my data as an image</em> and <em>disguise my computation as a pixel shader</em>, and steal the GPU's parallel horsepower for problems that have nothing to do with graphics. Want to add two big arrays? Encode them as textures, write a shader that "colors" each pixel with the sum, and read the "image" back as your result. This was <strong>GPGPU</strong> — General-Purpose computing on GPUs. It was brilliant and miserable: you had to express real math in the contorted language of triangles and textures. But it proved something the whole industry couldn't unsee — for the right problems, a GPU was staggeringly faster than a CPU.</p>
+
+<h3>CUDA (2006): the GPU becomes a real computer</h3>
+<p>In <strong>2006</strong>, NVIDIA released <strong>CUDA</strong>, and the disguises fell away. CUDA exposed the GPU as what it secretly was — a general parallel processor — and let you program it in a C-like language, with real threads, real memory, no graphics pretense. Suddenly "run this function across a million data elements" was a few lines of ordinary-looking code instead of a graphics magic trick. This is the birth of modern GPU computing, and it's the moment everything in this course becomes possible. By <strong>Fermi (2010)</strong>, GPUs had proper caches, ECC memory, and C++ support — they were legitimate compute engines, not repurposed graphics cards.</p>
+<div class="diagram">
+<svg viewBox="0 0 760 300" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="A timeline of GPU evolution. 1999: GeForce 256, the first GPU, fixed-function graphics. 2001: programmable shaders. 2006: CUDA brings general-purpose computing. 2012: AlexNet ignites the deep learning era on GPUs. 2017: Tensor Cores add dedicated matrix hardware. 2024 and beyond: Blackwell and Rubin, the AI accelerator era. The eras progress from drawing graphics, to borrowing the GPU for math, to general compute, to powering AI.">
+  <rect x="0" y="0" width="760" height="300" rx="14" fill="#12161d"/>
+  <text x="30" y="34" fill="#8fb6ff" font-family="ui-monospace,monospace" font-size="13" letter-spacing="1.1">THE GPU'S JOURNEY · from triangles to AI</text>
+  <!-- baseline -->
+  <line x1="60" y1="165" x2="710" y2="165" stroke="#3a4763" stroke-width="2"/>
+  <!-- era band -->
+  <rect x="60" y="158" width="150" height="14" fill="#5b9bff" opacity="0.18"/>
+  <rect x="210" y="158" width="150" height="14" fill="#37e0c8" opacity="0.16"/>
+  <rect x="360" y="158" width="230" height="14" fill="#b48cff" opacity="0.16"/>
+  <rect x="590" y="158" width="120" height="14" fill="#f5b850" opacity="0.18"/>
+  <g font-family="ui-monospace,monospace" font-size="10.5" text-anchor="middle" fill="#6f7d92">
+    <text x="135" y="150">draw graphics</text>
+    <text x="285" y="150">borrow for math</text>
+    <text x="475" y="150">deep learning</text>
+    <text x="650" y="150">AI era</text>
+  </g>
+  <!-- milestones: dot + year + label -->
+  <g text-anchor="middle" font-family="system-ui,sans-serif">
+    <!-- 1999 -->
+    <circle cx="70" cy="165" r="5" fill="#5b9bff"/><text x="70" y="197" fill="#9fb0c6" font-size="12" font-family="ui-monospace,monospace">1999</text>
+    <text x="70" y="214" fill="#cfe0ff" font-size="11">GeForce 256</text><text x="70" y="228" fill="#6f7d92" font-size="10">"first GPU"</text>
+    <!-- 2001 -->
+    <circle cx="150" cy="165" r="5" fill="#5b9bff"/><text x="150" y="123" fill="#9fb0c6" font-size="12" font-family="ui-monospace,monospace">2001</text>
+    <text x="150" y="106" fill="#cfe0ff" font-size="11">shaders</text>
+    <!-- 2006 -->
+    <circle cx="290" cy="165" r="6" fill="#37e0c8"/><text x="290" y="197" fill="#9fb0c6" font-size="12" font-family="ui-monospace,monospace">2006</text>
+    <text x="290" y="214" fill="#c8f5ea" font-size="11.5" font-weight="600">CUDA</text><text x="290" y="228" fill="#6f7d92" font-size="10">general compute</text>
+    <!-- 2012 -->
+    <circle cx="420" cy="165" r="6" fill="#b48cff"/><text x="420" y="123" fill="#9fb0c6" font-size="12" font-family="ui-monospace,monospace">2012</text>
+    <text x="420" y="106" fill="#e4d4ff" font-size="11.5" font-weight="600">AlexNet</text><text x="420" y="92" fill="#6f7d92" font-size="10">deep learning ignites</text>
+    <!-- 2017 -->
+    <circle cx="520" cy="165" r="5" fill="#b48cff"/><text x="520" y="197" fill="#9fb0c6" font-size="12" font-family="ui-monospace,monospace">2017</text>
+    <text x="520" y="214" fill="#e4d4ff" font-size="11">Tensor Cores</text>
+    <!-- 2024+ -->
+    <circle cx="660" cy="165" r="6" fill="#f5b850"/><text x="660" y="123" fill="#9fb0c6" font-size="12" font-family="ui-monospace,monospace">2024+</text>
+    <text x="660" y="106" fill="#ffe0a8" font-size="11">Blackwell → Rubin</text>
+  </g>
+</svg>
+<div class="cap">Milestones verified against public records. Each step widened who could use the GPU's parallel power — from game studios, to researchers hacking graphics APIs, to any programmer with CUDA, to the entire field of AI.</div>
+</div>
+
+<h3>The deep learning explosion (2012 onward)</h3>
+<p>Then came the moment that changed computing. In <strong>2012</strong>, a neural network called <strong>AlexNet</strong> won the ImageNet image-recognition contest by a shocking margin — and it was trained on a pair of consumer NVIDIA GPUs. Why did that work? Because a neural network is, underneath, an enormous pile of <strong>matrix multiplications</strong>, and a matrix multiply is millions of independent multiply-add operations (Lesson 0.3's dream workload). Deep learning and the GPU were a perfect match nobody had fully realized until AlexNet made it undeniable. The floodgates opened: researchers everywhere reached for GPUs, models grew, and NVIDIA leaned in hard — <strong>Volta (2017)</strong> added <strong>Tensor Cores</strong>, hardware units built specifically to multiply small matrices, turbo-charging exactly the operation AI needed most.</p>
+
+<h3>Today: purpose-built AI accelerators</h3>
+<p>The modern data-center GPU — NVIDIA's <strong>Hopper (2022)</strong>, <strong>Blackwell (2024)</strong>, and <strong>Rubin (2026)</strong> — is barely recognizable as a graphics card. It is an AI engine: dominated by tensor cores, wrapped in enormous high-bandwidth memory, and increasingly specialized for the low-precision number formats AI tolerates (you'll meet FP16, BF16, FP8, even FP4 in Module 1 and Track A). Blackwell packs 208 billion transistors; Rubin, on a 3nm process, around 336 billion. The chip born to shade pixels now trains the models reshaping the world. Yet — and this is the point of the whole module — <em>the fundamentals never changed</em>: it's still thousands of simple cores hiding memory latency with massive parallelism. Learn those fundamentals (this course) and every generation, whatever its marketing name, is the same machine underneath.</p>
+
+<h2>Worked example</h2>
+<div class="card">
+<p><strong>Task:</strong> Show <em>why</em> a neural network layer is the GPU's ideal workload, by counting its operations. A fully-connected layer maps 1,024 input numbers to 1,024 output numbers. Each output is a weighted sum of all inputs.</p>
+<p><strong>1 — the shape:</strong> output j = sum over i of (input i × weight[i][j]). With 1,024 inputs and 1,024 outputs, that's a 1,024 × 1,024 grid of weights — about <strong>one million</strong> multiply-add operations for a single layer on a single input.</p>
+<p><strong>2 — the parallelism:</strong> every one of those million multiply-adds is <em>independent</em> — no output needs another output's result first. And every output is computed the <em>same way</em> (a dot product). Independent + identical + arithmetic-heavy = all three parts of the GPU decision rule (0.4) satisfied perfectly.</p>
+<p><strong>3 — now scale it:</strong> a real model has hundreds of such layers and processes thousands of inputs at once (a batch), so a single training step is <em>billions</em> of independent multiply-adds. That is not a workload a few fast CPU cores can touch — it is precisely the ocean of uniform parallel work the GPU was, in hindsight, born to devour.</p>
+<p><strong>Decision made:</strong> this is why the AI revolution ran on GPUs and not CPUs, and why NVIDIA built dedicated matrix hardware (Tensor Cores). The match between "neural network" and "throughput machine" is not a coincidence of history — it's the arithmetic. Once you can count the operations, the whole industry's hardware choices become obvious.</p>
+</div>
+
+<h2>Key points</h2>
+<ul class="keypoints">
+<li>GPUs began (GeForce 256, <strong>1999</strong>) as fixed-function <strong>graphics</strong> chips — naturally parallel (every pixel independent) but locked to drawing.</li>
+<li><strong>Programmable shaders</strong> (~2001) let programmers run small programs on the GPU's parallel units, opening the door to non-graphics use.</li>
+<li><strong>GPGPU</strong> (mid-2000s) hacked that door — disguising computation as graphics — and proved GPUs could crush the right problems.</li>
+<li><strong>CUDA (2006)</strong> dropped the disguise: the GPU became a general parallel computer you program directly. This is the root of modern GPU computing.</li>
+<li><strong>AlexNet (2012)</strong> showed neural networks — piles of matrix multiplies — are the GPU's perfect workload, igniting the deep-learning era; <strong>Tensor Cores (Volta, 2017)</strong> added dedicated matrix hardware.</li>
+<li>Today's <strong>Hopper / Blackwell (2024) / Rubin (2026)</strong> are AI accelerators — yet under the marketing, still thousands of simple cores hiding latency with parallelism. The fundamentals of this course outlast every generation.</li>
+</ul>
+
+<h2>Quiz</h2>
+<div class="quiz">
+  <div class="q">1. What was "GPGPU," and why did it matter historically?</div>
+  <button class="opt">A new programming language released alongside the GeForce 256</button>
+  <button class="opt" data-c="1">Doing general-purpose math on a GPU by disguising it as graphics — it proved GPUs could vastly outperform CPUs on the right problems, before CUDA made it easy</button>
+  <button class="opt">A type of CPU that mimicked a GPU</button>
+  <button class="opt">The official name of NVIDIA's first AI accelerator</button>
+  <div class="expl">Before CUDA (2006), researchers coaxed GPUs into general computation by encoding data as textures and computation as pixel shaders — General-Purpose GPU computing. It was awkward but demonstrated the GPU's power for non-graphics work, which motivated CUDA and everything after.</div>
+</div>
+<div class="quiz">
+  <div class="q">2. Why were GPUs, rather than CPUs, the hardware that powered the deep-learning revolution?</div>
+  <button class="opt">GPUs have much faster single cores than CPUs</button>
+  <button class="opt">CPUs cannot do matrix math at all</button>
+  <button class="opt" data-c="1">Neural networks are mostly huge matrix multiplications — millions of independent, identical multiply-adds — which is exactly the throughput workload GPUs excel at</button>
+  <button class="opt">GPUs use far less memory than CPUs</button>
+  <div class="expl">A neural network is, underneath, enormous matrix multiplications: millions to billions of independent, identical multiply-add operations. That's the ideal GPU workload (independent + uniform + arithmetic-heavy). AlexNet (2012) made this undeniable, and Tensor Cores (2017) then hardwired the matrix operation into the silicon.</div>
+</div>
+
+<h2>Exercises</h2>
+<details><summary>Exercise 1 — Put these in order and give the rough year of each: CUDA, programmable shaders, AlexNet, GeForce 256, Tensor Cores.</summary><div class="body">
+<p><strong>GeForce 256</strong> (1999, first GPU / fixed-function graphics) → <strong>programmable shaders</strong> (~2001) → <strong>CUDA</strong> (2006, general compute) → <strong>AlexNet</strong> (2012, deep-learning ignition) → <strong>Tensor Cores</strong> (2017, Volta, dedicated matrix hardware). The through-line: each step made the GPU's parallelism available to more people for more kinds of work, ending in hardware specialized for AI's core operation.</p>
+</div></details>
+<details><summary>Exercise 2 — In one or two sentences, explain the connection between "a neural network" and "a matrix multiply," and why that connection favors GPUs.</summary><div class="body">
+<p>Each layer of a neural network computes its outputs as weighted sums of its inputs, which is exactly a matrix–vector (or, for a batch, matrix–matrix) multiplication. A matrix multiply is a huge set of independent, identical multiply-add operations — the textbook throughput workload — so it maps perfectly onto a GPU's thousands of parallel arithmetic units, whereas a CPU's few cores can't keep up.</p>
+</div></details>
+<details><summary>Exercise 3 — Why is it fair to say the GPU's <em>fundamentals</em> haven't changed from GeForce 256 to Rubin, even though one draws games and the other trains AI?</summary><div class="body">
+<p>Because both are the same core idea from Lesson 0.3: many simple cores running in parallel, hiding memory latency behind an abundance of independent work. The GeForce 256 applied that to millions of independent pixels; Rubin applies it to billions of independent multiply-adds in a neural network. The <em>application</em> shifted from graphics to AI, and the hardware grew vastly (and gained tensor cores and huge memory), but the underlying bet — throughput through massive parallelism — is unchanged. That's why learning the fundamentals now equips you for hardware that hasn't been built yet.</p>
+</div></details>
+
+<hr>
+<h1>Go deeper — the complete guide</h1>
+<p>The card tells the story. This chapter adds the mechanisms behind it: what a shader really is, why CUDA became a moat, the feedback loop that drove the AI hardware race, and the numbers that show the scale of it.</p>
+
+<h2>1. From fixed-function to programmable</h2>
+<p>The earliest GPUs implemented a <em>fixed</em> graphics pipeline: geometry in, pixels out, with a handful of knobs but no real programmability. Programmable shaders replaced fixed stages with two small user programs — the <strong>vertex shader</strong> (runs per vertex, transforming geometry) and the <strong>pixel/fragment shader</strong> (runs per pixel, computing color). Each runs across thousands of items in parallel. This is the exact ancestor of a CUDA <em>kernel</em> — a small function the GPU runs across thousands of threads (Module 5). When you write your first CUDA kernel, you are doing, cleanly and directly, what GPGPU pioneers did through a graphics disguise twenty years ago.</p>
+
+<h2>2. Why CUDA became a moat</h2>
+<p>CUDA's lasting significance is as much about <em>software</em> as hardware. By giving GPUs a real programming model early (2006) and investing relentlessly in libraries, tools, and education, NVIDIA built an ecosystem: cuBLAS for linear algebra, cuDNN for deep learning, and eventually the entire AI software stack assuming CUDA underneath. Competitors make excellent GPUs — AMD's Instinct line, Intel's Gaudi accelerators — but they must also fight CUDA's <em>ecosystem</em> lead, which is why portability frameworks exist (AMD's ROCm/HIP, Intel's oneAPI/SYCL, and cross-vendor options like OpenCL and WebGPU). This is not a footnote; it shapes the whole industry, and it is exactly what Track D of this course is about: your skills are valuable precisely because the parallel-computing ideas transfer across all of these, even though CUDA leads today.</p>
+
+<h2>3. The AI feedback loop</h2>
+<p>After 2012, a self-reinforcing loop took over. Bigger models were more capable, bigger models needed more compute, more compute justified bigger GPUs, and bigger GPUs enabled still-bigger models. NVIDIA rode this loop hard: Pascal (2016) added high-bandwidth memory and NVLink; Volta (2017) added Tensor Cores; Ampere (2020, the A100) and Hopper (2022, the H100) became the workhorses of the large-language-model era; Blackwell (2024) and Rubin (2026) push further into "agentic" AI. Each generation leaned more toward matrix math and lower-precision formats — because that is what neural networks reward. The graphics heritage never vanished (these chips still render beautifully), but the design center of gravity moved decisively toward AI.</p>
+
+<h2>4. Precision: less is more (for AI)</h2>
+<p>One thread runs through the modern era: <strong>lower-precision numbers</strong>. Classic scientific computing used 32- or 64-bit floating point. But neural networks are famously tolerant of imprecision, so hardware kept adding smaller formats — FP16, then BF16, then FP8, and on the newest chips FP4 — because a smaller number is faster to move and multiply, letting you do <em>more</em> operations per second and fit <em>bigger</em> models in memory. You'll build a real, bit-level understanding of these formats in Lesson 1.8 and use them across Track A. For now, the historical point: the drive toward AI reshaped even how GPUs represent numbers, trading precision the models don't need for throughput they crave.</p>
+
+<h2>5. The scale, in numbers</h2>
+<p>The growth is hard to overstate. The GeForce 256 (1999) had on the order of tens of millions of transistors. Hopper (2022) has roughly 80 billion; Blackwell (2024) has 208 billion in a two-die design; Rubin (2026) reaches around 336 billion on a 3nm process. Memory bandwidth climbed from megabytes-per-second-era beginnings to multiple terabytes per second on today's data-center parts. This is Moore's law (more transistors per chip over time) <em>plus</em> specialization (spending those transistors on tensor cores and memory for AI). It's why a single modern GPU can do what a room of machines did a decade ago — and why efficiency (performance per watt and per dollar), not just raw speed, increasingly decides which hardware wins (Track D).</p>
+
+<h2>6. Where it's heading — and why it doesn't change your job</h2>
+<p>The frontier keeps moving: from training giant models toward serving them efficiently (inference), toward "agentic" systems, toward ever-lower precision and larger memory. New architectures will keep arriving with new names. But notice what has been constant across 25 years and a thousandfold growth: thousands of simple cores, massive parallelism, latency hidden by abundant threads, and performance decided by how you move data. Those are the exact fundamentals this course teaches. Chasing each new chip's marketing is a losing game; mastering the invariants is how you stay valuable as the hardware races ahead. The next lesson, 0.6, maps today's landscape — the vendors and where GPUs actually run — and hands you the roadmap for turning these ideas into a profession.</p>
+
+<h2>Gotchas</h2>
+<div class="gotcha"><strong>Thinking the GPU was "designed for AI."</strong> It wasn't — it was designed for graphics, and its fitness for AI was a discovery (crystallized by AlexNet in 2012), not a plan. The lesson: general parallel-computing skill finds unexpected, valuable applications.</div>
+<div class="gotcha"><strong>Confusing the marketing name with the fundamentals.</strong> "Blackwell," "Rubin," "CDNA," "Gaudi" are generations and brands. Underneath, they're all throughput machines built on the ideas in Lessons 0.1–0.4. Learn the invariants, not the brochures.</div>
+<div class="gotcha"><strong>Assuming CUDA is the only way.</strong> CUDA leads, but it's NVIDIA-only. AMD (ROCm/HIP), Intel (oneAPI/SYCL), and cross-vendor standards (OpenCL, WebGPU) exist — and the underlying concepts transfer. Track D makes you portable on purpose.</div>
+<div class="gotcha"><strong>Believing lower precision is always fine.</strong> AI tolerates FP16/FP8/FP4; much of scientific computing does not and needs FP32/FP64. "Which precision" is a real engineering decision (Lesson 1.8, Track B), not a free speed knob.</div>
+
+<h2>Scenario — the hack that became an industry</h2>
+<p>Rewind to the mid-2000s. A machine-learning researcher wants to train a model that would take weeks on the CPUs available. She hears that graphics cards are absurdly fast at parallel arithmetic, so she spends a brutal month expressing her matrix math as textures and pixel shaders — the GPGPU disguise — and gets a result that runs in days instead of weeks. It's ugly, fragile, and barely reusable, but it works, and word spreads. That pain is exactly the market signal NVIDIA answered with CUDA in 2006: give these people a real way to program the GPU, and a whole field will follow. It did. Within six years, AlexNet (2012) used GPUs to win ImageNet and lit the fuse on modern AI; within a decade, GPU compute was the most valuable hardware franchise in technology. The throughline for you: the researcher's insight wasn't about graphics or AI specifically — it was recognizing that a pile of independent, identical arithmetic belongs on a throughput machine. That single instinct, which you now have from Lessons 0.1–0.4, is the seed of the entire GPU-computing industry — and the reason this course exists.</p>
+
+<h2>Practice</h2>
+<details><summary>1. In one sentence, why is it accurate to call graphics rendering a "throughput problem"?</summary><div class="body">Because a frame is millions of pixels (and vertices) whose colors can be computed independently and identically, so rendering is a massive set of uniform, independent tasks — exactly the definition of a throughput workload, which is why the parallel machine built to render was later perfect for other throughput problems like AI.</div></details>
+<details><summary>2. Explain why CUDA (2006) mattered more than any single hardware feature of that era.</summary><div class="body">Hardware made the GPU fast, but CUDA made it <em>usable</em>: it turned the GPU from a graphics chip you had to trick into a general parallel computer you could program directly in a C-like language. That accessibility unlocked GPU computing for the whole software world and seeded an ecosystem of libraries and tools that still gives NVIDIA an advantage today. A fast chip nobody can easily program is far less valuable than a slightly slower one everybody can — CUDA supplied the "everybody can."</div></details>
+<details><summary>3. Roughly how many transistors did Hopper, Blackwell, and Rubin have, and what two forces explain the growth?</summary><div class="body">Roughly 80 billion (Hopper, 2022), 208 billion (Blackwell, 2024), and about 336 billion (Rubin, 2026). Two forces: Moore's law — more transistors per chip over time as manufacturing improves — <em>plus</em> deliberate specialization, spending those extra transistors on AI-oriented hardware (tensor cores) and huge high-bandwidth memory rather than on general-purpose logic. Growth is both "more" and "more focused."</div></details>
+<details><summary>4. A colleague says "GPUs are AI chips." Give a more accurate one-sentence description and justify it briefly.</summary><div class="body">More accurately: "GPUs are throughput machines — thousands of simple parallel cores — that happen to be ideal for AI because neural networks are massive parallel matrix math." The justification is historical and structural: they were built for graphics, their fitness for AI was discovered not designed, and the same machine also accelerates physics, graphics, and scientific computing. Calling them "AI chips" mistakes the biggest application for the underlying nature, and would leave you confused the moment you use a GPU for HPC or rendering.</div></details>
+<details><summary>5. Reflection: how does knowing this history change how you'll approach learning the rest of this course?</summary><div class="body">It reframes the goal from "learn today's GPU" to "learn the invariants that survive every generation." The history shows the applications and brand names change constantly — graphics, then GPGPU, then deep learning, then agentic AI; GeForce, Tesla, Blackwell, Rubin — while the fundamentals (parallel simple cores, latency hiding, data movement as the true cost) stay fixed. So the highest-value thing to master is exactly what this course front-loads: the mental models of Modules 0–5, not the spec sheet of any one chip. Learn those, and you can pick up any new architecture or framework quickly, which is precisely what makes a GPU engineer durably employable.</div></details>
+
+<div class="pager">
+  <a href="lesson-04.html">← 0.4 CPU vs GPU</a>
+  <span class="dim" style="opacity:.6">Next: The GPU landscape &amp; your roadmap (coming)</span>
+</div>
+<div class="footer">GPU Mastery · Module 0 · Lesson 5 — works offline · progress saved in your browser</div>
+</div>
+<script src="../assets/app.js"></script>
+</body>
+</html>
