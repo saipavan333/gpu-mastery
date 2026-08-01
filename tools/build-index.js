@@ -18,7 +18,7 @@ function kindOf(f){
   return { k:'hub', label:'Hub' };
 }
 let pages = [];
-for (const d of ['.', 'module-1','module-2','module-3','module-4','module-5','track-a','track-b','track-c','track-d'])
+for (const d of ['.', 'module-0','module-1','module-2','module-3','module-4','module-5','track-a','track-b','track-c','track-d'])
   for (const f of fs.readdirSync(path.join(ROOT,d))) if (f.endsWith('.html')) pages.push(d==='.'?f:d+'/'+f);
 
 const index = [];

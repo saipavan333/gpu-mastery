@@ -71,7 +71,7 @@
 <script>
 (function(){
   var I = window.GM_INDEX || [];
-  var CORE = { "1":["Foundations","Math & number sense from zero"], "2":["Python","Programming & NumPy"],
+  var CORE = { "0":["The Big Picture","What a GPU is · CPU vs GPU · how it evolved"], "1":["Foundations","Math & number sense from zero"], "2":["Python","Programming & NumPy"],
     "3":["C, Pointers & Memory","How memory really works"], "4":["Hardware & the Roofline","CPU vs GPU, bandwidth, limits"],
     "5":["CUDA Kernels","Writing & optimizing real kernels"] };
   var TRACK = { "a":["Track A · ML / AI Infra","PyTorch, Triton, FlashAttention, serving"], "b":["Track B · HPC & Scientific","cuBLAS, MPI, clusters, reproducibility"],
@@ -95,10 +95,10 @@
   }
 
   var html = '<div class="cm-rail-h">The core path</div><div class="cm-flow">';
-  ["1","2","3","4","5"].forEach(function(k,idx){
+  ["0","1","2","3","4","5"].forEach(function(k,idx){
     var ls = lessonsFor(new RegExp("^module-"+k+"/lesson"));
     html += node("core", k, CORE[k][0], CORE[k][1], ls);
-    if(idx<4) html += '<div class="cm-arrow">↓</div>';
+    if(idx<5) html += '<div class="cm-arrow">↓</div>';
   });
   html += '</div><div class="cm-branch">↓ then branch into a specialization ↓</div>';
   html += '<div class="cm-rail-h">Specialization tracks</div><div class="cm-flow">';

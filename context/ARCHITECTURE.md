@@ -18,8 +18,13 @@ Every page ends `<script src="assets/app.js"></script>`. `app.js`:
 ## File map
 - **Pages (root):** index, curriculum, labs, setup, glossary, search, review,
   interview, exam, cheatsheet, concept-map, lab-roofline/occupancy/coalescing/floatbits.
-- **Lessons:** `module-1..5/lesson-*.html` (43 core), `track-a..d/lesson-*.html`
-  (A=ML 11, B=HPC 10, C=Graphics 11, D=Portable 9), `track-d/lab-webgpu.html`.
+- **Lessons:** `module-0..5/lesson-*.html` (49 core: **Module 0** = 6 conceptual
+  intro lessons — what a GPU is, CPU vs GPU, evolution, landscape — with *inline
+  SVG* diagrams, not the `diagrams*.js` registry; Modules 1–5 = 43), plus
+  `track-a..d/lesson-*.html` (A=ML 11, B=HPC 10, C=Graphics 11, D=Portable 9) and
+  `track-d/lab-webgpu.html`. Total 90 lessons.
+  Note: `tools/build-index.js` has a **hardcoded module-dir list** — add any new
+  `module-N` there or its lessons won't be indexed (search + concept map miss them).
 - **assets/** — see the topic file that owns each module: UI-LAYOUT.md (site
   chrome + motion), STUDY-TOOLS.md (review/interview/exam/glossary/cheatsheet/
   concept-map/search), ASSISTANT.md (AI assistant). Shared: `style.css` (design

@@ -518,3 +518,31 @@ remains deferred by the owner's explicit "build product, defer selling" decision
   bumped to v7 (+ `gm-backdrop.js` precached). QA clean. The home hero panel stays as the
   vivid, interactive instance; the backdrop is the calm site-wide layer — same visual
   language, two intensities.
+
+## Module 0 — "The Big Picture" (new foundations, 6 lessons)
+
+- Built a new **Module 0** before the math, on the user's "make it a complete
+  masterclass, nothing left behind" brief: the missing conceptual on-ramp for a
+  college student. Six full two-layer lessons (Concept → worked example → key
+  points → quiz → exercises → go-deeper → gotchas → scenario → practice), plain
+  English, each with hand-authored **inline SVG diagrams** (11 total) rather than
+  the diagrams.js registry:
+  - 0.1 What a computer actually does (fetch-execute, clock, the memory wall)
+  - 0.2 The CPU — built for latency (caches, branch prediction, out-of-order)
+  - 0.3 The GPU — built for throughput (SIMT, latency hiding, the bargain)
+  - 0.4 CPU vs GPU — the trade-off (decision rule, host+device, Amdahl's law)
+  - 0.5 How the GPU evolved (graphics → GPGPU → CUDA 2006 → AlexNet 2012 → tensor
+        cores → Blackwell/Rubin) — dates + current frontier WEB-VERIFIED
+  - 0.6 The GPU landscape & your roadmap (NVIDIA/AMD/Intel + software; the course→career map)
+- **Integration:** new `module-0/` folder; curriculum.html gets a "Core · Module 0
+  — The Big Picture (BUILT — start here)" section (moved "start here" off Module 1);
+  index hero "Begin at" now points to Module 0 L1; concept-map.html CORE gains a
+  "0" node and the core loop runs `["0".."5"]`; `tools/build-index.js` module list
+  extended with `module-0` (it was hardcoded — new modules must be added or they
+  won't index); search-data + SEO/sitemap rebuilt (110 urls). Headline counts
+  updated site-wide: 84→90 lessons, 43→49-lesson core (index/curriculum/labs/prompt).
+- **Verified:** all 12 SVG diagrams well-formed (XML-parsed); American English
+  enforced (British-spelling scan per lesson); zero bare `$` in prose; and all 14
+  numeric claims across the six lessons re-derived in node (clock ticks, cache-hit
+  totals + 16× swing, throughput inversion 625×, Amdahl ceilings, layer MAC count)
+  — ALL PASS. `qa.js` ALL CLEAN. `sw.js` CACHE → v12.

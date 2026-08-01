@@ -1,0 +1,232 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>0.6 The GPU Landscape & Your Roadmap — GPU Mastery</title>
+<link rel="stylesheet" href="../assets/style.css">
+<!-- gm-seo:start -->
+<link rel="canonical" href="https://saipavan333.github.io/gpu-mastery/module-0/lesson-06.html">
+<link rel="manifest" href="https://saipavan333.github.io/gpu-mastery/manifest.webmanifest">
+<meta name="theme-color" content="#0b0e14">
+<link rel="apple-touch-icon" href="https://saipavan333.github.io/gpu-mastery/assets/img/favicon-180.png">
+<meta name="description" content="You now understand what a GPU is and why it exists. This closing lesson zooms out to the real world: who makes GPUs, what you actually program them with,…">
+<meta property="og:type" content="article">
+<meta property="og:site_name" content="GPU Mastery">
+<meta property="og:title" content="0.6 The GPU Landscape &amp; Your Roadmap — GPU Mastery">
+<meta property="og:description" content="You now understand what a GPU is and why it exists. This closing lesson zooms out to the real world: who makes GPUs, what you actually program them with,…">
+<meta property="og:url" content="https://saipavan333.github.io/gpu-mastery/module-0/lesson-06.html">
+<meta property="og:image" content="https://saipavan333.github.io/gpu-mastery/assets/img/og.png">
+<meta name="twitter:card" content="summary_large_image">
+<meta name="twitter:title" content="0.6 The GPU Landscape &amp; Your Roadmap — GPU Mastery">
+<meta name="twitter:description" content="You now understand what a GPU is and why it exists. This closing lesson zooms out to the real world: who makes GPUs, what you actually program them with,…">
+<meta name="twitter:image" content="https://saipavan333.github.io/gpu-mastery/assets/img/og.png">
+<!-- gm-seo:end -->
+</head>
+<body data-lesson="m0l6">
+<nav><div class="inner">
+  <a class="logo" href="../index.html">GPU<span>Mastery</span></a>
+  <a class="item" href="../index.html">Home</a>
+  <a class="item on" href="../curriculum.html">Curriculum</a>
+  <a class="item" href="../labs.html">Labs</a>
+  <a class="item" href="../setup.html">Lab setup</a>
+</div></nav>
+<div class="wrap">
+
+<div class="lesson-top">
+  <div><span class="badge">Module 0 · Lesson 6</span><span class="badge dim">≈ 1 h · prereq: 0.1–0.5</span></div>
+  <button id="donebtn" class="donebtn">Mark lesson complete</button>
+</div>
+<h1>The GPU landscape &amp; your roadmap</h1>
+<p class="lead">You now understand <em>what</em> a GPU is and <em>why</em> it exists. This closing lesson zooms out to the real world: who makes GPUs, what you actually program them with, where they run the modern economy, and — most importantly — exactly how the rest of this course carries you from these first ideas to a professional skill you can build a career on.</p>
+
+<h2>Concept</h2>
+
+<h3>Who makes GPUs, and what you program them with</h3>
+<p>Three companies dominate, each pairing hardware with its own software stack. The hardware differences are real but secondary; the <em>software ecosystem</em> is often what decides which you'll use.</p>
+<div class="diagram">
+<svg viewBox="0 0 760 300" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="The GPU vendor landscape in three columns. NVIDIA: data-center GPUs like Hopper, Blackwell, and Rubin, consumer GeForce RTX, programmed with CUDA — the dominant ecosystem. AMD: Instinct data-center GPUs and Radeon consumer GPUs, programmed with ROCm and HIP. Intel: Gaudi AI accelerators and Arc consumer GPUs, programmed with oneAPI and SYCL. Below all three, a cross-vendor and portable layer: OpenCL, SYCL, WebGPU, and Triton, which is the subject of Track D.">
+  <rect x="0" y="0" width="760" height="300" rx="14" fill="#12161d"/>
+  <text x="30" y="34" fill="#8fb6ff" font-family="ui-monospace,monospace" font-size="13" letter-spacing="1.1">THE LANDSCAPE · hardware + the software that drives it</text>
+  <g font-family="system-ui,sans-serif" text-anchor="middle">
+    <!-- NVIDIA -->
+    <rect x="34" y="56" width="222" height="150" rx="11" fill="#0e1420" stroke="#5b9bff" stroke-width="1.6"/>
+    <text x="145" y="82" fill="#e8edf5" font-size="15" font-weight="700">NVIDIA</text>
+    <text x="145" y="106" fill="#9fb0c6" font-size="11.5">Hopper · Blackwell · Rubin</text>
+    <text x="145" y="124" fill="#9fb0c6" font-size="11.5">GeForce RTX (consumer)</text>
+    <rect x="54" y="140" width="182" height="46" rx="8" fill="#16233d" stroke="#5b9bff"/>
+    <text x="145" y="162" fill="#cfe0ff" font-size="13" font-weight="700">CUDA</text>
+    <text x="145" y="178" fill="#8fb6ff" font-size="10.5">the dominant ecosystem</text>
+    <!-- AMD -->
+    <rect x="268" y="56" width="222" height="150" rx="11" fill="#0e1420" stroke="#37e0c8" stroke-width="1.6"/>
+    <text x="379" y="82" fill="#e8edf5" font-size="15" font-weight="700">AMD</text>
+    <text x="379" y="106" fill="#9fb0c6" font-size="11.5">Instinct MI300 · MI350 · MI400</text>
+    <text x="379" y="124" fill="#9fb0c6" font-size="11.5">Radeon (consumer)</text>
+    <rect x="288" y="140" width="182" height="46" rx="8" fill="#123027" stroke="#37e0c8"/>
+    <text x="379" y="162" fill="#c8f5ea" font-size="13" font-weight="700">ROCm / HIP</text>
+    <text x="379" y="178" fill="#37e0c8" font-size="10.5">CUDA-like, open</text>
+    <!-- Intel -->
+    <rect x="502" y="56" width="224" height="150" rx="11" fill="#0e1420" stroke="#b48cff" stroke-width="1.6"/>
+    <text x="614" y="82" fill="#e8edf5" font-size="15" font-weight="700">Intel</text>
+    <text x="614" y="106" fill="#9fb0c6" font-size="11.5">Gaudi (AI accelerators)</text>
+    <text x="614" y="124" fill="#9fb0c6" font-size="11.5">Arc (consumer)</text>
+    <rect x="522" y="140" width="184" height="46" rx="8" fill="#241a33" stroke="#b48cff"/>
+    <text x="614" y="162" fill="#e4d4ff" font-size="13" font-weight="700">oneAPI / SYCL</text>
+    <text x="614" y="178" fill="#b48cff" font-size="10.5">open standard</text>
+    <!-- cross-vendor band -->
+    <rect x="34" y="224" width="692" height="52" rx="10" fill="#1a1e14" stroke="#f5b850" stroke-width="1.3"/>
+    <text x="380" y="248" fill="#ffe0a8" font-size="13" font-weight="700">Cross-vendor &amp; portable: OpenCL · SYCL · WebGPU · Triton</text>
+    <text x="380" y="266" fill="#f5b850" font-size="11">write once, run on any brand — the subject of Track D</text>
+  </g>
+</svg>
+<div class="cap">NVIDIA leads mainly through CUDA's mature ecosystem, not raw hardware alone. AMD and Intel compete with strong chips and open software; portable layers let you target all of them. Your parallel-computing skills transfer across every column.</div>
+</div>
+
+<h3>Where GPUs run the world</h3>
+<p>Once you see "GPU" as "throughput machine," its reach is obvious — it shows up wherever there's a mountain of independent, similar work:</p>
+<ul class="keypoints">
+<li><strong>Artificial intelligence</strong> — training and serving neural networks. The largest and fastest-growing use, and the reason for the current GPU boom. (This course's <strong>Track A</strong>.)</li>
+<li><strong>Scientific &amp; high-performance computing</strong> — climate models, molecular dynamics, fluid simulation, computational finance. (<strong>Track B</strong>.)</li>
+<li><strong>Real-time graphics</strong> — games, film rendering, virtual and augmented reality: the original job, still enormous. (<strong>Track C</strong>.)</li>
+<li><strong>Everything else throughput-shaped</strong> — video encoding, image processing, data analytics, and portable/edge deployment across devices. (<strong>Track D</strong> makes your skills run anywhere.)</li>
+</ul>
+<p>Notice that the four tracks of this course are not arbitrary — they <em>are</em> the four great territories where GPUs run the world. You'll build the shared foundation once, then specialize.</p>
+
+<h3>Your roadmap through this course</h3>
+<p>Here is the whole journey on one page. You've just finished the intuition (Module 0). Next comes the shared foundation, then your chosen specialization, then the portfolio that makes you employable.</p>
+<div class="diagram">
+<svg viewBox="0 0 760 360" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="The course roadmap as a downward flow. You are here at Module 0, the big picture. Then the core, Modules 1 through 5: mathematics, programming in Python, C and memory, how computers and GPUs work, and CUDA fundamentals. Then you branch into one of four tracks: A machine-learning infrastructure, B high-performance computing, C graphics and game engines, or D portable and vendor-neutral GPU. Finally you finish with capstone projects and a portfolio, becoming a job-ready GPU engineer.">
+  <rect x="0" y="0" width="760" height="360" rx="14" fill="#12161d"/>
+  <text x="30" y="32" fill="#8fb6ff" font-family="ui-monospace,monospace" font-size="13" letter-spacing="1.1">YOUR ROADMAP · from here to a profession</text>
+  <g font-family="system-ui,sans-serif" text-anchor="middle">
+    <!-- Module 0 -->
+    <rect x="250" y="46" width="260" height="42" rx="9" fill="#16233d" stroke="#5b9bff" stroke-width="1.8"/>
+    <text x="380" y="66" fill="#e8edf5" font-size="14" font-weight="700">Module 0 — The Big Picture</text>
+    <text x="380" y="81" fill="#8fb6ff" font-size="10.5">you are here ✓</text>
+    <!-- arrow -->
+    <line x1="380" y1="88" x2="380" y2="104" stroke="#5b6b82" stroke-width="2" marker-end="url(#rd)"/>
+    <!-- Core -->
+    <rect x="70" y="106" width="620" height="66" rx="10" fill="#0e1420" stroke="#37e0c8" stroke-width="1.4"/>
+    <text x="380" y="126" fill="#c8f5ea" font-size="13" font-weight="700">The Core — Modules 1–5 (the shared foundation)</text>
+    <g font-family="ui-monospace,monospace" font-size="10.5" fill="#9fb0c6">
+      <text x="130" y="152">1 · Math</text><text x="245" y="152">2 · Python</text><text x="360" y="152">3 · C &amp; memory</text><text x="490" y="152">4 · Hardware</text><text x="620" y="152">5 · CUDA</text>
+    </g>
+    <line x1="380" y1="172" x2="380" y2="188" stroke="#5b6b82" stroke-width="2" marker-end="url(#rd)"/>
+    <text x="380" y="204" fill="#7e8aa0" font-size="11">then choose a direction</text>
+    <!-- tracks -->
+    <rect x="60" y="214" width="150" height="60" rx="9" fill="#16233d" stroke="#5b9bff"/>
+    <text x="135" y="238" fill="#cfe0ff" font-size="12.5" font-weight="700">Track A</text><text x="135" y="256" fill="#9fb0c6" font-size="10.5">ML / AI infra</text>
+    <rect x="222" y="214" width="150" height="60" rx="9" fill="#123027" stroke="#37e0c8"/>
+    <text x="297" y="238" fill="#c8f5ea" font-size="12.5" font-weight="700">Track B</text><text x="297" y="256" fill="#9fb0c6" font-size="10.5">HPC / science</text>
+    <rect x="384" y="214" width="150" height="60" rx="9" fill="#2b2416" stroke="#f5b850"/>
+    <text x="459" y="238" fill="#ffe0a8" font-size="12.5" font-weight="700">Track C</text><text x="459" y="256" fill="#9fb0c6" font-size="10.5">graphics / games</text>
+    <rect x="546" y="214" width="150" height="60" rx="9" fill="#241a33" stroke="#b48cff"/>
+    <text x="621" y="238" fill="#e4d4ff" font-size="12.5" font-weight="700">Track D</text><text x="621" y="256" fill="#9fb0c6" font-size="10.5">portable / any GPU</text>
+    <!-- arrows to finish -->
+    <line x1="380" y1="278" x2="380" y2="298" stroke="#5b6b82" stroke-width="2" marker-end="url(#rd)"/>
+    <!-- finish -->
+    <rect x="220" y="300" width="320" height="46" rx="10" fill="#103023" stroke="#36c98a" stroke-width="1.8"/>
+    <text x="380" y="320" fill="#c8f5ea" font-size="13.5" font-weight="700">Capstones + portfolio → GPU engineer</text>
+    <text x="380" y="337" fill="#36c98a" font-size="10.5">job-ready, in your own words</text>
+  </g>
+  <defs><marker id="rd" markerWidth="9" markerHeight="9" refX="7" refY="4.5" orient="auto"><path d="M0,0 L9,4.5 L0,9 Z" fill="#5b6b82"/></marker></defs>
+</svg>
+<div class="cap">The path: intuition (you're done), then one shared foundation, then a specialization that matches where you want to work, ending in projects you can show an employer. Everything is built on the ideas from these six lessons.</div>
+</div>
+<p>That's the plan. The single 43-lesson core takes you from school mathematics to writing and tuning real CUDA. Then each track is an end-to-end path into one of the four territories above, ending in a capstone — a tuned kernel, a portability report, a renderer — that you put on your resume. You don't need to decide your track now; the core serves all of them.</p>
+
+<h2>Worked example</h2>
+<div class="card">
+<p><strong>Task:</strong> You're told to run a large AI training job and asked "which GPU should we use?" Walk through what actually matters on a spec sheet, in priority order, using what you've learned.</p>
+<p><strong>1 — Does the model fit? (memory capacity.)</strong> A model's weights and activations must fit in GPU memory. If the model needs 200 GB and the GPU has 80 GB, nothing else matters — it won't run (without splitting across GPUs). Check memory <em>capacity</em> first.</p>
+<p><strong>2 — How fast can it feed the cores? (memory bandwidth.)</strong> From Lesson 0.3, throughput is usually decided by bandwidth, not clock. A data-center GPU's multi-TB/s memory is a top-line number for AI. This is what the <em>roofline</em> (Lesson 4.7) formalizes.</p>
+<p><strong>3 — How much math, at the right precision? (compute.)</strong> Look at the throughput in the precision you'll use (FP16/BF16/FP8 for AI), not just a headline number — Tensor Core throughput at your precision is what counts.</p>
+<p><strong>4 — What does it cost to run? (price and power.)</strong> From Lesson 0.4, the real question is often performance per dollar and per watt over the whole job, not peak speed. A slightly slower chip that costs far less to run can be the right call.</p>
+<p><strong>Decision made:</strong> notice you answered a "which GPU?" question using only Module 0 ideas — capacity, bandwidth, throughput-at-precision, and cost/power. You didn't memorize model numbers; you reasoned from fundamentals, which is exactly what makes an engineer valuable and what the rest of the course sharpens into real skill.</p>
+</div>
+
+<h2>Key points</h2>
+<ul class="keypoints">
+<li>Three vendors dominate: <strong>NVIDIA</strong> (CUDA — the leading ecosystem), <strong>AMD</strong> (Instinct + ROCm/HIP), <strong>Intel</strong> (Gaudi + oneAPI/SYCL). Portable layers (OpenCL, SYCL, WebGPU, Triton) span all of them.</li>
+<li>NVIDIA's lead is as much <strong>software ecosystem</strong> (CUDA + libraries) as hardware — which is why portability skills (Track D) matter.</li>
+<li>GPUs run four great territories: <strong>AI</strong> (Track A), <strong>HPC/science</strong> (Track B), <strong>graphics</strong> (Track C), and <strong>everything portable/edge</strong> (Track D) — this course's four tracks.</li>
+<li>The roadmap: <strong>Module 0 (done) → Core (Modules 1–5: math, Python, C, hardware, CUDA) → one Track → capstone + portfolio → job-ready.</strong></li>
+<li>Reading a GPU for a job: <strong>capacity</strong> (does it fit?), <strong>bandwidth</strong> (can it feed the cores?), <strong>compute at your precision</strong>, then <strong>cost and power</strong> — all reasoned from Module 0 ideas.</li>
+<li>You don't pick a track now; the core foundation serves all four, and the fundamentals outlast every vendor and generation.</li>
+</ul>
+
+<h2>Quiz</h2>
+<div class="quiz">
+  <div class="q">1. Why does NVIDIA lead the GPU-computing market so decisively?</div>
+  <button class="opt">Its GPUs are the only ones that can do parallel math</button>
+  <button class="opt" data-c="1">As much for CUDA's mature software ecosystem (libraries, tools, adoption) as for the hardware itself</button>
+  <button class="opt">AMD and Intel do not make GPUs</button>
+  <button class="opt">CUDA runs on every vendor's hardware</button>
+  <div class="expl">NVIDIA makes excellent hardware, but its durable advantage is CUDA's ecosystem — a decade-plus of libraries, tools, and near-universal adoption that competitors must overcome even with strong chips. CUDA is NVIDIA-only, which is exactly why portable frameworks (ROCm/HIP, oneAPI/SYCL, WebGPU) and Track D exist.</div>
+</div>
+<div class="quiz">
+  <div class="q">2. When choosing a GPU for a large AI model, what should you check <em>first</em>?</div>
+  <button class="opt">Its clock speed in GHz</button>
+  <button class="opt">Whether it can run graphics</button>
+  <button class="opt" data-c="1">Memory capacity — whether the model even fits in the GPU's memory</button>
+  <button class="opt">The number of display outputs</button>
+  <div class="expl">If the model doesn't fit in GPU memory, nothing else matters (short of splitting it across multiple GPUs). After capacity, bandwidth and compute-at-your-precision decide speed, and cost/power decide practicality — but capacity is the first gate. Clock speed, from Lesson 0.1, is nearly irrelevant for choosing between GPUs.</div>
+</div>
+
+<h2>Exercises</h2>
+<details><summary>Exercise 1 — Match each track (A, B, C, D) to its real-world territory and give one example application.</summary><div class="body">
+<p><strong>Track A — AI / ML infrastructure:</strong> training and serving neural networks (e.g. a large language model, or an image classifier). <strong>Track B — HPC / scientific computing:</strong> large simulations (e.g. climate modeling, molecular dynamics, computational finance). <strong>Track C — graphics / game engines:</strong> real-time rendering (e.g. a game engine, film rendering, VR). <strong>Track D — portable / vendor-neutral:</strong> making GPU code run across brands and devices (e.g. deploying the same kernel on NVIDIA, AMD, and in a browser via WebGPU). These four are the great territories where GPUs run the world — and they map one-to-one onto the course's tracks.</p>
+</div></details>
+<details><summary>Exercise 2 — A teammate insists "we must use NVIDIA, there's no alternative." Give a balanced, accurate response.</summary><div class="body">
+<p>NVIDIA is the safe default because CUDA's ecosystem is the most mature and widely supported, which lowers risk and effort — so for many teams it's genuinely the pragmatic choice. But it isn't the only option: AMD's Instinct GPUs with ROCm/HIP and Intel's Gaudi with oneAPI are real competitors, often on price, availability, or specific workloads, and portable standards (SYCL, OpenCL, WebGPU) let you avoid lock-in. The right answer depends on cost, availability, existing code, and how much portability matters — and, crucially, the parallel-computing skills you're learning transfer across all of them, so you're not betting your career on one vendor. "No alternative" overstates it; "lowest-friction default today" is fair.</p>
+</div></details>
+<details><summary>Exercise 3 — Using the spec-sheet priority order, explain why a cheaper GPU with more memory might beat a faster one for a given AI job.</summary><div class="body">
+<p>Because capacity is the first gate: if the faster GPU's memory can't hold the model but the cheaper one's can, the cheaper one runs the job and the faster one simply can't (without the complexity and overhead of splitting across multiple GPUs). Even when both fit, the cost-and-power step can favor the cheaper chip: if it finishes the job at, say, 80% of the speed for half the cost and less power, its performance-per-dollar and per-watt win — which is what data centers actually optimize. Peak speed is only decisive when capacity, cost, and power are already satisfied; reasoning through the whole priority list, not just the headline TFLOPS, is what separates a good hardware decision from a flashy one.</p>
+</div></details>
+
+<hr>
+<h1>Go deeper — the complete guide</h1>
+<p>The card gives you the map. This chapter fills in how to actually get GPU access, how the vendor competition really works, and how to keep growing after this course so the skill compounds into a career.</p>
+
+<h2>1. Consumer vs data-center vs cloud — and how to get access</h2>
+<p>Not all GPUs are the giant data-center accelerators. There are three practical tiers. <strong>Consumer</strong> GPUs (NVIDIA GeForce RTX, AMD Radeon, Intel Arc) live in gaming PCs and are superb for learning and small projects. <strong>Data-center</strong> GPUs (NVIDIA H100/B200, AMD Instinct MI300/MI350) are the huge, expensive parts built for AI and HPC, with vast memory and bandwidth. Most learners never buy those — they <strong>rent</strong> them in the <strong>cloud</strong> (AWS, Google Cloud, Azure, and GPU-specialist clouds) by the hour, or use free tiers. You do not need to own hardware to do this course: much of it runs on free <strong>Google Colab</strong> (which offers a modest GPU), some in any browser via WebGPU (the Labs), and the rest on inexpensive cloud rentals. The Lab-setup page walks through the options; the point here is that GPU skills are accessible to anyone with a laptop and an internet connection.</p>
+
+<h2>2. The vendor competition, honestly</h2>
+<p>NVIDIA's dominance is real but not guaranteed forever. Its moat is CUDA's ecosystem — the libraries (cuBLAS, cuDNN), the tools, and the fact that essentially all AI software targets it first. AMD competes hard on hardware (the Instinct MI300/MI350/MI400 line offers large memory and strong throughput) and is investing heavily in ROCm to close the software gap, with HIP designed to make porting CUDA code nearly mechanical. Intel offers Gaudi accelerators and the open oneAPI/SYCL stack. Cloud providers and large AI labs also build their own accelerators (Google's TPUs are the famous example) to reduce dependence on any one vendor. The strategic takeaway for you: bet on <em>portable fundamentals</em>, not a single vendor. That is precisely Track D's thesis, and it's why this course teaches the concepts first and the vendor-specific syntax second.</p>
+
+<h2>3. Beyond GPUs — the accelerator zoo</h2>
+<p>GPUs are the most general and widely available throughput accelerators, but they're not the only ones. <strong>TPUs</strong> (Google's tensor processing units) are custom chips specialized even more narrowly for neural-network math. There are also FPGAs, and a growing field of custom AI chips. You don't need the details, but the concept matters: the industry is building ever-more-specialized hardware for throughput workloads, and the general skill — thinking in parallel, moving data wisely, matching work to hardware — is what lets you use <em>any</em> of them. Specialized chips come and go; the parallel-computing mindset is the durable asset.</p>
+
+<h2>4. Where GPUs run the world, in detail</h2>
+<p>To make the four territories concrete: in <strong>AI</strong>, GPUs train the models behind chat assistants, image generators, and recommendation systems, and serve them to billions of requests. In <strong>science</strong>, they power weather and climate prediction, drug discovery, astrophysics, and the risk models behind finance. In <strong>graphics</strong>, they render every modern game and much of film and streaming visual effects, and drive VR/AR. And across <strong>everything else</strong>, they encode and analyze video, accelerate data pipelines, and increasingly run on phones and edge devices. Wherever a problem is a mountain of similar independent work, a GPU (or a cousin accelerator) is likely behind it. Learning to program them is learning to operate the engine under a huge fraction of modern computing.</p>
+
+<h2>5. The roadmap, in full</h2>
+<p>Concretely, here is the rest of your journey. <strong>Module 1</strong> rebuilds the mathematics from school level — numbers, algebra, vectors, matrices, floating point — because GPU work is applied math. <strong>Module 2</strong> teaches programming from zero in Python. <strong>Module 3</strong> covers C, pointers, and memory — how data really lives in a machine. <strong>Module 4</strong> is the deep version of Lessons 0.1–0.3: inside a CPU core, the memory hierarchy, inside the GPU, and the roofline. <strong>Module 5</strong> is CUDA itself — writing and optimizing real kernels, ending with a matrix multiply taken from a naive first draft to a large fraction of the hardware's peak. Then you pick a <strong>track</strong> (A/B/C/D), each an end-to-end path to a capstone. Along the way, the interactive <strong>Labs</strong> let you feel the concepts, and the study tools (spaced-repetition review, interview prep, the exam) turn understanding into recall you can defend. Budget roughly 6–12 months part-time for the whole thing, or go straight to the track you need once the core is solid.</p>
+
+<h2>6. How to stay valuable as the hardware races ahead</h2>
+<p>The field moves fast — new architectures yearly, new frameworks constantly. The way to not fall behind is the lesson of 0.5: master the <em>invariants</em>. The specific chip, the specific API, the specific model size will all change; the fundamentals — parallelism, latency hiding, the memory hierarchy, data movement as the true cost, matching work to hardware — will not. Engineers who chase every new tool exhaust themselves; engineers who own the fundamentals learn each new tool in days because it's the same ideas in new clothes. This course front-loads exactly those invariants on purpose. Add to them a habit of measuring (never guess where the time goes), a portfolio of real projects, and the ability to explain your reasoning clearly, and you have what the market actually pays for. That is the whole game, and you've just taken the first, most important step: understanding what a GPU is and why it exists.</p>
+
+<h2>Gotchas</h2>
+<div class="gotcha"><strong>Vendor lock-in by habit.</strong> Learning only CUDA syntax and assuming it's "how GPUs work" leaves you stranded when a project uses AMD or the browser. Learn the concepts (this course's approach); the syntax is a thin layer on top.</div>
+<div class="gotcha"><strong>Thinking you need expensive hardware to start.</strong> You don't. Free Colab, WebGPU in a browser, and cheap cloud rentals cover the whole course. The barrier to GPU skills is knowledge, not money.</div>
+<div class="gotcha"><strong>Chasing benchmark headlines.</strong> A GPU's top-line TFLOPS is nearly meaningless without memory capacity, bandwidth, precision, and cost context. Reason through the whole picture (the worked example), not the marketing number.</div>
+<div class="gotcha"><strong>Waiting to "pick a track" before starting.</strong> The core (Modules 1–5) serves all four tracks. Start now; your specialization will become obvious as you learn what excites you.</div>
+
+<h2>Scenario — the engineer who bet on fundamentals</h2>
+<p>Two people start learning GPU computing the same month. The first memorizes the latest NVIDIA chip's specs and a stack of CUDA idioms, and can quote benchmark numbers on demand. The second — following a path like this course — spends the time understanding <em>why</em> GPUs are shaped as they are: parallelism, latency hiding, the memory hierarchy, data movement, matching work to hardware. A year later, the project switches to AMD hardware for cost reasons, the framework of choice changes, and a new GPU generation lands with different specs. The first engineer is scrambling — most of what they memorized is now stale. The second adapts in a week: the vendor and syntax changed, but the fundamentals didn't, so the new tools are just the familiar ideas rearranged. When a hard performance bug appears, it's the second engineer who fixes it, because they reason from how the machine actually works rather than from memorized recipes. That is the entire bet of this course, and of Module 0 in particular: understanding beats memorization, invariants beat headlines, and the person who knows <em>why</em> will always outlast the person who only knows <em>what</em>. You've now built that understanding. The rest of the course turns it into a craft — go on to Module 1, and begin.</p>
+
+<h2>Practice</h2>
+<details><summary>1. Name the three major GPU vendors and their primary software stacks.</summary><div class="body">NVIDIA with <strong>CUDA</strong> (the dominant ecosystem), AMD with <strong>ROCm/HIP</strong> (open, CUDA-like), and Intel with <strong>oneAPI/SYCL</strong> (an open standard). Cross-vendor and portable options — OpenCL, SYCL, WebGPU, Triton — sit on top and let one codebase target multiple brands, which is the focus of Track D.</div></details>
+<details><summary>2. Give the course roadmap from Module 0 to job-ready in order.</summary><div class="body">Module 0 (the big picture — done) → the Core, Modules 1–5 (mathematics → Python programming → C and memory → how computers and GPUs work → CUDA fundamentals) → one of four Tracks (A ML/AI infra, B HPC/science, C graphics, D portable) → a capstone project and portfolio → job-ready GPU engineer. The core is shared across all tracks, so you don't need to choose a specialization until you reach it.</div></details>
+<details><summary>3. Why is it fair to say you can already reason about a "which GPU?" question after just Module 0?</summary><div class="body">Because the decision reduces to Module 0 fundamentals: does the model fit (memory capacity), can the GPU feed its cores (bandwidth, Lesson 0.3), how much compute at the precision you'll use (Lesson 0.5's precision formats), and what's the cost and power over the whole job (Lesson 0.4). You reason from how the machine works rather than memorizing product numbers — which is precisely the transferable skill the whole course builds, and why understanding, not memorization, is the goal.</div></details>
+<details><summary>4. You have only a laptop and no budget. Outline how you'd still complete the hands-on parts of this course.</summary><div class="body">Use free and low-cost access: run the browser-based Labs (which use WebGPU on your laptop's own GPU, no setup), use free <strong>Google Colab</strong> for the CUDA/Python exercises that need a GPU, and rent an inexpensive cloud GPU by the hour only for the few tasks that require more power. The course is designed around this reality — much of it needs no special hardware, and the Lab-setup page maps which exercises run where. GPU skills are gated by knowledge and effort, not by owning expensive hardware.</div></details>
+<details><summary>5. Reflection: write a short paragraph on what you now understand about GPUs that you didn't before Module 0, and what you're most curious to learn next.</summary><div class="body">A strong answer names the core mental model — a computer is a fetch-execute loop bottlenecked by memory (0.1); the CPU minimizes latency with a few clever cores (0.2) while the GPU maximizes throughput with thousands of simple ones that hide memory stalls (0.3); you choose between them by the shape of the work and respect Amdahl's ceiling and the copy cost (0.4); the GPU evolved from graphics to the engine of AI but its fundamentals never changed (0.5); and it lives in a multi-vendor landscape that your transferable skills span (0.6). What you're curious about next is personal — perhaps how a CUDA kernel is actually written, or how neural-network training really uses all this — and that curiosity is exactly what the core and tracks are built to satisfy. The point is that you now have a <em>framework</em> to hang every future detail on, which is the whole purpose of a "big picture" module.</div></details>
+
+<div class="pager">
+  <a href="lesson-05.html">← 0.5 How the GPU evolved</a>
+  <a href="../module-1/lesson-01.html">Next: Module 1 — Mathematical Foundations →</a>
+</div>
+<div class="footer">GPU Mastery · Module 0 · Lesson 6 — the big picture is complete · on to the core</div>
+</div>
+<script src="../assets/app.js"></script>
+</body>
+</html>
