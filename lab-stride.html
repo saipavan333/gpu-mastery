@@ -1,0 +1,234 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>The Stride Cliff — GPU Mastery Labs</title>
+<link rel="stylesheet" href="assets/style.css">
+<style>
+  .lab-card{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:20px 22px;margin:16px 0}
+  .lab-row{display:flex;flex-wrap:wrap;gap:14px;align-items:center;margin:10px 0}
+  .lab-row label{font-size:14px;color:var(--dim)}
+  .lab-row select{background:#10141d;color:var(--tx);border:1px solid var(--line);border-radius:6px;padding:7px 9px;font-size:14px}
+  .runbtn{background:var(--accBg);color:var(--accT);border:1px solid rgba(91,155,255,.4);border-radius:7px;padding:9px 18px;font-weight:600;cursor:pointer;font-size:14px}
+  .runbtn:hover{background:#1c2f52} .runbtn:disabled{opacity:.5;cursor:not-allowed}
+  #status{font-size:13.5px;margin:8px 0;min-height:20px}
+  .ok{color:var(--good)}.bad{color:var(--bad)}.warn{color:var(--warn)}
+  canvas{width:100%;max-width:680px;height:auto;background:#10141d;border:1px solid var(--line);border-radius:10px;display:block;margin:6px 0}
+  table.res{border-collapse:collapse;width:100%;max-width:680px;margin-top:10px;font-size:13.5px}
+  table.res th,table.res td{border:1px solid var(--line);padding:6px 10px;text-align:right}
+  table.res th{background:var(--card2);color:var(--accT);font-weight:700}
+  table.res td:first-child,table.res th:first-child{text-align:left}
+  .kv{font-variant-numeric:tabular-nums}
+  code.kern{display:block;background:#0b0e14;border:1px solid var(--line);border-radius:8px;padding:12px 14px;font-size:12.8px;overflow-x:auto;white-space:pre}
+  .verdict{font-size:15px;border-radius:10px;padding:12px 14px;margin-top:12px}
+  .verdict.good{background:var(--goodBg);border:1px solid rgba(54,201,138,.3)} .verdict.warn{background:var(--warnBg);border:1px solid rgba(245,184,80,.3)}
+</style>
+<!-- gm-seo:start -->
+<link rel="canonical" href="https://saipavan333.github.io/gpu-mastery/lab-stride.html">
+<link rel="manifest" href="https://saipavan333.github.io/gpu-mastery/manifest.webmanifest">
+<meta name="theme-color" content="#0b0e14">
+<link rel="apple-touch-icon" href="https://saipavan333.github.io/gpu-mastery/assets/img/favicon-180.png">
+<meta name="description" content="Lesson 5.7 claims that reading memory with a stride wrecks bandwidth, because the GPU fetches whole aligned sectors and a strided access wastes most of each…">
+<meta property="og:type" content="website">
+<meta property="og:site_name" content="GPU Mastery">
+<meta property="og:title" content="The Stride Cliff — GPU Mastery Labs">
+<meta property="og:description" content="Lesson 5.7 claims that reading memory with a stride wrecks bandwidth, because the GPU fetches whole aligned sectors and a strided access wastes most of each…">
+<meta property="og:url" content="https://saipavan333.github.io/gpu-mastery/lab-stride.html">
+<meta property="og:image" content="https://saipavan333.github.io/gpu-mastery/assets/img/og.png">
+<meta name="twitter:card" content="summary_large_image">
+<meta name="twitter:title" content="The Stride Cliff — GPU Mastery Labs">
+<meta name="twitter:description" content="Lesson 5.7 claims that reading memory with a stride wrecks bandwidth, because the GPU fetches whole aligned sectors and a strided access wastes most of each…">
+<meta name="twitter:image" content="https://saipavan333.github.io/gpu-mastery/assets/img/og.png">
+<!-- gm-seo:end -->
+</head>
+<body data-lesson="lab-stride">
+<nav><div class="inner">
+  <a class="logo" href="index.html">GPU<span>Mastery</span></a>
+  <a class="item" href="index.html">Home</a>
+  <a class="item" href="curriculum.html">Curriculum</a>
+  <a class="item on" href="labs.html">Labs</a>
+  <a class="item" href="setup.html">Lab setup</a>
+</div></nav>
+<div class="wrap">
+
+<div class="lesson-top">
+  <div><span class="badge">Interactive Lab</span><span class="badge dim">5.7 · coalescing</span><span class="badge dim">WebGPU · runs on your GPU</span></div>
+  <a class="badge good" href="labs.html">← all labs</a>
+</div>
+<h1>The Stride Cliff — coalescing, measured on your GPU</h1>
+<p class="lead">Lesson 5.7 claims that reading memory with a stride wrecks bandwidth, because the GPU fetches whole aligned <em>sectors</em> and a strided access wastes most of each one. This lab stops asserting it and <em>measures</em> it: the same kernel reads the same number of values from a big buffer, but with a growing stride between neighboring threads. Watch the achieved bandwidth fall off a cliff toward the <strong>1/8 floor</strong> that fp32's 32-byte sector predicts — on your own hardware.</p>
+
+<div class="lab-card">
+  <div class="lab-row">
+    <label>buffer size:
+      <select id="bufsz">
+        <option value="16777216" selected>64 MB (16M floats)</option>
+        <option value="8388608">32 MB (8M floats)</option>
+        <option value="33554432">128 MB (32M floats)</option>
+      </select>
+    </label>
+    <button class="runbtn" id="run">Run the stride sweep on GPU</button>
+  </div>
+  <div id="status">Checking for WebGPU&hellip;</div>
+  <canvas id="chart" width="680" height="360"></canvas>
+  <table class="res" id="restable" style="display:none">
+    <thead><tr><th>stride (floats)</th><th>bytes apart</th><th>achieved GB/s</th><th>% of peak (stride 1)</th></tr></thead>
+    <tbody id="rows"></tbody>
+  </table>
+  <div class="verdict" id="verdict" style="display:none"></div>
+</div>
+
+<h2>How to read it</h2>
+<p>Every bar reads exactly the same number of floats — only the <em>pattern</em> changes. At <strong>stride 1</strong>, neighboring threads read neighboring floats, so a warp's reads fall in a few consecutive 32-byte sectors and <em>coalesce</em>: almost every byte the memory system fetches is used, and you get close to peak bandwidth. As the stride grows, neighboring threads land in <em>different</em> sectors, so the hardware still fetches a full 32-byte sector but you use only 4 bytes of it (one fp32). Beyond a stride of 8 floats (32 bytes), essentially every access wastes 7/8 of its sector, and achieved bandwidth floors at roughly <strong>1/8 of peak</strong> — the executed cliff Lesson 5.7 predicts. (The exact floor and shape depend on your GPU's cache and sector policy; the trend is universal.)</p>
+<p>This is the single most valuable performance lesson in CUDA, and it is the direct GPU descendant of the CPU cache-line story from Lesson 0.2: on both machines, victory comes from marching through memory the way the hardware fetches it. The fix in real kernels is to arrange threads so consecutive lanes touch consecutive addresses — coalesced access — or to stage data through fast on-chip shared memory so the strided pattern is paid only once. Play with the <a href="lab-coalescing.html">Coalescing Visualizer</a> to see the sectors themselves, then come here to feel the bandwidth cost.</p>
+
+<h2>The kernel (WGSL)</h2>
+<p>One thread per element, each reading <code>K</code> values from the buffer <code>stride</code> floats apart, accumulating so the compiler can't delete the loads. Only <code>stride</code> changes between runs.</p>
+<code class="kern" id="wgsl-src"></code>
+
+<div class="footer">GPU Mastery · Labs · The Stride Cliff — works offline · needs a WebGPU browser (Chrome/Edge 113+, Firefox 141+, Safari 26+)</div>
+</div>
+
+<script>
+const K = 32;                 // reads per thread
+const T = 1 << 20;            // threads (1,048,576)
+const STRIDES = [1, 2, 4, 8, 16, 32, 64, 128];
+const WGSL = `
+struct P { T:u32, K:u32, stride:u32, bufN:u32 };
+@group(0) @binding(0) var<uniform> p: P;
+@group(0) @binding(1) var<storage, read>       src: array<f32>;
+@group(0) @binding(2) var<storage, read_write> dst: array<f32>;
+
+@compute @workgroup_size(256)
+fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
+  let i = gid.x;
+  if (i >= p.T) { return; }
+  var acc  = 0.0;
+  var idx  = (i * p.stride) % p.bufN;          // neighbouring threads start 'stride' apart
+  let step = (p.T * p.stride) % p.bufN;        // each thread's K reads spread across the buffer
+  for (var k: u32 = 0u; k < p.K; k = k + 1u) {
+    acc = acc + src[idx];                      // the load whose cost we are measuring
+    idx = idx + step;
+    if (idx >= p.bufN) { idx = idx - p.bufN; }
+  }
+  dst[i] = acc;
+}`;
+document.getElementById('wgsl-src').textContent = WGSL.trim();
+
+const $ = id => document.getElementById(id);
+const cv = $('chart'), ctx = cv.getContext('2d');
+const CC = { line:'#2a3245', tx:'#e8edf5', dim:'#7e8aa0', acc:'#5b9bff', good:'#36c98a', warn:'#f5b850', bad:'#ff6b6b' };
+const fmt = x => x.toLocaleString(undefined, { maximumFractionDigits: x < 10 ? 2 : 0 });
+
+function drawChart(results, peak){
+  const W = cv.width, H = cv.height;
+  ctx.clearRect(0,0,W,H);
+  ctx.font = '12px ui-monospace, monospace';
+  const x0 = 60, x1 = W-18, y0 = H-46, y1 = 30;
+  const maxBW = Math.max(peak, ...results.map(r=>r.bw)) * 1.08 || 1;
+  // y grid
+  ctx.strokeStyle = CC.line; ctx.fillStyle = CC.dim; ctx.lineWidth = 1;
+  for (let g=0; g<=4; g++){ const v = maxBW*g/4, y = y0-(y0-y1)*g/4; ctx.globalAlpha=.5; ctx.beginPath(); ctx.moveTo(x0,y); ctx.lineTo(x1,y); ctx.stroke(); ctx.globalAlpha=1; ctx.textAlign='right'; ctx.fillText(Math.round(v), x0-6, y+4); }
+  ctx.textAlign='center'; ctx.fillText('achieved bandwidth (GB/s) vs stride', W/2, y1-12);
+  // 1/8 floor line
+  const yf = y0 - (y0-y1)*(peak/8)/maxBW;
+  ctx.strokeStyle = CC.bad; ctx.setLineDash([5,4]); ctx.beginPath(); ctx.moveTo(x0,yf); ctx.lineTo(x1,yf); ctx.stroke(); ctx.setLineDash([]);
+  ctx.fillStyle = CC.bad; ctx.textAlign='left'; ctx.fillText('1/8 of peak (fp32 sector floor)', x0+6, yf-5);
+  // bars
+  const n = results.length, bw = (x1-x0)/n, pad = bw*0.22;
+  for (let i=0;i<n;i++){
+    const r = results[i], x = x0 + i*bw + pad, w = bw - pad*2;
+    const h = (y0-y1) * (r.bw/maxBW), y = y0 - h;
+    const frac = r.bw/peak;
+    ctx.fillStyle = frac>0.7 ? CC.good : frac>0.25 ? CC.warn : CC.bad;
+    ctx.fillRect(x, y, w, h);
+    ctx.fillStyle = CC.tx; ctx.textAlign='center'; ctx.fillText(fmt(r.bw), x+w/2, y-6);
+    ctx.fillStyle = CC.dim; ctx.fillText(String(r.stride), x+w/2, y0+16);
+  }
+  ctx.fillStyle = CC.dim; ctx.textAlign='center'; ctx.fillText('stride (floats between neighbouring threads)', W/2, H-8);
+}
+
+async function timePass(device, pipeline, bind, groups, canTime){
+  let querySet, tsResolve, tsRead;
+  const enc = device.createCommandEncoder();
+  const passDesc = {};
+  if (canTime){
+    querySet = device.createQuerySet({ type:'timestamp', count:2 });
+    tsResolve = device.createBuffer({ size:16, usage: GPUBufferUsage.QUERY_RESOLVE | GPUBufferUsage.COPY_SRC });
+    tsRead    = device.createBuffer({ size:16, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ });
+    passDesc.timestampWrites = { querySet, beginningOfPassWriteIndex:0, endOfPassWriteIndex:1 };
+  }
+  const pass = enc.beginComputePass(passDesc);
+  pass.setPipeline(pipeline); pass.setBindGroup(0, bind); pass.dispatchWorkgroups(groups); pass.end();
+  if (canTime){ enc.resolveQuerySet(querySet,0,2,tsResolve,0); enc.copyBufferToBuffer(tsResolve,0,tsRead,0,16); }
+  const t0 = performance.now();
+  device.queue.submit([enc.finish()]);
+  await device.queue.onSubmittedWorkDone();
+  const wall = performance.now() - t0;
+  if (canTime){
+    await tsRead.mapAsync(GPUMapMode.READ);
+    const t = new BigUint64Array(tsRead.getMappedRange().slice(0)); tsRead.unmap();
+    const ns = Number(t[1]-t[0]);
+    if (ns > 0) return ns/1e6;   // ms, real GPU time
+  }
+  return wall;                   // ms wall-clock fallback (includes submit overhead)
+}
+
+async function main(){
+  const status = $('status');
+  if (!('gpu' in navigator)){
+    status.innerHTML = '<span class="bad">WebGPU not available.</span> Use Chrome/Edge 113+, Firefox 141+, or Safari 26+ (see the footer). The WGSL below still shows the experiment.';
+    $('run').disabled = true; return;
+  }
+  let adapter; try { adapter = await navigator.gpu.requestAdapter(); } catch(e){ adapter=null; }
+  if (!adapter){ status.innerHTML = '<span class="bad">No GPU adapter granted.</span>'; $('run').disabled=true; return; }
+  const canTime = adapter.features.has('timestamp-query');
+  const device = await adapter.requestDevice({ requiredFeatures: canTime ? ['timestamp-query'] : [] });
+  const info = adapter.info || {};
+  status.innerHTML = '<span class="ok">WebGPU ready.</span> ' + ([info.vendor, info.architecture].filter(Boolean).join(' ') || 'adapter acquired') + (canTime ? ' · GPU-timed.' : ' · wall-clock timed (no timestamp-query).');
+  const module = device.createShaderModule({ code: WGSL });
+  const pipeline = device.createComputePipeline({ layout:'auto', compute:{ module, entryPoint:'main' } });
+
+  $('run').onclick = async () => {
+    $('run').disabled = true; status.innerHTML = 'Running the stride sweep&hellip;';
+    try {
+      const bufN = parseInt($('bufsz').value);
+      const src = device.createBuffer({ size: bufN*4, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST });
+      // fill with small values (a tiny tile uploaded repeatedly keeps upload cheap; values don't affect timing)
+      const tile = new Float32Array(1<<20); for (let i=0;i<tile.length;i++) tile[i] = (i%7)*0.5;
+      for (let off=0; off<bufN; off+=tile.length) device.queue.writeBuffer(src, off*4, tile, 0, Math.min(tile.length, bufN-off));
+      const dst = device.createBuffer({ size: T*4, usage: GPUBufferUsage.STORAGE });
+      const uni = device.createBuffer({ size: 16, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
+      const bind = device.createBindGroup({ layout: pipeline.getBindGroupLayout(0), entries:[
+        { binding:0, resource:{ buffer:uni } }, { binding:1, resource:{ buffer:src } }, { binding:2, resource:{ buffer:dst } } ]});
+      const groups = Math.ceil(T/256), usefulBytes = T*K*4;
+      const results = [];
+      for (const stride of STRIDES){
+        device.queue.writeBuffer(uni, 0, new Uint32Array([T, K, stride, bufN]));
+        await timePass(device, pipeline, bind, groups, canTime);            // warm-up
+        let best = Infinity;
+        for (let r=0;r<4;r++){ const ms = await timePass(device, pipeline, bind, groups, canTime); if (ms>0 && ms<best) best=ms; }
+        const bw = usefulBytes / (best/1000) / 1e9;                          // GB/s of USEFUL data
+        results.push({ stride, bw });
+        status.innerHTML = 'Running&hellip; stride ' + stride + ' → ' + fmt(bw) + ' GB/s';
+      }
+      const peak = results[0].bw;
+      drawChart(results, peak);
+      $('rows').innerHTML = results.map(r => '<tr><td>'+r.stride+'</td><td>'+(r.stride*4)+' B</td><td class="kv">'+fmt(r.bw)+'</td><td class="kv">'+(r.bw/peak*100).toFixed(0)+'%</td></tr>').join('');
+      $('restable').style.display = '';
+      const floorPct = results[results.length-1].bw/peak*100;
+      const v = $('verdict'); v.style.display='';
+      v.className = 'verdict ' + (floorPct < 40 ? 'good' : 'warn');
+      v.innerHTML = '<b>Peak (stride 1): '+fmt(peak)+' GB/s.</b> At stride '+results[results.length-1].stride+' it fell to <b>'+floorPct.toFixed(0)+'% of peak</b>' +
+        (floorPct < 40 ? ' — the coalescing cliff, right where Lesson 5.7 says it should be (near the 1/8 = 12.5% fp32 floor). Same bytes read; only the access pattern changed.' :
+                         ' — a real drop, though your GPU\'s caches softened it. The trend is the point: strided access wastes the sectors the hardware fetches.');
+    } catch(e){
+      status.innerHTML = '<span class="bad">Error:</span> ' + e.message; console.error(e);
+    } finally { $('run').disabled = false; }
+  };
+}
+main();
+</script>
+<script src="assets/app.js"></script>
+</body>
+</html>
