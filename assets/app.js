@@ -131,7 +131,26 @@
     if (rel) store.set("lastLesson", { rel: rel, title: title, at: Date.now() });
   }
 
+  /* ---- a11y: name interactive canvases; keep widget mini-labels out of the heading tree ---- */
+  function a11yPass() {
+    // A <canvas> exposes nothing to a screen reader — give each interactive one an accessible name.
+    var cvs = document.querySelectorAll("canvas");
+    for (var i = 0; i < cvs.length; i++) {
+      var c = cvs[i];
+      if (c.id === "gm-backdrop") continue;                                        // decorative (aria-hidden set at source)
+      if (c.getAttribute("aria-label") || c.getAttribute("aria-hidden")) continue; // e.g. the home hero already has a label
+      var h1 = document.querySelector(".wrap h1, #gm-main h1, h1");
+      var name = (h1 && h1.textContent ? h1.textContent.trim() : "Interactive visualization");
+      c.setAttribute("role", "img");
+      c.setAttribute("aria-label", name + " — interactive visualization; use the controls and the text summary below it to read its current state.");
+    }
+    // Stat/tally mini-labels are visual labels, not document sections: demote them so they don't
+    // create an h1 -> h4 heading jump when navigating by headings.
+    var mini = document.querySelectorAll(".tcell h3, .tcell h4, .tcell h5");
+    for (var j = 0; j < mini.length; j++) mini[j].setAttribute("role", "presentation");
+  }
+
   document.addEventListener("DOMContentLoaded", function () {
-    injectDiagrams(); wireQuizzes(); wireDone(); paintProgress(); wireCopy(); recordLastLesson();
+    injectDiagrams(); wireQuizzes(); wireDone(); paintProgress(); wireCopy(); recordLastLesson(); a11yPass();
   });
 })();

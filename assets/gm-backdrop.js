@@ -115,6 +115,8 @@
 
   // Success — now (and only now) commit the DOM + style so a failure never regresses the bg.
   canvas.id = "gm-backdrop";
+  canvas.setAttribute("aria-hidden", "true");   // purely decorative ambient layer — hide from assistive tech
+  canvas.setAttribute("role", "presentation");
   var scrim = document.createElement("div"); scrim.id = "gm-backdrop-scrim";
   var st = document.createElement("style"); st.id = "gm-backdrop-style";
   st.textContent =

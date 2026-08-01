@@ -691,3 +691,23 @@ pager in each source lesson, linking the lab(s) that make its concept interactiv
 - B4 Monte Carlo → lab-montecarlo · C6 Lighting/PBR → lab-pbr
 11 lessons edited, no literal $, QA ALL CLEAN, SW cache v22. Labs are now discoverable in
 context, not just from the hub — closing the content↔lab loop.
+
+## Whole-site accessibility / reduced-motion polish pass (audited live, then fixed)
+Audited deployed home + a lesson + a lab via Chrome. Clean already: lang=en, one h1 on
+labs, skip link + main landmark present, lesson SVG diagrams carry role="img"/title,
+home hero canvas already role="img"+aria-label, images have alt. Reduced-motion already
+respected (backdrop draws one static frame then returns, new labs guarded).
+Three real gaps found and fixed single-source:
+- **Backdrop canvas** had no accessible treatment → gm-backdrop.js now sets aria-hidden=
+  "true" + role="presentation" on the decorative layer (every page, one edit).
+- **Lab <canvas> had no accessible name** (screen readers get nothing from a canvas) →
+  app.js a11yPass() gives every non-decorative canvas role="img" + an aria-label derived
+  from the page h1 (covers all ~14 lab canvases, one edit). Hero already-labeled is skipped.
+- **Tally/stat mini-labels used <h4>**, causing an h1→h4 heading jump on lab pages →
+  a11yPass() marks .tcell h3/h4/h5 role="presentation" so they leave the heading tree.
+Proven live by running the exact pass on lab-reduction: stage canvas → role=img + label,
+backdrop → aria-hidden, tally demoted, and heading-skip list becomes [] after the fix.
+Two-h1-per-lesson (Concept + Go deeper) left as-is: intentional two-layer design, allowed
+in HTML5 sectioning, not worth rewriting 84 lessons. Mobile layout is responsive by
+construction but still wants a real-device/emulation check (couldn't force a narrow
+viewport in this environment). SW cache v23. QA ALL CLEAN.
