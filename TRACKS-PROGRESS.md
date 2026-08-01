@@ -589,3 +589,27 @@ remains deferred by the owner's explicit "build product, defer selling" decision
   2 diagrams; Amdahl lab renders with correct numbers (8.48×, ceiling 10×); Module 2
   shows 3 runnable Python cells; zero console errors. Both new labs wired into labs.html
   + search + SEO (113 sitemap urls); SW cache v17.
+
+## All-Reduce Visualizer (lab-allreduce.html) — the multi-GPU communication lab
+
+- **lab-allreduce.html — The All-Reduce Visualizer (Track A distributed + Track B MPI).**
+  Fills the last "coming" track-visualizer gap and teaches the single most important
+  multi-GPU concept: how gradients are summed across GPUs. Animated ring of N GPUs
+  (2–8); toggle **ring all-reduce** vs **parameter server**; Play/Step/Reset; live
+  byte tally + verdict. Ring: reduce-scatter (N-1 steps) then all-gather (N-1 steps),
+  each moving one D/N chunk → 2(N-1)/N·D per GPU, balanced on every link, → 2D as N
+  grows. Parameter server: root link carries (N-1)·D each way = N/2× the ring's per-GPU
+  load (the hotspot). Both compute the identical sum; only the traffic pattern differs.
+- **Verification (verify_allreduce.js):** re-derived the schedule independently — ring
+  produces the EXACT element-wise sum on every GPU for N=2..8; per-GPU traffic ==
+  2(N-1)/N·D to 1e-12; PS root == (N-1)·D; ratio == N/2. The lab embeds this exact
+  reduce-scatter/all-gather indexing.
+- **Runtime verification (DOM/canvas shim, harness.js + harness2.js):** drove the real
+  page script through a full Play in BOTH modes for every N=2..8 plus the reduced-motion
+  path — zero exceptions, all reach "Complete", and displayed numbers match (N=8,D=400 →
+  PS root 2.73 GB = 7×400, ring 700 MB = 1.75×400).
+- Auto-indexed by build-seo (canonical + sitemap, 114 urls) and build-index (search).
+  Wired into labs.html "Go deeper" grid (first card). SW cache v18. QA: ALL CLEAN ✓.
+- Prose has NO literal $ (uses <code>2(N-1)/N · D</code>), American English, reduced-motion
+  guard (no auto token animation; steps still work), canvas sized to grow radius with N so
+  cards never collide.

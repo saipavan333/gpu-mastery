@@ -66,6 +66,7 @@
 <h2>Go deeper on your track — visualizers</h2>
 <p class="dim" style="margin-top:0">A specialization's central idea, made interactive. No GPU needed — just the concept, live.</p>
 <div class="grid">
+  <a class="labcard" href="lab-allreduce.html"><h3>All-Reduce Visualizer →</h3><p>Step a gradient around a ring of GPUs and watch ring all-reduce move a balanced 2(N&minus;1)/N&middot;D per GPU while a parameter server chokes one link. The operation at the heart of multi-GPU training.</p><span class="tag">Track A &middot; B &middot; distributed</span></a>
   <a class="labcard" href="lab-softmax.html"><h3>Softmax Stability Explorer →</h3><p>Type in logits and watch naive softmax overflow to NaN while the stable max-subtraction version — the trick behind FlashAttention — stays exact.</p><span class="tag">Track A · ML</span></a>
   <a class="labcard" href="lab-montecarlo.html"><h3>Monte Carlo Convergence Lab →</h3><p>Throw random points, watch &pi; emerge, and watch the error track the 1/&radic;N law exactly — the idea behind every Monte Carlo method in HPC.</p><span class="tag">Track B · HPC</span></a>
   <a class="labcard" href="lab-pbr.html"><h3>PBR Material Explorer →</h3><p>A live Cook-Torrance BRDF, shaded per pixel in your browser. Dial roughness, metallic, and light position and watch a real material respond.</p><span class="tag">Track C · Graphics</span></a>
@@ -82,7 +83,7 @@
   <a class="labcard" href="concept-map.html"><h3>Concept Map →</h3><p>The whole curriculum as one interactive dependency map — the core path, then the four tracks, every lesson a click away.</p><span class="tag">interactive</span></a>
 </div>
 
-<p class="dim" style="margin-top:24px">More on the way: additional track visualizers (ML mixed-precision/attention, HPC MPI patterns). This page grows as the labs land.</p>
+<p class="dim" style="margin-top:24px">More on the way: additional track visualizers (ML mixed-precision, attention tiling). This page grows as the labs land.</p>
 
 <div class="footer">GPU Mastery · Interactive Labs — works offline</div>
 </div>

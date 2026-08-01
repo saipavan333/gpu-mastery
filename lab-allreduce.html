@@ -1,0 +1,358 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>The All-Reduce Visualizer — GPU Mastery Labs</title>
+<link rel="stylesheet" href="assets/style.css">
+<style>
+  .lab-card{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:18px 20px;margin:16px 0}
+  .lab-row{display:flex;flex-wrap:wrap;gap:16px;align-items:center;margin:6px 0 12px}
+  .lab-row label{font-size:13.5px;color:var(--dim);display:flex;align-items:center;gap:8px}
+  .lab-row input[type=range]{vertical-align:middle}
+  .lab-row select{background:#10141d;color:var(--tx);border:1px solid var(--line);border-radius:6px;padding:6px 8px;font-size:13.5px}
+  .seg{display:inline-flex;border:1px solid var(--line);border-radius:8px;overflow:hidden}
+  .seg button{background:var(--card2);color:var(--dim);border:0;padding:7px 13px;font-size:13.5px;cursor:pointer}
+  .seg button.on{background:var(--accBg);color:var(--accT);font-weight:600}
+  .btns{display:flex;gap:8px;flex-wrap:wrap}
+  .runbtn{background:var(--accBg);color:var(--accT);border:1px solid rgba(91,155,255,.4);border-radius:7px;padding:8px 15px;font-weight:600;cursor:pointer;font-size:13.5px}
+  .runbtn:hover{background:#1c2f52} .runbtn.ghost{background:transparent;color:var(--dim);border-color:var(--line)}
+  canvas{width:100%;max-width:780px;height:auto;background:#0d1119;border:1px solid var(--line);border-radius:10px;display:block;margin:8px 0}
+  #readout{font-size:13.5px;font-family:var(--mono);color:var(--dim);min-height:20px;margin:6px 0}
+  #readout b{color:var(--tx)}
+  .tally{display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-top:10px}
+  @media (max-width:560px){ .tally{grid-template-columns:1fr} }
+  .tcell{background:var(--card2);border:1px solid var(--line);border-radius:9px;padding:11px 13px}
+  .tcell h4{margin:0 0 3px;font-size:12px;text-transform:uppercase;letter-spacing:.04em;color:var(--dim2);font-family:var(--mono)}
+  .tcell .big{font-size:20px;font-weight:700;font-variant-numeric:tabular-nums}
+  .tcell .sub{font-size:12px;color:var(--dim);margin-top:2px}
+  .ring .big{color:var(--acc2)} .ps .big{color:var(--warn)}
+  .verdict{font-size:14.5px;border-radius:10px;padding:12px 14px;margin-top:14px;background:var(--goodBg);border:1px solid rgba(54,201,138,.3)}
+  .verdict b{color:var(--ink)}
+</style>
+<!-- gm-seo:start -->
+<link rel="canonical" href="https://saipavan333.github.io/gpu-mastery/lab-allreduce.html">
+<link rel="manifest" href="https://saipavan333.github.io/gpu-mastery/manifest.webmanifest">
+<meta name="theme-color" content="#0b0e14">
+<link rel="apple-touch-icon" href="https://saipavan333.github.io/gpu-mastery/assets/img/favicon-180.png">
+<meta name="description" content="Training on many GPUs means every GPU computes a gradient on its own slice of the batch, and then all of them must agree on the sum before the next step.…">
+<meta property="og:type" content="website">
+<meta property="og:site_name" content="GPU Mastery">
+<meta property="og:title" content="The All-Reduce Visualizer — GPU Mastery Labs">
+<meta property="og:description" content="Training on many GPUs means every GPU computes a gradient on its own slice of the batch, and then all of them must agree on the sum before the next step.…">
+<meta property="og:url" content="https://saipavan333.github.io/gpu-mastery/lab-allreduce.html">
+<meta property="og:image" content="https://saipavan333.github.io/gpu-mastery/assets/img/og.png">
+<meta name="twitter:card" content="summary_large_image">
+<meta name="twitter:title" content="The All-Reduce Visualizer — GPU Mastery Labs">
+<meta name="twitter:description" content="Training on many GPUs means every GPU computes a gradient on its own slice of the batch, and then all of them must agree on the sum before the next step.…">
+<meta name="twitter:image" content="https://saipavan333.github.io/gpu-mastery/assets/img/og.png">
+<!-- gm-seo:end -->
+</head>
+<body data-lesson="lab-allreduce">
+<nav><div class="inner">
+  <a class="logo" href="index.html">GPU<span>Mastery</span></a>
+  <a class="item" href="index.html">Home</a>
+  <a class="item" href="curriculum.html">Curriculum</a>
+  <a class="item on" href="labs.html">Labs</a>
+  <a class="item" href="setup.html">Lab setup</a>
+</div></nav>
+<div class="wrap">
+
+<div class="lesson-top">
+  <div><span class="badge">Interactive Lab</span><span class="badge dim">Track A · distributed training</span><span class="badge dim">Track B · MPI collectives</span></div>
+  <a class="badge good" href="labs.html">← all labs</a>
+</div>
+<h1>The All-Reduce Visualizer</h1>
+<p class="lead">Training on many GPUs means every GPU computes a gradient on its own slice of the batch, and then <em>all</em> of them must agree on the sum before the next step. That operation is called an <strong>all-reduce</strong>, and how you do it decides whether adding GPUs makes training faster or just moves the bottleneck around. Step through the two classic approaches on a ring of GPUs and watch where the bytes actually go.</p>
+
+<div class="lab-card">
+  <div class="lab-row">
+    <label>GPUs (N): <input type="range" id="n" min="2" max="8" value="4" step="1"><b id="nval" style="color:var(--tx);font-family:var(--mono)">4</b></label>
+    <label>gradient size (D):
+      <select id="dsz">
+        <option value="100">100 MB</option>
+        <option value="400" selected>400 MB</option>
+        <option value="1400">1.4 GB</option>
+      </select>
+    </label>
+    <span class="seg" id="mode">
+      <button data-m="ring" class="on">Ring all-reduce</button>
+      <button data-m="ps">Parameter server</button>
+    </span>
+  </div>
+  <div class="btns">
+    <button class="runbtn" id="play">▶ Play</button>
+    <button class="runbtn ghost" id="step">Step ›</button>
+    <button class="runbtn ghost" id="reset">⟲ Reset</button>
+  </div>
+  <div id="readout">&nbsp;</div>
+  <canvas id="stage" width="780" height="560"></canvas>
+  <div class="tally">
+    <div class="tcell ring"><h4>Ring · per GPU</h4><div class="big" id="ringVal">—</div><div class="sub" id="ringSub">2(N−1)/N · D, balanced across all links</div></div>
+    <div class="tcell ps"><h4>Parameter server · root link</h4><div class="big" id="psVal">—</div><div class="sub" id="psSub">(N−1) · D each way — the hotspot</div></div>
+  </div>
+  <div class="verdict" id="verdict"></div>
+</div>
+
+<h2>How to read it</h2>
+<p>Every GPU starts with its own full gradient. In the <strong>ring</strong>, the gradient is cut into <code>N</code> chunks, and the work happens in two laps around the ring. In the first lap — <em>reduce-scatter</em> — each GPU sends one chunk to its right neighbor and adds the chunk it receives from the left, every step, for <code>N−1</code> steps. When the lap finishes, each GPU owns exactly one chunk that is the complete sum across all GPUs (watch a single cell in each node climb to <code>N</code> contributors and turn green). The second lap — <em>all-gather</em> — passes those finished chunks around the ring so everyone ends up with all of them. Two laps of <code>N−1</code> steps, each step moving one chunk of size <code>D/N</code>, so every GPU moves exactly <code>2(N−1)/N · D</code> bytes — and crucially, <em>every link carries the same load</em>. There is no hotspot.</p>
+<p>The <strong>parameter server</strong> is the obvious first idea and the reason people move away from it. Every worker sends its whole gradient to one central server, the server adds them and sends the result back to everyone. Simple — but the server's single link has to carry <code>(N−1) · D</code> bytes inbound and another <code>(N−1) · D</code> outbound, while each worker only moves <code>2D</code>. Add GPUs and the ring's per-GPU cost barely changes (it climbs from <code>D</code> toward <code>2D</code> and stops), but the server's link cost grows without limit. At <code>N</code> GPUs the server bottleneck is <code>N/2×</code> the ring's per-GPU traffic. That single fact — <code>2(N−1)/N · D</code>, independent of <code>N</code>, balanced everywhere — is why <strong>NCCL</strong>, PyTorch <code>DistributedDataParallel</code>, and Horovod all use ring/tree all-reduce, and why <code>MPI_Allreduce</code> (Track B) is built the same way. Both approaches compute the identical sum; only the traffic pattern differs.</p>
+<p>This is the multi-GPU echo of a single-GPU lesson: performance at scale is a <em>communication</em> problem, not a compute one. The gradient sum is cheap arithmetic; the whole game is moving bytes without creating a chokepoint — the same roofline instinct from Lesson 4.7, now between GPUs instead of between an SM and its memory. Track A's Lesson A8 uses the <code>2(N−1)/N</code> term to size real training runs; this lab is where you can feel why it holds.</p>
+
+<div class="footer">GPU Mastery · Labs · The All-Reduce Visualizer — works offline</div>
+</div>
+
+<script>
+(function(){
+  var $ = function(id){ return document.getElementById(id); };
+  var cv = $('stage'), ctx = cv.getContext('2d');
+  var W = cv.width, H = cv.height;
+  var reduceMotion = matchMedia('(prefers-reduced-motion: reduce)').matches;
+
+  // palette (canvas can't read CSS vars) — matched to the site theme
+  var C = { bg:'#0d1119', node:'#141a26', nodeLine:'#2a3550', txt:'#e8ecf3', dim:'#8a93a6',
+            acc:'#5b9bff', green:'#35c98a', greenDim:'#1f6f4f', warn:'#f5b850', warnDim:'#7a5a1e',
+            edge:'#33405c', hot:'#f5b850', server:'#1c2338' };
+
+  var N = 4, Dmb = 400, mode = 'ring';
+  var count, complete, gstep, TOTAL, busy = false, playing = false;
+
+  function initState(){
+    count = []; complete = [];
+    for (var g=0; g<N; g++){ count.push(new Array(N).fill(1)); complete.push(new Array(N).fill(false)); }
+    gstep = 0;
+    TOTAL = (mode === 'ring') ? 2*(N-1) : 2;
+  }
+
+  // ---- ring schedule (mirrors the Node-verified derivation) ----
+  var RS = function(){ return N-1; };
+  function ringEdges(s){
+    var es = [], g, c;
+    if (s < RS()){
+      for (g=0; g<N; g++){ c = ((g - s) % N + N) % N; es.push({from:g, to:(g+1)%N, chunk:c, kind:'rs'}); }
+    } else {
+      var a = s - RS();
+      for (g=0; g<N; g++){ c = ((g + 1 - a) % N + N) % N; es.push({from:g, to:(g+1)%N, chunk:c, kind:'ag'}); }
+    }
+    return es;
+  }
+  function commitRing(s){
+    var es = ringEdges(s), i, g, c;
+    if (s < RS()){
+      var adds = es.map(function(e){ return [e.to, e.chunk, count[e.from][e.chunk]]; });
+      for (i=0;i<adds.length;i++){ var t=adds[i][0], k=adds[i][1], v=adds[i][2]; count[t][k]=Math.min(N, count[t][k]+v); }
+      if (s === RS()-1){ for (g=0; g<N; g++){ c=(g+1)%N; complete[g][c]=true; count[g][c]=N; } }
+    } else {
+      for (i=0;i<es.length;i++){ complete[es[i].to][es[i].chunk]=true; count[es[i].to][es[i].chunk]=N; }
+    }
+  }
+
+  // ---- geometry ----
+  function nodePositions(){
+    var cx = W/2, cy = H/2 - 6;
+    var R = 150 + (N-2)*10;                 // grow radius with N so cards never collide
+    var pos = [];
+    for (var g=0; g<N; g++){
+      var ang = -Math.PI/2 + g*2*Math.PI/N; // GPU 0 at top, clockwise
+      pos.push({ x: cx + R*Math.cos(ang), y: cy + R*Math.sin(ang), ang:ang });
+    }
+    return { pos:pos, cx:cx, cy:cy, R:R };
+  }
+
+  function rr(x,y,w,h,r){ ctx.beginPath(); ctx.moveTo(x+r,y); ctx.arcTo(x+w,y,x+w,y+h,r); ctx.arcTo(x+w,y+h,x,y+h,r); ctx.arcTo(x,y+h,x,y,r); ctx.arcTo(x,y,x+w,y,r); ctx.closePath(); }
+
+  function arrow(x1,y1,x2,y2,col,wdt){
+    ctx.strokeStyle=col; ctx.fillStyle=col; ctx.lineWidth=wdt||2;
+    ctx.beginPath(); ctx.moveTo(x1,y1); ctx.lineTo(x2,y2); ctx.stroke();
+    var a=Math.atan2(y2-y1,x2-x1), h=8;
+    ctx.beginPath(); ctx.moveTo(x2,y2);
+    ctx.lineTo(x2-h*Math.cos(a-0.4), y2-h*Math.sin(a-0.4));
+    ctx.lineTo(x2-h*Math.cos(a+0.4), y2-h*Math.sin(a+0.4));
+    ctx.closePath(); ctx.fill();
+  }
+
+  function lerp(a,b,t){ return a+(b-a)*t; }
+
+  // draw one GPU card with its chunk strip
+  function drawNode(p, g){
+    var cell = 13, gap = 2, sw = N*cell + (N-1)*gap, cardW = Math.max(sw+18, 62), cardH = 46;
+    var x = p.x - cardW/2, y = p.y - cardH/2;
+    ctx.save();
+    rr(x,y,cardW,cardH,9); ctx.fillStyle=C.node; ctx.fill(); ctx.strokeStyle=C.nodeLine; ctx.lineWidth=1.5; ctx.stroke();
+    ctx.fillStyle=C.dim; ctx.font='600 11px ui-monospace,Menlo,monospace'; ctx.textAlign='center'; ctx.textBaseline='top';
+    ctx.fillText('GPU '+g, p.x, y+5);
+    // chunk strip
+    var sx = p.x - sw/2, sy = y+20;
+    for (var c=0;c<N;c++){
+      var cx0 = sx + c*(cell+gap);
+      var frac = count[g][c]/N;
+      var done = complete[g][c];
+      rr(cx0, sy, cell, cell, 3);
+      if (done){ ctx.fillStyle=C.green; }
+      else { ctx.fillStyle = mix(C.node, C.acc, frac*0.85); }
+      ctx.fill();
+      ctx.strokeStyle=C.nodeLine; ctx.lineWidth=1; ctx.stroke();
+      ctx.fillStyle = done ? '#06210f' : (frac>0.4?'#0d1119':C.dim);
+      ctx.font='600 8.5px ui-monospace,monospace'; ctx.textBaseline='middle';
+      ctx.fillText(String(count[g][c]), cx0+cell/2, sy+cell/2+0.5);
+    }
+    ctx.restore();
+    return {cardW:cardW, cardH:cardH};
+  }
+
+  function mix(a,b,t){
+    function h2(s){ return [parseInt(s.substr(1,2),16),parseInt(s.substr(3,2),16),parseInt(s.substr(5,2),16)]; }
+    var A=h2(a), B=h2(b);
+    var r=Math.round(lerp(A[0],B[0],t)), g=Math.round(lerp(A[1],B[1],t)), bl=Math.round(lerp(A[2],B[2],t));
+    return 'rgb('+r+','+g+','+bl+')';
+  }
+
+  // token position along an edge for animation t in [0,1]
+  function drawToken(p1,p2,t,label){
+    // shrink endpoints to card edges
+    var x1=lerp(p1.x,p2.x,0.16), y1=lerp(p1.y,p2.y,0.16), x2=lerp(p1.x,p2.x,0.84), y2=lerp(p1.y,p2.y,0.84);
+    var tx=lerp(x1,x2,t), ty=lerp(y1,y2,t);
+    ctx.beginPath(); ctx.arc(tx,ty,9,0,7); ctx.fillStyle=C.acc; ctx.fill();
+    ctx.fillStyle='#08101f'; ctx.font='700 10px ui-monospace,monospace'; ctx.textAlign='center'; ctx.textBaseline='middle';
+    ctx.fillText(String(label), tx, ty+0.5);
+  }
+
+  function drawRing(animT, edges){
+    var G = nodePositions(), pos = G.pos, i;
+    ctx.clearRect(0,0,W,H); ctx.fillStyle=C.bg; ctx.fillRect(0,0,W,H);
+    // ring edges (dim arcs) between neighbors
+    for (i=0;i<N;i++){
+      var a=pos[i], b=pos[(i+1)%N];
+      var x1=lerp(a.x,b.x,0.18), y1=lerp(a.y,b.y,0.18), x2=lerp(b.x,a.x,0.18), y2=lerp(b.y,a.y,0.18);
+      arrow(x1,y1,x2,y2,C.edge,2);
+    }
+    // active edges highlighted
+    if (edges){ for (i=0;i<edges.length;i++){ var e=edges[i], a=pos[e.from], b=pos[e.to];
+      var x1=lerp(a.x,b.x,0.18), y1=lerp(a.y,b.y,0.18), x2=lerp(b.x,a.x,0.18), y2=lerp(b.y,a.y,0.18);
+      arrow(x1,y1,x2,y2, e.kind==='ag'?C.green:C.acc, 3);
+    } }
+    // nodes
+    for (i=0;i<N;i++) drawNode(pos[i], i);
+    // tokens
+    if (edges && animT!==null){ for (i=0;i<edges.length;i++){ var e=edges[i]; drawToken(pos[e.from],pos[e.to],animT,'c'+e.chunk); } }
+    // center caption
+    ctx.fillStyle=C.dim; ctx.font='600 12px ui-monospace,monospace'; ctx.textAlign='center'; ctx.textBaseline='middle';
+    var cap = gstep>=TOTAL ? 'done — every GPU has the full sum' :
+              (gstep<RS() ? 'reduce-scatter '+(gstep+1)+' / '+RS() : 'all-gather '+(gstep-RS()+1)+' / '+RS());
+    ctx.fillText(cap, G.cx, G.cy);
+  }
+
+  function drawPS(animT){
+    ctx.clearRect(0,0,W,H); ctx.fillStyle=C.bg; ctx.fillRect(0,0,W,H);
+    var cx=W/2, cy=H/2-6, R=150+(N-2)*10;
+    var pos=[]; for (var g=0;g<N;g++){ var ang=-Math.PI/2+g*2*Math.PI/N; pos.push({x:cx+R*Math.cos(ang),y:cy+R*Math.sin(ang)}); }
+    var gathering = gstep<1;                       // phase 0 = gather, phase 1 = broadcast
+    var active = gstep<TOTAL;
+    // spokes
+    for (var i=0;i<N;i++){
+      var p=pos[i];
+      var x1,y1,x2,y2,col;
+      if (gathering){ x1=lerp(p.x,cx,0.14); y1=lerp(p.y,cy,0.14); x2=lerp(cx,p.x,0.16); y2=lerp(cy,p.y,0.16);
+        // worker -> server
+        arrow(lerp(p.x,cx,0.14),lerp(p.y,cy,0.14),lerp(cx,p.x,0.20),lerp(cy,p.y,0.20), active?C.hot:C.edge, 3);
+      } else {
+        arrow(lerp(cx,p.x,0.20),lerp(cy,p.y,0.20),lerp(p.x,cx,0.14),lerp(p.y,cy,0.14), active?C.hot:C.edge, 3);
+      }
+    }
+    // tokens
+    if (active && animT!==null){ for (i=0;i<N;i++){ var p=pos[i];
+      var from = gathering?p:{x:cx,y:cy}, to = gathering?{x:cx,y:cy}:p;
+      var tx=lerp(lerp(from.x,to.x,0.16),lerp(from.x,to.x,0.84),animT);
+      var ty=lerp(lerp(from.y,to.y,0.16),lerp(from.y,to.y,0.84),animT);
+      ctx.beginPath(); ctx.arc(tx,ty,8,0,7); ctx.fillStyle=C.warn; ctx.fill();
+    } }
+    // server node
+    ctx.save(); rr(cx-52,cy-26,104,52,10); ctx.fillStyle=C.server; ctx.fill();
+    ctx.strokeStyle=C.warn; ctx.lineWidth=2; ctx.stroke();
+    ctx.fillStyle=C.warn; ctx.font='700 12px ui-monospace,monospace'; ctx.textAlign='center'; ctx.textBaseline='middle';
+    ctx.fillText('PARAM', cx, cy-7); ctx.fillText('SERVER', cx, cy+8); ctx.restore();
+    // workers
+    for (i=0;i<N;i++){ var p=pos[i]; var done = gstep>=TOTAL;
+      ctx.save(); rr(p.x-34,p.y-20,68,40,9); ctx.fillStyle=C.node; ctx.fill();
+      ctx.strokeStyle= done?C.green:C.nodeLine; ctx.lineWidth= done?2:1.5; ctx.stroke();
+      ctx.fillStyle=C.dim; ctx.font='600 11px ui-monospace,monospace'; ctx.textAlign='center'; ctx.textBaseline='middle';
+      ctx.fillText('GPU '+i, p.x, p.y-4);
+      ctx.fillStyle= done?C.green:C.dim; ctx.font='700 10px ui-monospace,monospace';
+      ctx.fillText(done?'✓ sum':'grad', p.x, p.y+9); ctx.restore();
+    }
+    ctx.fillStyle=C.dim; ctx.font='600 12px ui-monospace,monospace'; ctx.textAlign='center'; ctx.textBaseline='top';
+    var cap = gstep>=TOTAL?'done — every GPU has the full sum':(gathering?'gather: every worker → server':'broadcast: server → every worker');
+    ctx.fillText(cap, cx, 12);
+  }
+
+  function render(animT, edges){ if (mode==='ring') drawRing(animT===undefined?null:animT, edges); else drawPS(animT===undefined?null:animT); updateTally(); }
+
+  function fmt(mb){ return mb>=1024 ? (mb/1024).toFixed(2)+' GB' : Math.round(mb)+' MB'; }
+
+  function updateTally(){
+    var perStep = Dmb/N;
+    var ringDone = (mode==='ring') ? gstep*perStep : 0;
+    var ringTotal = 2*(N-1)/N*Dmb;
+    var psRoot = (N-1)*Dmb;
+    var ratio = N/2;
+    $('ringVal').textContent = fmt(ringTotal);
+    $('ringSub').textContent = '2(N−1)/N · D = ' + (2*(N-1)/N).toFixed(2) + 'D · balanced' + (mode==='ring' && gstep<TOTAL ? '  (so far ' + fmt(ringDone) + ')' : '');
+    $('psVal').textContent = fmt(psRoot);
+    $('psSub').textContent = '(N−1) · D each way — ' + ratio.toFixed(1) + '× the ring per-GPU load';
+    var rd = $('readout');
+    if (mode==='ring'){
+      rd.innerHTML = gstep>=TOTAL ? '<b>Complete.</b> Every GPU moved <b>'+fmt(ringTotal)+'</b> ('+(2*(N-1)/N).toFixed(2)+'D), and no link carried more than any other.' :
+        'Chunk size D/N = <b>'+fmt(perStep)+'</b> · '+(gstep<RS()?'reduce-scatter':'all-gather')+' step <b>'+((gstep<RS()?gstep:gstep-RS())+1)+'</b> of '+RS()+' · each GPU has moved <b>'+fmt(ringDone)+'</b> so far.';
+    } else {
+      rd.innerHTML = gstep>=TOTAL ? '<b>Complete.</b> Each worker moved 2D, but the server link carried <b>'+fmt(psRoot)+'</b> each way — the chokepoint.' :
+        (gstep<1?'Gather: all '+N+' workers push their gradient to the one server. Its inbound link must absorb <b>'+fmt(psRoot)+'</b>.'
+                :'Broadcast: the server pushes the summed gradient back to all '+N+' workers — another <b>'+fmt(psRoot)+'</b> out one link.');
+    }
+    var v = $('verdict');
+    v.innerHTML = '<b>At N='+N+':</b> ring moves <b>'+(2*(N-1)/N).toFixed(2)+'D</b> per GPU on every link; the parameter server forces <b>'+(N-1)+'D</b> through one link each way — <b>'+(N/2).toFixed(1)+'×</b> more. Grow N and the ring stays near 2D forever while the server keeps getting worse. That is why real trainers ring-reduce.';
+  }
+
+  // ---- stepping / animation ----
+  function animateStep(cb){
+    var edges = (mode==='ring') ? ringEdges(gstep) : null;
+    if (reduceMotion){ render(null, edges); if (mode==='ring') commitRing(gstep); gstep++; render(null, null); cb&&cb(); return; }
+    busy = true; var t0 = performance.now(), dur = 620;
+    function frame(now){
+      var t = Math.min(1,(now-t0)/dur);
+      render(t, edges);
+      if (t<1){ requestAnimationFrame(frame); }
+      else { if (mode==='ring') commitRing(gstep); gstep++; busy=false; render(null,null); cb&&cb(); }
+    }
+    requestAnimationFrame(frame);
+  }
+  function stepOnce(){ if (busy || gstep>=TOTAL) return; animateStep(); }
+  function play(){
+    if (busy) return;
+    if (gstep>=TOTAL){ initState(); render(null,null); }
+    playing = true; $('play').textContent='⏸ Pause';
+    (function loop(){
+      if (!playing || gstep>=TOTAL){ playing=false; $('play').textContent='▶ Play'; return; }
+      animateStep(function(){ setTimeout(loop, reduceMotion?260:150); });
+    })();
+  }
+  function togglePlay(){ if (playing){ playing=false; $('play').textContent='▶ Play'; } else play(); }
+  function reset(){ playing=false; $('play').textContent='▶ Play'; initState(); render(null,null); }
+
+  // ---- controls ----
+  $('n').addEventListener('input', function(){ N=+this.value; $('nval').textContent=N; reset(); });
+  $('dsz').addEventListener('change', function(){ Dmb=+this.value; updateTally(); });
+  $('play').addEventListener('click', togglePlay);
+  $('step').addEventListener('click', function(){ playing=false; $('play').textContent='▶ Play'; stepOnce(); });
+  $('reset').addEventListener('click', reset);
+  Array.prototype.forEach.call($('mode').querySelectorAll('button'), function(b){
+    b.addEventListener('click', function(){
+      Array.prototype.forEach.call($('mode').querySelectorAll('button'), function(x){ x.classList.remove('on'); });
+      b.classList.add('on'); mode=b.getAttribute('data-m'); reset();
+    });
+  });
+
+  initState(); render(null,null);
+})();
+</script>
+<script src="assets/app.js"></script>
+</body>
+</html>
