@@ -1,9 +1,14 @@
 /* GPU Mastery — in-browser runnable Python (Pyodide) + auto-grader.
-   Runs only on Module 2 (Python) lessons — CUDA can't run in a browser.
-   Turns Python code blocks into editable, runnable cells with an output panel,
-   lazy-loads a SHARED Pyodide runtime once, and grades exercises marked
-   .gm-lab[data-check] via a sentinel-JSON harness. Graceful fallback if the
-   runtime can't load (offline/file://). Namespaced .gm-run. */
+   Runs on ALL lesson pages (every module and track lesson), but only turns
+   a code block into a runnable cell when it's Python that can ACTUALLY execute in
+   the browser — pure Python + numpy. It deliberately leaves static: C/CUDA/JS/WGSL/
+   GLSL, GPU/ML frameworks Pyodide can't provide (torch, triton, cupy, numba,
+   pycuda, tensorflow…), and math-notation blocks. Those genuinely can't run in a
+   browser — that's what free Colab and the WebGPU labs are for.
+   Turns qualifying blocks into editable, runnable cells with an output panel,
+   lazy-loads a SHARED Pyodide runtime once (only on first Run), and grades
+   exercises marked .gm-lab[data-check] via a sentinel-JSON harness. Graceful
+   fallback if the runtime can't load (offline/file://). Namespaced .gm-run. */
 (function () {
   "use strict";
   if (typeof document === "undefined") return;
@@ -112,7 +117,7 @@
   }
 
   function boot() {
-    if (!/\/module-2\/lesson-\d/.test(location.pathname)) return;   // Python module only
+    if (!/\/(module-\d+|track-[a-d])\/lesson-/.test(location.pathname)) return;   // all lesson pages; runnable Python detected per-block below
     var main = document.getElementById("gm-main") || document.querySelector(".wrap"); if (!main) return;
     // graded labs: <div class="gm-lab" data-check="..."><pre><code>starter</code></pre></div>
     [].forEach.call(main.querySelectorAll(".gm-lab[data-check]"), function (lab) {
@@ -124,7 +129,9 @@
       if (code.closest(".gm-lab")) return;
       var t = code.textContent || "";
       if (!/\bprint\s*\(|\bimport\b|\bdef\b|\bnp\./.test(t)) return;   // looks like Python
-      if (/#include|__global__|std::|int main|cudaMalloc/.test(t)) return;   // not C/CUDA
+      if (/#include|__global__|std::|int\s+main|cudaMalloc|\bfunction\b|=>|\bfn\b|@compute|@group|__kernel|\bvoid\b/.test(t)) return;   // not C/CUDA/JS/WGSL/GLSL
+      if (/\b(torch|triton|cupy|numba|pycuda|tensorflow|pyopencl|mpi4py|cudf|cuml)\b|\btl\.|@triton|from\s+numba/.test(t)) return;      // needs GPU/ML libs the browser can't provide
+      if (/[‖√·×→≈≤≥∑°]/.test(t)) return;                                                                                              // math-notation block, not runnable code
       if (t.length > 4000) return;
       makeCell(code.parentNode, t, null);
     });
