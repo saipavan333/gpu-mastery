@@ -55,8 +55,14 @@ and paste it into [`assets/assistant-config.js`](./assets/assistant-config.js):
 window.GM_ASSIST_PROXY = "https://gpu-assistant-proxy.yourname.workers.dev";
 ```
 
-Commit and push. The assistant's footer will now read **"AI mode · grounded in
-course"** and answers will be written by Gemini, still linking to your lessons.
+Commit and push. The assistant's footer will now read **"AI answers · from the
+course lessons"** and answers will be written by Gemini, still linking to your lessons.
+
+> **If answers error with "model not found":** the default `gemini-flash-latest`
+> alias occasionally rotates. Set the `GEMINI_MODEL` variable to a concrete free
+> model — `gemini-2.5-flash` (verified free-tier as of 2026) — and re-deploy.
+> **Region note:** free-tier needs no card in most countries (incl. India); users
+> in the EEA, UK, or Switzerland must enable billing even for the free models.
 
 ---
 
