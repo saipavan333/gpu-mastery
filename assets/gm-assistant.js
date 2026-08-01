@@ -108,13 +108,22 @@
       .catch(function (e) { cb(null, (e && e.message) || "Network error", built.hits); });
   }
   function mdToHtml(t) {
-    t = esc(t).replace(/\*\*([^*]+)\*\*/g, "<b>$1</b>").replace(/`([^`]+)`/g, "<code>$1</code>");
+    t = esc(t);
+    // Protect display math ($$…$$ / \[…\]) that may span lines BEFORE paragraph-splitting,
+    // so the delimiter pair never lands in two separate <p> (which stops KaTeX pairing it).
+    var math = [];
+    t = t.replace(/\$\$[\s\S]*?\$\$/g, function (m) { math.push(m); return "@@GMMATH" + (math.length - 1) + "@@"; })
+         .replace(/\\\[[\s\S]*?\\\]/g, function (m) { math.push(m); return "@@GMMATH" + (math.length - 1) + "@@"; });
+    t = t.replace(/\*\*([^*]+)\*\*/g, "<b>$1</b>").replace(/`([^`]+)`/g, "<code>$1</code>");
     var lines = t.split(/\n/), out = [], inl = false;
     lines.forEach(function (ln) {
       if (/^\s*[-*]\s+/.test(ln)) { if (!inl) { out.push("<ul>"); inl = true; } out.push("<li>" + ln.replace(/^\s*[-*]\s+/, "") + "</li>"); }
       else { if (inl) { out.push("</ul>"); inl = false; } if (ln.trim()) out.push("<p>" + ln + "</p>"); }
     });
-    if (inl) out.push("</ul>"); return out.join("");
+    if (inl) out.push("</ul>");
+    return out.join("")
+      .replace(/<p>@@GMMATH(\d+)@@<\/p>/g, function (_, i) { return '<div class="gma-math">' + math[+i] + "</div>"; })  // own-line display
+      .replace(/@@GMMATH(\d+)@@/g, function (_, i) { return math[+i]; });                                             // inline leftover
   }
   function sourcesHtml(hits) {
     if (!hits || !hits.length) return "";

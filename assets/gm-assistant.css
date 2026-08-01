@@ -75,3 +75,6 @@
   .gma-fab, .gma-panel, .gma-chip, .gma-lnk, .gma-in { transition: none; }
   .gma-typing i { animation: none; opacity: .6; }
 }
+
+/* display equations in AI answers (multi-line $$…$$ kept as one block) */
+.gma-msg .gma-math { margin: 10px 0; overflow-x: auto; overflow-y: hidden; }
