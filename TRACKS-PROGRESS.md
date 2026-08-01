@@ -711,3 +711,25 @@ Two-h1-per-lesson (Concept + Go deeper) left as-is: intentional two-layer design
 in HTML5 sectioning, not worth rewriting 84 lessons. Mobile layout is responsive by
 construction but still wants a real-device/emulation check (couldn't force a narrow
 viewport in this environment). SW cache v23. QA ALL CLEAN.
+
+## Performance-measurement pass (deployed site, real Chrome timings)
+Measured via Navigation + Resource Timing on home and a math lesson:
+- **Home**: ~133 KB decoded across 20 requests; TTFB 30 ms, DOMContentLoaded 182 ms,
+  load 307 ms. KaTeX and Pyodide correctly ABSENT (no math, no code run). SW controls the
+  page → instant repeat visits. Largest assets all small (gm-assistant.js 15.7 KB,
+  style.css 14.6 KB, gm-glossary-data.js 13.2 KB, gm-hero.js 11.4 KB).
+- **Math lesson (track-a/lesson-01)**: ~519 KB / 27 requests / load 1.45 s first paint.
+  The extra ~386 KB is KaTeX (CSS + JS + 3 woff2 font subsets), loaded ONLY because the
+  page contains math — lazy-load gate verified working. Fonts cache after first math page.
+- **Pyodide** (the heavy dependency, ~MBs) never loads until the user clicks Run — verified
+  absent on both pages.
+Conclusion: no eager heavy assets, lazy-loading confirmed for KaTeX + Pyodide, page weights
+light, SW makes repeats instant. Nothing to fix. (Noted-but-not-fixed: gm-glossary-data.js
+loads on home/search/glossary hubs where the linker is inactive — ~13 KB, cached, and the
+glossary hub page itself needs the data, so guarding it isn't worth the risk.)
+
+## Whole-site polish/QA pass — COMPLETE
+Accessibility fixed + verified live, reduced-motion confirmed, performance measured and
+sound. Only open item: a real-device/emulator MOBILE layout check (couldn't force a narrow
+viewport from this environment; responsive by construction — width:100% canvases, wrapping
+controls, single-column tally <560px, same container as the rest of the mobile-tested site).
