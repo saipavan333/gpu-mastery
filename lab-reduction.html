@@ -1,0 +1,259 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Reduction & Scan Animator — GPU Mastery Labs</title>
+<link rel="stylesheet" href="assets/style.css">
+<style>
+  .lab-card{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:18px 20px;margin:16px 0}
+  .lab-row{display:flex;flex-wrap:wrap;gap:16px;align-items:center;margin:6px 0 12px}
+  .lab-row label{font-size:13.5px;color:var(--dim);display:flex;align-items:center;gap:8px}
+  .lab-row select{background:#10141d;color:var(--tx);border:1px solid var(--line);border-radius:6px;padding:6px 8px;font-size:13.5px}
+  .seg{display:inline-flex;border:1px solid var(--line);border-radius:8px;overflow:hidden}
+  .seg button{background:var(--card2);color:var(--dim);border:0;padding:7px 13px;font-size:13.5px;cursor:pointer}
+  .seg button.on{background:var(--accBg);color:var(--accT);font-weight:600}
+  .btns{display:flex;gap:8px;flex-wrap:wrap}
+  .runbtn{background:var(--accBg);color:var(--accT);border:1px solid rgba(91,155,255,.4);border-radius:7px;padding:8px 15px;font-weight:600;cursor:pointer;font-size:13.5px}
+  .runbtn:hover{background:#1c2f52} .runbtn.ghost{background:transparent;color:var(--dim);border-color:var(--line)}
+  canvas{width:100%;max-width:760px;height:auto;background:#0d1119;border:1px solid var(--line);border-radius:10px;display:block;margin:8px 0}
+  #readout{font-size:13.5px;font-family:var(--mono);color:var(--dim);min-height:20px;margin:6px 0}
+  #readout b{color:var(--tx)}
+  .tally{display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-top:10px}
+  @media (max-width:560px){ .tally{grid-template-columns:1fr} }
+  .tcell{background:var(--card2);border:1px solid var(--line);border-radius:9px;padding:11px 13px}
+  .tcell h4{margin:0 0 3px;font-size:12px;text-transform:uppercase;letter-spacing:.04em;color:var(--dim2);font-family:var(--mono)}
+  .tcell .big{font-size:20px;font-weight:700;font-variant-numeric:tabular-nums;color:var(--acc2)}
+  .tcell .sub{font-size:12px;color:var(--dim);margin-top:2px}
+  .verdict{font-size:14.5px;border-radius:10px;padding:12px 14px;margin-top:14px;background:var(--goodBg);border:1px solid rgba(54,201,138,.3)}
+  .verdict b{color:var(--ink)}
+</style>
+<!-- gm-seo:start -->
+<link rel="canonical" href="https://saipavan333.github.io/gpu-mastery/lab-reduction.html">
+<link rel="manifest" href="https://saipavan333.github.io/gpu-mastery/manifest.webmanifest">
+<meta name="theme-color" content="#0b0e14">
+<link rel="apple-touch-icon" href="https://saipavan333.github.io/gpu-mastery/assets/img/favicon-180.png">
+<meta name="description" content="Summing an array looks inherently sequential — add them up one at a time. On a GPU you instead fold the array in a tree , halving the survivors each step, so…">
+<meta property="og:type" content="website">
+<meta property="og:site_name" content="GPU Mastery">
+<meta property="og:title" content="Reduction &amp; Scan Animator — GPU Mastery Labs">
+<meta property="og:description" content="Summing an array looks inherently sequential — add them up one at a time. On a GPU you instead fold the array in a tree , halving the survivors each step, so…">
+<meta property="og:url" content="https://saipavan333.github.io/gpu-mastery/lab-reduction.html">
+<meta property="og:image" content="https://saipavan333.github.io/gpu-mastery/assets/img/og.png">
+<meta name="twitter:card" content="summary_large_image">
+<meta name="twitter:title" content="Reduction &amp; Scan Animator — GPU Mastery Labs">
+<meta name="twitter:description" content="Summing an array looks inherently sequential — add them up one at a time. On a GPU you instead fold the array in a tree , halving the survivors each step, so…">
+<meta name="twitter:image" content="https://saipavan333.github.io/gpu-mastery/assets/img/og.png">
+<!-- gm-seo:end -->
+</head>
+<body data-lesson="lab-reduction">
+<nav><div class="inner">
+  <a class="logo" href="index.html">GPU<span>Mastery</span></a>
+  <a class="item" href="index.html">Home</a>
+  <a class="item" href="curriculum.html">Curriculum</a>
+  <a class="item on" href="labs.html">Labs</a>
+  <a class="item" href="setup.html">Lab setup</a>
+</div></nav>
+<div class="wrap">
+
+<div class="lesson-top">
+  <div><span class="badge">Interactive Lab</span><span class="badge dim">5.8 · reduction</span><span class="badge dim">parallel primitives</span></div>
+  <a class="badge good" href="labs.html">← all labs</a>
+</div>
+<h1>Reduction &amp; Scan Animator</h1>
+<p class="lead">Summing an array looks inherently sequential — add them up one at a time. On a GPU you instead fold the array in a <strong>tree</strong>, halving the survivors each step, so <code>N</code> numbers collapse to one answer in only <code>log₂N</code> steps. The same tree idea, run in reverse, gives you a <strong>prefix scan</strong> — a running total at every position — which powers sorting, stream compaction, and sparse math. Step through both and watch the depth stay logarithmic while the width shrinks.</p>
+
+<div class="lab-card">
+  <div class="lab-row">
+    <label>array length (N): <select id="n"><option>4</option><option selected>8</option><option>16</option></select></label>
+    <span class="seg" id="mode">
+      <button data-m="reduce" class="on">Reduction (sum)</button>
+      <button data-m="scan">Prefix scan</button>
+    </span>
+  </div>
+  <div class="btns">
+    <button class="runbtn" id="play">▶ Play</button>
+    <button class="runbtn ghost" id="step">Step ›</button>
+    <button class="runbtn ghost" id="reset">⟲ Reset</button>
+  </div>
+  <div id="readout">&nbsp;</div>
+  <canvas id="stage" width="760" height="430"></canvas>
+  <div class="tally">
+    <div class="tcell"><h4>Depth (parallel steps)</h4><div class="big" id="depthVal">—</div><div class="sub">log₂N — the time on enough cores</div></div>
+    <div class="tcell"><h4>Work (total adds)</h4><div class="big" id="workVal">—</div><div class="sub" id="workSub">how much arithmetic in all</div></div>
+  </div>
+  <div class="verdict" id="verdict"></div>
+</div>
+
+<h2>How to read it</h2>
+<p>Each row is the array after one parallel step; arrows show which additions happen. In the <strong>reduction</strong>, step one pairs the two halves — thread <code>i</code> adds element <code>i + N/2</code> into element <code>i</code> — then the stride halves and halves again until a single sum survives in slot 0. Because the number of live elements halves every step, the depth is <code>log₂N</code>: a 1024-element sum finishes in 10 steps instead of 1023. This is the addressing pattern from Lesson 5.8, and it is deliberately the <em>sequential-addressing</em> version, where active threads stay packed on the left — that keeps a warp's live lanes contiguous and avoids the divergence that the naive interleaved pattern suffers.</p>
+<p>The <strong>prefix scan</strong> shown here is Hillis-Steele: at step with distance <code>d = 1, 2, 4, …</code>, every element adds the element <code>d</code> positions to its left, and after <code>log₂N</code> steps each slot holds the running total up to and including itself. It is beautifully shallow — <code>log₂N</code> depth — but notice the work counter: it performs about <code>N·log₂N</code> additions, more than the <code>N−1</code> a sequential loop would do. That is the classic trade in parallel algorithms: <em>step efficiency</em> versus <em>work efficiency</em>. The work-efficient alternative, Blelloch scan, does only <code>O(N)</code> work with an up-sweep and a down-sweep over the tree — at <code>N = 16</code> that is 30 adds versus Hillis-Steele's 49, and the gap widens with <code>N</code>. Reductions are already work-optimal at <code>N−1</code> adds; scans force you to choose, and the right choice depends on whether you are short on cores or short on memory bandwidth.</p>
+<p>Both patterns are the backbone of GPU computing: reductions sum losses, norms, and dot products; scans allocate output slots in parallel, drive radix sort, and build the index arrays behind sparse matrices (Track B) and rendering (Track C). Master the tree and a surprising amount of "inherently sequential" work turns out to be <code>log₂N</code> deep.</p>
+
+<div class="footer">GPU Mastery · Labs · Reduction &amp; Scan Animator — works offline</div>
+</div>
+
+<script>
+(function(){
+  var $ = function(id){ return document.getElementById(id); };
+  var cv = $('stage'), ctx = cv.getContext('2d'), W = cv.width, H = cv.height;
+  var reduceMotion = matchMedia('(prefers-reduced-motion: reduce)').matches;
+  var C = { bg:'#0d1119', cell:'#151c2b', cellDim:'#101622', line:'#2a3550', txt:'#e8ecf3',
+            dim:'#8a93a6', acc:'#5b9bff', green:'#35c98a' };
+
+  var N = 8, mode = 'reduce';
+  var rows, arrows, changed, adds, depth, curStep, busy = false, playing = false;
+
+  function seedArr(n){ var a=[], s=7; for(var i=0;i<n;i++){ s=(s*1103515245+12345)&0x7fffffff; a.push(s%9+1); } return a; }
+
+  function compute(){
+    var a = seedArr(N);
+    rows = [a.slice()]; arrows = []; changed = [];
+    var cur = a.slice(), st;
+    if(mode==='reduce'){
+      for(st=1; ; st++){
+        var s = N >> st; if(s<1) break;
+        var ar=[], ch=[], nxt=cur.slice();
+        for(var i=0;i<s;i++){ nxt[i]=cur[i]+cur[i+s]; ar.push({fc:i+s, tc:i}); ch.push(i); }
+        rows.push(nxt); arrows.push(ar); changed.push(ch); cur=nxt;
+      }
+      adds = N-1; depth = Math.log2(N);
+    } else {
+      adds = 0;
+      for(st=1; (1<<(st-1)) < N; st++){
+        var d = 1<<(st-1), ar2=[], ch2=[], nx=cur.slice();
+        for(var k=0;k<N;k++){ if(k>=d){ nx[k]=cur[k]+cur[k-d]; ar2.push({fc:k-d, tc:k}); ch2.push(k); adds++; } }
+        rows.push(nx); arrows.push(ar2); changed.push(ch2); cur=nx;
+      }
+      depth = Math.log2(N);
+    }
+    curStep = 0;
+  }
+
+  function geom(){
+    var cs = Math.min(46, Math.floor(660/N));
+    var gx = 70, gy = 46, rowH = Math.min(70, Math.floor((H-80)/(depth+1)));
+    return { cs:cs, gx:gx, gy:gy, rowH:rowH, gw:cs*N };
+  }
+  function cellXY(g, r, c){ return { x: g.gx + c*g.cs, y: g.gy + r*g.rowH }; }
+
+  function drawCell(g, r, c, val, hi, faded){
+    var p = cellXY(g,r,c);
+    ctx.fillStyle = faded ? C.cellDim : (hi ? C.green : C.cell);
+    ctx.strokeStyle = C.line; ctx.lineWidth = 1;
+    ctx.beginPath();
+    var x=p.x+2, y=p.y+2, w=g.cs-4, h=g.rowH-14, rr=6;
+    ctx.moveTo(x+rr,y); ctx.arcTo(x+w,y,x+w,y+h,rr); ctx.arcTo(x+w,y+h,x,y+h,rr); ctx.arcTo(x,y+h,x,y,rr); ctx.arcTo(x,y,x+w,y,rr); ctx.closePath();
+    ctx.fill(); ctx.stroke();
+    ctx.fillStyle = faded ? C.dim : (hi ? '#06210f' : C.txt);
+    ctx.font = '600 '+Math.min(15,Math.floor(g.cs*0.4))+'px ui-monospace,monospace';
+    ctx.textAlign='center'; ctx.textBaseline='middle';
+    ctx.fillText(String(val), p.x+g.cs/2, p.y+2+(g.rowH-14)/2);
+  }
+
+  function rowLabel(g, r){
+    ctx.fillStyle=C.dim; ctx.font='600 11px ui-monospace,monospace'; ctx.textAlign='right'; ctx.textBaseline='middle';
+    var lab = r===0 ? 'input' : 'step '+r;
+    ctx.fillText(lab, g.gx-8, g.gy + r*g.rowH + (g.rowH-14)/2 + 2);
+  }
+
+  function arrowTo(x1,y1,x2,y2,col){
+    ctx.strokeStyle=col; ctx.fillStyle=col; ctx.lineWidth=2;
+    ctx.beginPath(); ctx.moveTo(x1,y1); ctx.lineTo(x2,y2); ctx.stroke();
+    var a=Math.atan2(y2-y1,x2-x1), h=7;
+    ctx.beginPath(); ctx.moveTo(x2,y2);
+    ctx.lineTo(x2-h*Math.cos(a-0.45), y2-h*Math.sin(a-0.45));
+    ctx.lineTo(x2-h*Math.cos(a+0.45), y2-h*Math.sin(a+0.45));
+    ctx.closePath(); ctx.fill();
+  }
+
+  function render(animT){
+    var g = geom();
+    ctx.clearRect(0,0,W,H); ctx.fillStyle=C.bg; ctx.fillRect(0,0,W,H);
+    // revealed rows 0..curStep
+    for(var r=0;r<=curStep;r++){
+      rowLabel(g, r);
+      for(var c=0;c<N;c++){
+        var faded = false;
+        if(mode==='reduce' && r>0){ var alive = N >> r; faded = c>=alive; }
+        var hi = r>0 && changed[r-1].indexOf(c)>=0 && r===curStep;
+        drawCell(g, r, c, rows[r][c], hi, faded);
+      }
+    }
+    // arrows for the step being animated (curStep -> curStep+1)
+    if(animT!==undefined && curStep < depth){
+      var ar = arrows[curStep];
+      for(var k=0;k<ar.length;k++){
+        var f = cellXY(g, curStep, ar[k].fc), t = cellXY(g, curStep+1, ar[k].tc);
+        var fx=f.x+g.cs/2, fy=f.y+(g.rowH-14), tx=t.x+g.cs/2, ty=t.y;
+        var cx=fx+(tx-fx)*animT, cy=fy+(ty-fy)*animT;
+        arrowTo(fx,fy, cx,cy, C.acc);
+      }
+    }
+    // caption
+    ctx.fillStyle=C.dim; ctx.font='600 12px ui-monospace,monospace'; ctx.textAlign='left'; ctx.textBaseline='alphabetic';
+    var cap;
+    if(curStep>=depth){ cap = mode==='reduce' ? ('done — sum = '+rows[depth][0]+' in '+depth+' steps') : ('done — running totals in '+depth+' steps'); }
+    else {
+      if(mode==='reduce'){ var s=N>>(curStep+1); cap='step '+(curStep+1)+': stride '+s+' — '+s+' threads add element i+'+s+' into i'; }
+      else { var d=1<<curStep; cap='step '+(curStep+1)+': distance '+d+' — each element adds the one '+d+' to its left'; }
+    }
+    ctx.fillText(cap, g.gx, H-14);
+    updatePanel();
+  }
+
+  function updatePanel(){
+    $('depthVal').textContent = depth + ' steps';
+    $('workVal').textContent = adds + ' adds';
+    if(mode==='reduce'){ $('workSub').textContent = 'N−1 = work-optimal (a serial loop does the same)'; }
+    else { $('workSub').textContent = '≈ N·log₂N — more than a serial loop (N−1)'; }
+    var rd = $('readout');
+    if(curStep>=depth){
+      rd.innerHTML = mode==='reduce'
+        ? '<b>Complete.</b> '+N+' values reduced to their sum <b>'+rows[depth][0]+'</b> in <b>'+depth+'</b> parallel steps ('+adds+' adds total).'
+        : '<b>Complete.</b> Every slot now holds its running total, in <b>'+depth+'</b> parallel steps ('+adds+' adds).';
+    } else {
+      rd.innerHTML = 'Parallel step <b>'+(curStep+1)+'</b> of '+depth+' — '+(mode==='reduce'?'the live half folds onto the left half.':'each slot reaches '+(1<<curStep)+' further left.');
+    }
+    var v = $('verdict');
+    if(mode==='reduce'){
+      v.innerHTML = '<b>Reduction:</b> depth <b>log₂N = '+depth+'</b>, work <b>N−1 = '+adds+'</b> adds. Both optimal — a 1024-element sum is only 10 steps deep. The tree turns an "add them one by one" loop into a logarithmic parallel fold.';
+    } else {
+      var hs=adds, ble=2*(N-1);
+      v.innerHTML = '<b>Scan (Hillis-Steele):</b> depth <b>log₂N = '+depth+'</b> but work <b>'+hs+'</b> adds — step-efficient, not work-efficient. Blelloch scan does the same in ~<b>'+ble+'</b> adds (O(N)) with an up-sweep + down-sweep. Short on cores → Blelloch; short on depth → Hillis-Steele.';
+    }
+  }
+
+  function commit(){ if(curStep<depth) curStep++; }
+  function stepOnce(){ if(busy || curStep>=depth) return;
+    if(reduceMotion){ commit(); render(); return; }
+    busy=true; var t0=performance.now(), dur=460;
+    (function frame(now){ var t=Math.min(1,(now-t0)/dur); render(t); if(t<1) requestAnimationFrame(frame); else { commit(); busy=false; render(); } })(performance.now());
+  }
+  function play(){ if(busy) return; if(curStep>=depth){ curStep=0; render(); }
+    playing=true; $('play').textContent='⏸ Pause';
+    (function loop(){ if(!playing||curStep>=depth){ playing=false; $('play').textContent='▶ Play'; return; }
+      if(reduceMotion){ commit(); render(); setTimeout(loop, 320); }
+      else { busy=true; var t0=performance.now(); (function frame(now){ var t=Math.min(1,(now-t0)/440); render(t); if(t<1) requestAnimationFrame(frame); else { commit(); busy=false; render(); setTimeout(loop,140); } })(performance.now()); }
+    })();
+  }
+  function togglePlay(){ if(playing){ playing=false; $('play').textContent='▶ Play'; } else play(); }
+  function reset(){ playing=false; $('play').textContent='▶ Play'; curStep=0; render(); }
+  function rebuild(){ N=+$('n').value; compute(); render(); }
+
+  $('n').addEventListener('change', rebuild);
+  $('play').addEventListener('click', togglePlay);
+  $('step').addEventListener('click', function(){ playing=false; $('play').textContent='▶ Play'; stepOnce(); });
+  $('reset').addEventListener('click', reset);
+  Array.prototype.forEach.call($('mode').querySelectorAll('button'), function(btn){
+    btn.addEventListener('click', function(){
+      Array.prototype.forEach.call($('mode').querySelectorAll('button'), function(x){ x.classList.remove('on'); });
+      btn.classList.add('on'); mode=btn.getAttribute('data-m'); playing=false; $('play').textContent='▶ Play'; compute(); render();
+    });
+  });
+
+  compute(); render();
+})();
+</script>
+<script src="assets/app.js"></script>
+</body>
+</html>

@@ -638,3 +638,28 @@ remains deferred by the owner's explicit "build product, defer selling" decision
 - Auto-indexed (build-seo 115 urls, build-index search). Wired into labs.html "Go deeper"
   right after the softmax card. SW cache v20. QA: ALL CLEAN ✓. No literal $, American
   English, reduced-motion guard, deterministic (mulberry32 seed).
+
+## Reduction & Scan Animator (lab-reduction.html) — core parallel primitive
+
+- **lab-reduction.html — Reduction & Scan Animator (Lesson 5.8).** Stacked-row tree
+  animation: each row is the array after one parallel step, arrows show the adds.
+  Two modes — sequential-addressing tree reduction (sum) and Hillis-Steele inclusive
+  prefix scan. Shows depth = log₂N, total work (adds), and the step-vs-work-efficiency
+  trade (Hillis-Steele ~N·logN vs Blelloch ~2N in prose, with N=16 → 49 vs 30). Fills the
+  "animate WHY the tree works" gap the WebGPU reduction lab left open.
+- **Verification (verify_scan.js):** reduction sum == Σ, adds == N-1, depth == log₂N;
+  Hillis-Steele == cumulative sums, depth == log₂N; work counts captured for the contrast
+  (HS 17/49/129 at N=8/16/32 vs Blelloch 14/30/62). All N∈{4,8,16,32} pass.
+- **Runtime verification (harness4.js):** drove the real script through full runs in both
+  modes for N∈{4,8,16} + reduced-motion — no exceptions, reduction's reported sum equals
+  the actual seeded-array sum (8/35/67), depth/work displays correct (reduce N-1; scan HS
+  adds 5/17/49), all reach "Complete".
+- Auto-indexed (build-seo 116 urls, build-index). Wired into labs.html "Reason with it"
+  grid (before floatbits, lesson order). SW cache v21. QA: ALL CLEAN ✓. No literal $,
+  American English, reduced-motion guard, deterministic.
+
+## Labs page state after this run
+Reason-with-it: amdahl, roofline, occupancy, coalescing, reduction, floatbits (6).
+Run-it (WebGPU): reduction(track-d), matmul, stride (3). Go-deeper: allreduce, softmax,
+attention, montecarlo, pbr (5). Study loop: review/interview/exam/glossary/cheatsheet/
+concept-map. Track A now a full set (softmax→attention→allreduce). SW v21.
