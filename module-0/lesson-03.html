@@ -1,0 +1,213 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>0.3 The GPU — Built for Throughput — GPU Mastery</title>
+<link rel="stylesheet" href="../assets/style.css">
+<!-- gm-seo:start -->
+<link rel="canonical" href="https://saipavan333.github.io/gpu-mastery/module-0/lesson-03.html">
+<link rel="manifest" href="https://saipavan333.github.io/gpu-mastery/manifest.webmanifest">
+<meta name="theme-color" content="#0b0e14">
+<link rel="apple-touch-icon" href="https://saipavan333.github.io/gpu-mastery/assets/img/favicon-180.png">
+<meta name="description" content="A GPU makes the opposite bet from a CPU: thousands of simple cores that maximize total work per second. This lesson explains SIMT and latency hiding — how a GPU turns the memory-wait problem into its superpower.">
+<meta property="og:type" content="article">
+<meta property="og:site_name" content="GPU Mastery">
+<meta property="og:title" content="0.3 The GPU — Built for Throughput — GPU Mastery">
+<meta property="og:description" content="A GPU makes the opposite bet from a CPU: thousands of simple cores that maximize total work per second. This lesson explains SIMT and latency hiding — how a GPU turns the memory-wait problem into its superpower.">
+<meta property="og:url" content="https://saipavan333.github.io/gpu-mastery/module-0/lesson-03.html">
+<meta property="og:image" content="https://saipavan333.github.io/gpu-mastery/assets/img/og.png">
+<meta name="twitter:card" content="summary_large_image">
+<meta name="twitter:title" content="0.3 The GPU — Built for Throughput — GPU Mastery">
+<meta name="twitter:description" content="A GPU makes the opposite bet from a CPU: thousands of simple cores that maximize total work per second. This lesson explains SIMT and latency hiding — how a GPU turns the memory-wait problem into its superpower.">
+<meta name="twitter:image" content="https://saipavan333.github.io/gpu-mastery/assets/img/og.png">
+<!-- gm-seo:end -->
+</head>
+<body data-lesson="m0l3">
+<nav><div class="inner">
+  <a class="logo" href="../index.html">GPU<span>Mastery</span></a>
+  <a class="item" href="../index.html">Home</a>
+  <a class="item on" href="../curriculum.html">Curriculum</a>
+  <a class="item" href="../labs.html">Labs</a>
+  <a class="item" href="../setup.html">Lab setup</a>
+</div></nav>
+<div class="wrap">
+
+<div class="lesson-top">
+  <div><span class="badge">Module 0 · Lesson 3</span><span class="badge dim">≈ 1–2 h · prereq: 0.1, 0.2</span></div>
+  <button id="donebtn" class="donebtn">Mark lesson complete</button>
+</div>
+<h1>The GPU — built for throughput</h1>
+<p class="lead">The CPU spends its silicon making a few streams fast and never waiting. The GPU makes the opposite bet: fill the chip with thousands of simple cores, accept that any one of them is slow and stalls constantly, and win by keeping so much work in flight that the whole machine is never idle. It turns the memory-wait problem — the CPU's enemy — into its superpower.</p>
+
+<h2>Concept</h2>
+
+<h3>A different goal: throughput, not latency</h3>
+<p><strong>Throughput</strong> is total work finished per second, regardless of how long any single piece takes. A GPU doesn't care that one thread is slow; it cares that <em>millions of threads per second</em> complete. Picture a bank: a CPU is one lightning-fast teller who serves each customer in seconds; a GPU is a hall of a thousand ordinary tellers. Each individual customer may wait longer, but the hall processes vastly more customers per hour. For "add a billion numbers" or "shade eight million pixels," you don't want one genius — you want the hall.</p>
+<div class="note">One line to carry through the whole course: <strong>the CPU minimizes latency (time per task); the GPU maximizes throughput (tasks per second).</strong> Nearly every concrete difference between the two machines is a consequence of this single divergence in goals.</div>
+
+<h3>Spend the transistors on arithmetic</h3>
+<p>A CPU core is mostly cache and control logic with a small arithmetic slice (0.2). The GPU inverts that budget. It strips each core down — tiny caches, no fancy branch predictor, no heavy out-of-order machinery — so each core is small, then packs <em>thousands</em> of them onto one chip. Most of the silicon becomes the thing a CPU spends sparingly: raw arithmetic units.</p>
+<div class="diagram">
+<svg viewBox="0 0 760 330" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="A side-by-side comparison of chip area. The CPU on the left has a few large cores dominated by cache and control logic. The GPU on the right is a dense grid of many small arithmetic cores, spending most of its area on math rather than control.">
+  <defs><pattern id="gpucores" width="24" height="24" patternUnits="userSpaceOnUse"><rect x="3" y="3" width="16" height="16" rx="3" fill="#123027" stroke="#37e0c8" stroke-width="0.9"/></pattern></defs>
+  <rect x="0" y="0" width="760" height="330" rx="14" fill="#12161d"/>
+  <text x="30" y="34" fill="#8fb6ff" font-family="ui-monospace,monospace" font-size="13" letter-spacing="1.1">WHERE THE SILICON GOES · a few big cores vs a sea of small ones</text>
+  <!-- CPU side -->
+  <text x="185" y="66" fill="#e8edf5" font-family="system-ui,sans-serif" font-size="15" font-weight="700" text-anchor="middle">CPU — a few big cores</text>
+  <rect x="40" y="80" width="290" height="200" rx="10" fill="#0e1420" stroke="#3a4763"/>
+  <g>
+    <rect x="58" y="96" width="120" height="80" rx="7" fill="#1a2740" stroke="#5b9bff" stroke-width="1.3"/>
+    <rect x="192" y="96" width="120" height="80" rx="7" fill="#1a2740" stroke="#5b9bff" stroke-width="1.3"/>
+    <rect x="58" y="184" width="120" height="80" rx="7" fill="#1a2740" stroke="#5b9bff" stroke-width="1.3"/>
+    <rect x="192" y="184" width="120" height="80" rx="7" fill="#1a2740" stroke="#5b9bff" stroke-width="1.3"/>
+  </g>
+  <text x="185" y="300" fill="#9fb0c6" font-family="system-ui,sans-serif" font-size="11.5" text-anchor="middle">each core: mostly cache + control</text>
+  <!-- GPU side -->
+  <text x="575" y="66" fill="#e8edf5" font-family="system-ui,sans-serif" font-size="15" font-weight="700" text-anchor="middle">GPU — thousands of small cores</text>
+  <rect x="430" y="80" width="290" height="200" rx="10" fill="#0e1420" stroke="#3a4763"/>
+  <rect x="446" y="94" width="258" height="172" rx="5" fill="url(#gpucores)"/>
+  <text x="575" y="300" fill="#9fb0c6" font-family="system-ui,sans-serif" font-size="11.5" text-anchor="middle">each core: mostly arithmetic</text>
+</svg>
+<div class="cap">Proportions are illustrative. The point is real: the CPU spends area on <em>not waiting</em> (cache + control) for a few fast cores; the GPU spends area on <em>doing math</em> across thousands of simple cores.</div>
+</div>
+
+<h3>SIMT — one instruction, many threads</h3>
+<p>Thousands of independent control units would be wasteful, so the GPU shares. Its threads run in fixed-size groups — NVIDIA calls a group of <strong>32</strong> threads a <em>warp</em> (AMD historically used <strong>64</strong>, a <em>wavefront</em>) — and all threads in a group execute the <em>same instruction at the same time</em>, each on its own data. This is <strong>SIMT</strong>: Single Instruction, Multiple Threads. One instruction is fetched and decoded once, then 32 arithmetic units apply it to 32 different numbers. It's an assembly line where one foreman calls the step and thirty-two hands do it in unison — enormously efficient when every hand really is doing the same step.</p>
+
+<h3>Latency hiding — the master trick</h3>
+<p>Here is the beautiful part. Each GPU core, being simple, has no big cache to avoid memory stalls, so its threads stall <em>constantly</em>. On a CPU that would be a disaster. The GPU's answer: keep <em>far more</em> threads ready than it has cores, and whenever one warp stalls waiting on memory, instantly switch to another warp that's ready to compute. The memory wait still happens — but it's <strong>hidden</strong> behind other warps' useful work, so the arithmetic units never sit idle.</p>
+<div class="diagram">
+<svg viewBox="0 0 760 330" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="A timeline showing four warps. Each warp computes for a while, then stalls waiting on memory, then computes again. The stalls are staggered so that at every moment at least one warp is computing, which keeps the GPU's arithmetic units busy the entire time. The memory latency is hidden behind other warps' work.">
+  <rect x="0" y="0" width="760" height="330" rx="14" fill="#12161d"/>
+  <text x="30" y="34" fill="#8fb6ff" font-family="ui-monospace,monospace" font-size="13" letter-spacing="1.1">LATENCY HIDING · while one warp waits, another runs</text>
+  <g font-family="ui-monospace,monospace" font-size="12" fill="#9fb0c6">
+    <text x="34" y="86">W0</text><text x="34" y="126">W1</text><text x="34" y="166">W2</text><text x="34" y="206">W3</text>
+  </g>
+  <!-- legend -->
+  <rect x="470" y="286" width="16" height="12" rx="2" fill="#37e0c8"/><text x="492" y="296" fill="#9fb0c6" font-family="system-ui,sans-serif" font-size="11.5">computing</text>
+  <rect x="588" y="286" width="16" height="12" rx="2" fill="#2a3245" stroke="#4a5570" stroke-dasharray="3 2"/><text x="610" y="296" fill="#9fb0c6" font-family="system-ui,sans-serif" font-size="11.5">stalled on memory</text>
+  <!-- warp rows: compute (teal) / stall (dashed gray) / compute -->
+  <g>
+    <!-- W0 y=74 -->
+    <rect x="70" y="74" width="120" height="20" rx="4" fill="#37e0c8"/><rect x="190" y="74" width="260" height="20" rx="4" fill="#2a3245" stroke="#4a5570" stroke-dasharray="4 3"/><rect x="450" y="74" width="120" height="20" rx="4" fill="#37e0c8"/>
+    <!-- W1 y=114 -->
+    <rect x="130" y="114" width="120" height="20" rx="4" fill="#37e0c8"/><rect x="250" y="114" width="260" height="20" rx="4" fill="#2a3245" stroke="#4a5570" stroke-dasharray="4 3"/><rect x="510" y="114" width="120" height="20" rx="4" fill="#37e0c8"/>
+    <!-- W2 y=154 -->
+    <rect x="190" y="154" width="120" height="20" rx="4" fill="#37e0c8"/><rect x="310" y="154" width="260" height="20" rx="4" fill="#2a3245" stroke="#4a5570" stroke-dasharray="4 3"/><rect x="570" y="154" width="110" height="20" rx="4" fill="#37e0c8"/>
+    <!-- W3 y=194 -->
+    <rect x="250" y="194" width="120" height="20" rx="4" fill="#37e0c8"/><rect x="370" y="194" width="260" height="20" rx="4" fill="#2a3245" stroke="#4a5570" stroke-dasharray="4 3"/><rect x="630" y="194" width="50" height="20" rx="4" fill="#37e0c8"/>
+  </g>
+  <!-- ALU busy bar -->
+  <rect x="70" y="238" width="610" height="22" rx="5" fill="#123027" stroke="#37e0c8"/>
+  <text x="375" y="253" fill="#c8f5ea" font-family="system-ui,sans-serif" font-size="12.5" font-weight="600" text-anchor="middle">GPU arithmetic units: busy the whole time ▶ time</text>
+</svg>
+<div class="cap">Four warps, staggered. Each spends most of its life stalled on memory (dashed), yet at every instant some warp is computing — so the cores stay saturated. The GPU doesn't beat memory latency; it <em>hides</em> it behind an abundance of work.</div>
+</div>
+<p>This is why a GPU <em>wants</em> more threads than it has cores — often tens of thousands in flight. Over-subscription isn't wasteful here; it's the fuel that hides latency. A GPU with too few threads is like our teller-hall with only ten customers: most windows idle, throughput wasted. You'll meet this idea again, quantified, as <strong>occupancy</strong> in Module 5.</p>
+
+<h3>The bargain you must uphold</h3>
+<p>The GPU's speed is conditional. It hands you astonishing throughput <em>if</em> you bring it the right kind of work: <strong>thousands of independent tasks</strong> (to fill the cores and hide latency), doing <strong>the same operation</strong> (so SIMT groups stay in step), touching memory in <strong>regular, neighborly patterns</strong> (so the few caches and wide memory bus are used well). Bring it serial, branchy, or scattered work and it crawls — a thousand tellers are useless for a task that must be done by one person in strict order. Half of this course is learning to reshape problems into the form the GPU devours. The next lesson, 0.4, makes the trade-off between the two machines precise so you always know which tool a problem wants.</p>
+
+<h2>Worked example</h2>
+<div class="card">
+<p><strong>Task:</strong> Compare a CPU and a GPU on one million independent square-roots, using representative numbers. Suppose the CPU finishes one sqrt in ~5 ns and has 8 cores; the GPU takes ~20 ns for any single sqrt (it's a simpler, slower core!) but can keep ~20,000 threads in flight. Which finishes the million first, and what does that reveal?</p>
+<p><strong>1 — CPU throughput:</strong> 8 cores × (1 sqrt / 5 ns) = 1.6 sqrt/ns. One million ÷ 1.6 per ns = 625,000 ns ≈ <strong>0.63 ms</strong>.</p>
+<p><strong>2 — GPU throughput:</strong> with 20,000 sqrts in flight and each taking ~20 ns, the machine retires roughly 20,000 / 20 ns = 1,000 sqrt/ns. One million ÷ 1,000 per ns = 1,000 ns ≈ <strong>0.001 ms</strong>.</p>
+<p><strong>3 — the twist:</strong> the GPU is <em>4× slower</em> on any single square-root (20 ns vs 5 ns), yet finishes the whole batch roughly <strong>600× faster</strong>. Worse latency, far better throughput. That inversion is the entire point of a GPU.</p>
+<p><strong>Decision made:</strong> for one urgent sqrt, use the CPU — it answers in 5 ns while the GPU is still launching. For a million, use the GPU — its ocean of slow cores crushes the batch. Choosing the right machine is choosing latency vs throughput for <em>your</em> workload, which is exactly what 0.4 is about. (These figures are illustrative; you'll measure real ones in the Labs.)</p>
+</div>
+
+<h2>Key points</h2>
+<ul class="keypoints">
+<li><strong>The GPU optimizes throughput</strong> — total tasks per second — not the latency of any single task. It's a hall of a thousand ordinary tellers, not one genius.</li>
+<li>It spends most of its silicon on <strong>arithmetic units</strong> across <strong>thousands of simple cores</strong>, having stripped out the CPU's big caches and control logic.</li>
+<li><strong>SIMT</strong>: threads run in fixed groups (a <em>warp</em> = 32 on NVIDIA; a <em>wavefront</em> = 64 historically on AMD) that all execute the same instruction in lockstep, one decode driving many arithmetic units.</li>
+<li><strong>Latency hiding</strong>: with far more threads than cores, whenever a warp stalls on memory the hardware runs another ready warp, so the cores stay busy. The GPU hides memory latency rather than avoiding it.</li>
+<li>Therefore a GPU <em>wants</em> to be over-subscribed with tens of thousands of threads — that abundance is the fuel that hides latency (later: <em>occupancy</em>).</li>
+<li>The speed is conditional: it needs <strong>many independent tasks</strong>, doing the <strong>same operation</strong>, over <strong>regular memory patterns</strong>. Serial, branchy, or scattered work wastes it.</li>
+</ul>
+
+<h2>Quiz</h2>
+<div class="quiz">
+  <div class="q">1. A single GPU core is generally slower than a single CPU core. How does a GPU still win overall on the right problems?</div>
+  <button class="opt">Its cores run at a much higher clock speed</button>
+  <button class="opt">It has much larger caches per core</button>
+  <button class="opt" data-c="1">It runs thousands of cores at once and hides memory stalls behind other work — huge throughput despite slow individual cores</button>
+  <button class="opt">It predicts branches far better than a CPU</button>
+  <div class="expl">A GPU trades single-thread speed for massive parallelism. Thousands of simple cores plus latency hiding (switch to another warp when one stalls) give enormous throughput even though each core is slower and each task has higher latency than on a CPU.</div>
+</div>
+<div class="quiz">
+  <div class="q">2. What is a "warp" (NVIDIA terminology)?</div>
+  <button class="opt">The GPU's largest cache level</button>
+  <button class="opt" data-c="1">A group of 32 threads that execute the same instruction in lockstep, each on its own data</button>
+  <button class="opt">The connection between the GPU and the CPU</button>
+  <button class="opt">A single very fast GPU core</button>
+  <div class="expl">A warp is 32 threads driven by one instruction stream in lockstep (SIMT). One fetch/decode feeds 32 arithmetic units. (AMD's equivalent, the wavefront, was historically 64 threads.) This sharing is how the GPU affords so many cores.</div>
+</div>
+
+<h2>Exercises</h2>
+<details><summary>Exercise 1 — In one sentence each, explain SIMT and latency hiding, and say why they depend on each other.</summary><div class="body">
+<p><strong>SIMT:</strong> threads run in fixed groups that all execute the same instruction at once, each on its own data, so one control unit can drive many arithmetic units. <strong>Latency hiding:</strong> keep many more warps ready than there are cores, and switch to a ready warp whenever the current one stalls on memory, so the cores never idle. They depend on each other because SIMT makes cores cheap enough to have thousands (creating the need for lots of parallel work), and latency hiding is what keeps that army of cheap, cache-poor cores busy despite their constant stalls.</p>
+</div></details>
+<details><summary>Exercise 2 — Using the worked example's style, suppose the GPU can keep only 200 sqrts in flight (too few threads). Recompute its throughput and time for one million, and name the concept.</summary><div class="body">
+<p>Throughput ≈ 200 / 20 ns = 10 sqrt/ns. Time = 1,000,000 / 10 = 100,000 ns ≈ <strong>0.1 ms</strong> — now only ~6× faster than the CPU instead of ~600×, because with too few threads the cores spend most of their time stalled with nothing to switch to. The concept is <strong>occupancy</strong>: too few threads in flight means latency isn't hidden and throughput collapses. Feeding the GPU enough parallel work is a first-order performance concern (Module 5).</p>
+</div></details>
+<details><summary>Exercise 3 — Why is a task like "walk a linked list, following each pointer to the next node" a terrible fit for a GPU?</summary><div class="body">
+<p>It's inherently serial and scattered: you can't visit node k+1 until you've read node k (a dependency chain, so no parallelism to spread across cores), and each node may live anywhere in memory (irregular, non-neighborly access that the GPU's wide, pattern-loving memory system can't use well). It violates all three parts of the bargain — independence, sameness, regular access — so the thousand tellers stand idle behind one. Pointer-chasing is a classic "give it to the CPU" workload.</p>
+</div></details>
+
+<hr>
+<h1>Go deeper — the complete guide</h1>
+<p>The card gives you the GPU's philosophy. This chapter names the machinery you'll spend Modules 4 and 5 mastering, so the words are already familiar when we make them precise.</p>
+
+<h2>1. SIMT, precisely — and the shared program counter</h2>
+<p>Within a warp, the 32 threads share one instruction stream: the hardware fetches an instruction once and applies it across all 32 lanes. Conceptually the warp has a single program counter. This is why SIMT is so efficient — the expensive fetch/decode/schedule work is amortized across 32 arithmetic operations instead of paid per operation. It is also the seed of the GPU's biggest gotcha, next.</p>
+
+<h2>2. Warp divergence — the cost of an <code>if</code></h2>
+<p>What happens when threads in one warp disagree at a branch — say half satisfy <code>if (x &gt; 0)</code> and half don't? Since the warp shares one instruction stream, it cannot run two different instructions at once. Instead it executes the <em>if</em>-side with the qualifying threads active and the rest masked off (idle), then executes the <em>else</em>-side with the roles reversed. Both sides run; some lanes are wasted on each. This is <strong>warp divergence</strong>, and a heavily branchy inner loop can halve or worse your effective throughput. The CPU's branch predictor made <code>if</code>s nearly free; the GPU makes divergent <code>if</code>s expensive. Writing branch-light, uniform inner loops is a core GPU skill (Module 5).</p>
+
+<h2>3. Coalescing — why 32 neighbors should read 32 neighbors</h2>
+<p>When a warp's 32 threads each read from memory, the hardware is happiest if those 32 addresses are <em>contiguous</em> — thread 0 reads element 0, thread 1 element 1, and so on. Then the whole warp's reads combine (<em>coalesce</em>) into a few wide memory transactions instead of 32 scattered ones. Scatter the accesses and you can waste most of the bandwidth you paid for. This is the direct GPU descendant of the CPU's cache-line and spatial-locality story from 0.2 — same lesson, higher stakes, and the subject of Lesson 5.7 and the Coalescing lab.</p>
+
+<h2>4. Occupancy — enough warps to hide the wait</h2>
+<p>Latency hiding only works if there are enough ready warps to switch to. The ratio of active warps to the maximum the hardware could hold is called <strong>occupancy</strong>. Too low, and stalls show through as idle cores (as in Exercise 2). But higher isn't automatically better — warps compete for limited on-chip resources (registers and a small fast scratchpad called shared memory), so pushing occupancy up can starve each thread. Finding the sweet spot is a real tuning task, and there's an interactive Occupancy lab for exactly this (Lab 5.6).</p>
+
+<h2>5. The GPU's memory: built for bandwidth</h2>
+<p>A machine with thousands of hungry cores needs to be <em>fed</em>. So a GPU pairs its cores with its own dedicated memory engineered for enormous <strong>bandwidth</strong> — total bytes per second, not low latency. Where a CPU's main memory delivers on the order of tens of gigabytes per second, a high-end GPU's memory can deliver on the order of <em>terabytes</em> per second — roughly an order of magnitude more, sometimes more. The trade is deliberate: GPU memory often has <em>higher</em> latency per access than CPU memory, but the GPU doesn't mind (it hides latency), and it desperately needs the bandwidth (to feed the sea of cores). Bandwidth, not clock speed, is usually the number that decides GPU performance — which is why the <em>roofline</em> model (Lesson 4.7 and its lab) is built around it.</p>
+
+<h2>6. Where the GPU loses</h2>
+<p>It's as important to know when <em>not</em> to reach for a GPU:</p>
+<table>
+<tr><th>Workload</th><th>Why the GPU struggles</th></tr>
+<tr><td>Small problems</td><td>Not enough parallel work to fill thousands of cores; launch overhead dominates. A CPU answers before the GPU has warmed up.</td></tr>
+<tr><td>Strictly serial tasks</td><td>A dependency chain (each step needs the last) can't be spread across cores at all — one slow GPU core does it worse than one fast CPU core.</td></tr>
+<tr><td>Heavy, unpredictable branching</td><td>Warp divergence forces both paths; SIMT efficiency collapses.</td></tr>
+<tr><td>Scattered, pointer-chasing memory</td><td>No coalescing, no regular pattern; the wide memory system is wasted.</td></tr>
+</table>
+<p>The professional skill isn't "always use the GPU" — it's recognizing which parts of a program are throughput-shaped (hand them to the GPU) and which are latency-shaped or serial (keep them on the CPU). Real systems use both, together, which is precisely the partnership Lesson 0.4 examines.</p>
+
+<h2>Gotchas</h2>
+<div class="gotcha"><strong>Thinking a GPU is "just a faster CPU."</strong> It's slower per thread and per task. It only wins through massive parallelism. Hand it a serial job and it loses to a laptop.</div>
+<div class="gotcha"><strong>Forgetting the bargain.</strong> The GPU's throughput assumes many independent, uniform, regularly-accessed tasks. Miss any of the three — independence, sameness, regular access — and performance falls off a cliff (divergence, poor coalescing, or idle cores).</div>
+<div class="gotcha"><strong>Under-feeding it.</strong> A GPU with only a few hundred threads active behaves like a stalled, mostly-idle chip. It needs tens of thousands in flight to hide latency; "not enough parallelism" is one of the most common reasons GPU code disappoints.</div>
+<div class="gotcha"><strong>Branch-heavy inner loops.</strong> On a CPU, a well-predicted branch is nearly free. Inside a warp, a data-dependent branch can force every lane through both sides. Move branches out of hot loops, or make them uniform across the warp.</div>
+
+<h2>Scenario — the pixel shader and the price of one <code>if</code></h2>
+<p>A graphics engineer writes a shader that runs once per pixel across an 8-megapixel frame — a textbook throughput problem, and the GPU eats it happily at first. Then a feature lands: <em>if</em> a pixel is in shadow, run an expensive extra lighting calculation; otherwise skip it. Reasonable on a CPU. But pixels in shadow and pixels in light are interleaved across the screen, so within almost every 32-thread warp some pixels take the expensive path and some don't. SIMT forces the whole warp through the expensive branch anyway, masking the lanes that didn't need it — so nearly every warp pays the full cost as if <em>all</em> its pixels were shadowed. Frame time spikes. The fix is pure GPU thinking: reorganize so that threads in a warp tend to agree (group shadowed work together), or replace the branch with a cheaper branch-free formula. Same code, same math, but arranged to respect how the machine actually executes. This is the flip side of 0.2's cache story — on both machines, victory comes from arranging the work to fit the hardware, not from doing less math.</p>
+
+<h2>Practice</h2>
+<details><summary>1. State the CPU's bet and the GPU's bet, each in one sentence.</summary><div class="body">The CPU bets you have a few urgent, unpredictable tasks, so it spends silicon on caches and control to make a small number of streams fast (minimizing latency). The GPU bets you have an ocean of identical independent tasks, so it spends silicon on thousands of simple arithmetic cores and hides memory stalls with an abundance of threads (maximizing throughput).</div></details>
+<details><summary>2. A job has 50 independent tasks. Is a GPU with 10,000-core capacity likely to shine? Why or why not?</summary><div class="body">No. Fifty tasks can't fill thousands of cores or provide enough warps to hide memory latency, and the fixed cost of launching work on the GPU may exceed the whole job. This is an "under-fed GPU": you need work in the thousands-to-millions range for the throughput machine to pay off. Fifty tasks belong on the CPU.</div></details>
+<details><summary>3. Explain, using SIMT, why "avoid divergent branches in the inner loop" is GPU gospel.</summary><div class="body">Because a warp shares one instruction stream, threads that disagree at a branch can't run different instructions simultaneously; the hardware serializes the paths, running each with some lanes masked off and idle. A divergent branch in a hot inner loop therefore wastes a large fraction of the warp's arithmetic units on every iteration. Keeping inner-loop branches uniform (all lanes agree) or branch-free preserves full SIMT efficiency.</div></details>
+<details><summary>4. Why does a GPU carry its own high-bandwidth memory instead of just using the CPU's RAM?</summary><div class="body">Thousands of cores consume data at a staggering rate, so the GPU needs memory bandwidth far beyond what CPU RAM (and the connection to it) can supply — often on the order of terabytes per second versus tens of gigabytes. It accepts higher per-access latency in exchange for that bandwidth, because it hides latency with parallel warps but cannot manufacture bandwidth it doesn't have. Feeding the cores is the whole design problem, and dedicated high-bandwidth memory is the answer. (The cost of copying data between CPU and GPU memory is a major theme of 0.4 and Module 4.)</div></details>
+<details><summary>5. Reflection: in your own words, how does the GPU turn the memory wall — the CPU's great enemy — into an advantage?</summary><div class="body">The memory wall means every core spends much of its time waiting for data. The CPU fights this by trying <em>not</em> to wait (caches, prediction), which costs so much silicon that it can only afford a few cores. The GPU instead <em>embraces</em> the waiting: it fills the chip with cheap cores that stall freely, then keeps so many independent warps in flight that whenever one waits, another runs. The very stalls that idle a CPU become the gaps a GPU fills with other work — so the wall that limits one machine becomes the mechanism the other exploits to stay fully busy.</div></details>
+
+<div class="pager">
+  <a href="lesson-02.html">← 0.2 The CPU</a>
+  <span class="dim" style="opacity:.6">Next: CPU vs GPU — the trade-off (coming)</span>
+</div>
+<div class="footer">GPU Mastery · Module 0 · Lesson 3 — works offline · progress saved in your browser</div>
+</div>
+<script src="../assets/app.js"></script>
+</body>
+</html>
