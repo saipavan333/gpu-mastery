@@ -1,0 +1,253 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>0.1 What a Computer Actually Does — GPU Mastery</title>
+<link rel="stylesheet" href="../assets/style.css">
+<!-- gm-seo:start -->
+<link rel="canonical" href="https://saipavan333.github.io/gpu-mastery/module-0/lesson-01.html">
+<link rel="manifest" href="https://saipavan333.github.io/gpu-mastery/manifest.webmanifest">
+<meta name="theme-color" content="#0b0e14">
+<link rel="apple-touch-icon" href="https://saipavan333.github.io/gpu-mastery/assets/img/favicon-180.png">
+<meta name="description" content="Before you can understand what makes a GPU special, you need a crisp picture of what any computer does. This lesson builds it from one idea: a processor reads a list of tiny instructions and runs them billions of times a second.">
+<meta property="og:type" content="article">
+<meta property="og:site_name" content="GPU Mastery">
+<meta property="og:title" content="0.1 What a Computer Actually Does — GPU Mastery">
+<meta property="og:description" content="Before you can understand what makes a GPU special, you need a crisp picture of what any computer does. This lesson builds it from one idea: a processor reads a list of tiny instructions and runs them billions of times a second.">
+<meta property="og:url" content="https://saipavan333.github.io/gpu-mastery/module-0/lesson-01.html">
+<meta property="og:image" content="https://saipavan333.github.io/gpu-mastery/assets/img/og.png">
+<meta name="twitter:card" content="summary_large_image">
+<meta name="twitter:title" content="0.1 What a Computer Actually Does — GPU Mastery">
+<meta name="twitter:description" content="Before you can understand what makes a GPU special, you need a crisp picture of what any computer does. This lesson builds it from one idea: a processor reads a list of tiny instructions and runs them billions of times a second.">
+<meta name="twitter:image" content="https://saipavan333.github.io/gpu-mastery/assets/img/og.png">
+<!-- gm-seo:end -->
+</head>
+<body data-lesson="m0l1">
+<nav><div class="inner">
+  <a class="logo" href="../index.html">GPU<span>Mastery</span></a>
+  <a class="item" href="../index.html">Home</a>
+  <a class="item on" href="../curriculum.html">Curriculum</a>
+  <a class="item" href="../labs.html">Labs</a>
+  <a class="item" href="../setup.html">Lab setup</a>
+</div></nav>
+<div class="wrap">
+
+<div class="lesson-top">
+  <div><span class="badge">Module 0 · Lesson 1</span><span class="badge dim">≈ 1–2 h · no prerequisites</span></div>
+  <button id="donebtn" class="donebtn">Mark lesson complete</button>
+</div>
+<h1>What a computer actually does — instructions, clocks & the fetch–execute loop</h1>
+<p class="lead">A GPU is a special kind of computer, so before we can see what makes it special, we need a clear picture of what <em>any</em> computer does. It all comes from one humble idea: a processor reads a list of absurdly simple instructions and carries them out, one after another, billions of times a second. Get this picture right and every later idea — cores, threads, memory bandwidth, the whole reason GPUs exist — has somewhere to attach.</p>
+
+<h2>Concept</h2>
+
+<h3>A program is a list of absurdly simple steps</h3>
+<p>It's tempting to imagine a computer "understands" your spreadsheet or your game. It doesn't. Underneath, a processor only knows a small menu of tiny operations: <em>copy this number from memory into me</em>, <em>add these two numbers</em>, <em>compare them</em>, <em>if the result is zero, jump to a different instruction</em>, <em>write this number back to memory</em>. That's roughly the whole vocabulary. A real program is millions of these tiny steps in a row.</p>
+<p>The magic isn't cleverness per step — each step is something a schoolchild could do. The magic is <strong>speed and quantity</strong>: a modern core does billions of these steps every second without ever getting bored or making a mistake. "Adding two lists of a million numbers" isn't one operation to a computer; it's a million rounds of <em>load, load, add, store</em>.</p>
+<div class="note">This is the single most useful mental shift for this whole course: stop thinking "the computer does my task" and start thinking "the computer does billions of trivial steps, and my task is a way of arranging them." A GPU is just a machine that does a <em>staggering</em> number of trivial steps at the same time.</div>
+
+<h3>The fetch–execute loop — the heartbeat of every processor</h3>
+<p>How does the processor know which tiny step to do next? It keeps a bookmark called the <strong>program counter</strong> (PC) — the memory address of the next instruction. Then it repeats one loop forever:</p>
+<div class="diagram">
+<svg viewBox="0 0 760 300" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="The fetch-execute cycle: fetch the instruction the program counter points to, decode it, execute it, write the result back, advance the program counter, and repeat.">
+  <rect x="0" y="0" width="760" height="300" rx="14" fill="#12161d"/>
+  <text x="30" y="40" fill="#8fb6ff" font-family="ui-monospace,monospace" font-size="13" letter-spacing="1.5">THE FETCH–EXECUTE CYCLE · one heartbeat of a core</text>
+  <!-- four stage boxes -->
+  <g font-family="system-ui,sans-serif" font-size="15" font-weight="600" text-anchor="middle">
+    <rect x="40" y="90" width="150" height="70" rx="11" fill="#16233d" stroke="#5b9bff" stroke-width="1.5"/>
+    <text x="115" y="122" fill="#e8edf5">1 · Fetch</text>
+    <text x="115" y="142" fill="#9fb0c6" font-size="11.5" font-weight="400">read instr. at PC</text>
+
+    <rect x="215" y="90" width="150" height="70" rx="11" fill="#16233d" stroke="#37e0c8" stroke-width="1.5"/>
+    <text x="290" y="122" fill="#e8edf5">2 · Decode</text>
+    <text x="290" y="142" fill="#9fb0c6" font-size="11.5" font-weight="400">what does it mean?</text>
+
+    <rect x="390" y="90" width="150" height="70" rx="11" fill="#16233d" stroke="#b48cff" stroke-width="1.5"/>
+    <text x="465" y="122" fill="#e8edf5">3 · Execute</text>
+    <text x="465" y="142" fill="#9fb0c6" font-size="11.5" font-weight="400">do the math</text>
+
+    <rect x="565" y="90" width="155" height="70" rx="11" fill="#16233d" stroke="#f5b850" stroke-width="1.5"/>
+    <text x="642" y="122" fill="#e8edf5">4 · Write back</text>
+    <text x="642" y="142" fill="#9fb0c6" font-size="11.5" font-weight="400">store the result</text>
+  </g>
+  <!-- arrows between boxes -->
+  <g stroke="#5b6b82" stroke-width="2" marker-end="url(#ah)">
+    <line x1="190" y1="125" x2="211" y2="125"/>
+    <line x1="365" y1="125" x2="386" y2="125"/>
+    <line x1="540" y1="125" x2="561" y2="125"/>
+  </g>
+  <defs><marker id="ah" markerWidth="9" markerHeight="9" refX="7" refY="4.5" orient="auto"><path d="M0,0 L9,4.5 L0,9 Z" fill="#5b6b82"/></marker>
+        <marker id="ah2" markerWidth="9" markerHeight="9" refX="7" refY="4.5" orient="auto"><path d="M0,0 L9,4.5 L0,9 Z" fill="#37e0c8"/></marker></defs>
+  <!-- loop-back arrow -->
+  <path d="M642,160 L642,205 Q642,225 622,225 L118,225 Q98,225 98,205 L98,162" fill="none" stroke="#37e0c8" stroke-width="2" stroke-dasharray="5 4" marker-end="url(#ah2)"/>
+  <text x="380" y="248" fill="#37e0c8" font-family="ui-monospace,monospace" font-size="12.5" text-anchor="middle">advance the Program Counter → repeat, ~billions of times per second</text>
+  <text x="380" y="278" fill="#7e8aa0" font-size="12" text-anchor="middle" font-family="system-ui,sans-serif">A "jump" instruction simply writes a new address into the PC — that is how loops and <tspan fill="#9fb0c6">if</tspan>-statements happen.</text>
+</svg>
+<div class="cap">The fetch–execute cycle. The program counter is the bookmark; every loop, structure like "if" and "for" is just an instruction that changes it.</div>
+</div>
+<p>Fetch the instruction the PC points at, figure out what it means, do it, save the result, move the PC to the next instruction, and go again. Branches (<code>if</code>) and loops (<code>for</code>) are nothing mystical — they are just instructions that write a <em>new</em> address into the PC, so the next fetch comes from somewhere else.</p>
+
+<h3>The clock — what "3 GHz" actually measures</h3>
+<p>A processor has a metronome called the <strong>clock</strong>. Every tick, the machine advances a little. "3&nbsp;GHz" means three billion ticks per second — so one tick lasts about <strong>one-third of a nanosecond</strong> (a nanosecond is a billionth of a second). For intuition: in the time light takes to cross a room (~3&nbsp;ns for a meter), a 3&nbsp;GHz core has already ticked about ten times. These machines are fast beyond ordinary intuition.</p>
+<p>A tempting mistake is "more gigahertz = faster computer." It isn't that simple, and the reasons why are the entire story of this course. Two of them right now: not every instruction finishes in one tick (a memory read can cost <em>hundreds</em> of ticks), and a chip can do more than one thing per tick if it has more hardware. Hold that thought — it's the door the GPU walks through.</p>
+
+<h3>Memory: a giant wall of numbered boxes</h3>
+<p>The instructions and the data both live in <strong>memory</strong> (RAM): think of it as one enormous row of boxes, each holding one byte, each with a number — its <em>address</em>. The processor is a <em>separate</em> chip from the memory. To add two numbers, the core must first haul them across the gap from memory into itself, and later push the result back.</p>
+<div class="diagram">
+<svg viewBox="0 0 760 300" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="The processor and memory are separate. Data must travel across a bus between them. Doing arithmetic is fast, under a nanosecond, but fetching a number from main memory costs on the order of a hundred nanoseconds.">
+  <rect x="0" y="0" width="760" height="300" rx="14" fill="#12161d"/>
+  <text x="30" y="38" fill="#8fb6ff" font-family="ui-monospace,monospace" font-size="13" letter-spacing="1.5">THE VON NEUMANN GAP · why moving data is the real cost</text>
+  <!-- processor -->
+  <rect x="45" y="80" width="215" height="165" rx="12" fill="#16233d" stroke="#5b9bff" stroke-width="1.6"/>
+  <text x="152" y="108" fill="#e8edf5" font-family="system-ui,sans-serif" font-size="16" font-weight="700" text-anchor="middle">Processor (core)</text>
+  <g text-anchor="middle" font-family="ui-monospace,monospace">
+    <rect x="70" y="128" width="75" height="34" rx="7" fill="#0e1420" stroke="#3a4763"/>
+    <text x="107" y="150" fill="#8fb6ff" font-size="12">registers</text>
+    <rect x="160" y="128" width="75" height="34" rx="7" fill="#0e1420" stroke="#3a4763"/>
+    <text x="197" y="150" fill="#b48cff" font-size="12">adder</text>
+    <text x="152" y="192" fill="#36c98a" font-size="12.5">arithmetic: &lt; 1 ns</text>
+    <text x="152" y="214" fill="#9fb0c6" font-size="11.5">"do the math" is nearly free</text>
+  </g>
+  <!-- memory -->
+  <rect x="500" y="80" width="215" height="165" rx="12" fill="#16233d" stroke="#37e0c8" stroke-width="1.6"/>
+  <text x="607" y="108" fill="#e8edf5" font-family="system-ui,sans-serif" font-size="16" font-weight="700" text-anchor="middle">Main memory (RAM)</text>
+  <g font-family="ui-monospace,monospace" font-size="11" text-anchor="middle">
+    <rect x="525" y="126" width="52" height="26" rx="5" fill="#0e1420" stroke="#3a4763"/><text x="551" y="143" fill="#9fb0c6">0x00</text>
+    <rect x="581" y="126" width="52" height="26" rx="5" fill="#0e1420" stroke="#3a4763"/><text x="607" y="143" fill="#9fb0c6">0x01</text>
+    <rect x="637" y="126" width="52" height="26" rx="5" fill="#0e1420" stroke="#3a4763"/><text x="663" y="143" fill="#9fb0c6">0x02</text>
+    <text x="607" y="192" fill="#f5b850" font-size="12.5">fetch: ~100 ns</text>
+    <text x="607" y="214" fill="#9fb0c6" font-size="11.5">billions of numbered bytes</text>
+  </g>
+  <!-- bus -->
+  <g stroke="#5b6b82" stroke-width="2.5" fill="none" marker-end="url(#ah3)" marker-start="url(#ah3b)">
+    <line x1="262" y1="163" x2="498" y2="163"/>
+  </g>
+  <defs>
+    <marker id="ah3" markerWidth="10" markerHeight="10" refX="8" refY="5" orient="auto"><path d="M0,0 L10,5 L0,10 Z" fill="#5b6b82"/></marker>
+    <marker id="ah3b" markerWidth="10" markerHeight="10" refX="2" refY="5" orient="auto"><path d="M10,0 L0,5 L10,10 Z" fill="#5b6b82"/></marker>
+  </defs>
+  <text x="380" y="152" fill="#e8edf5" font-family="system-ui,sans-serif" font-size="13" text-anchor="middle">the bus</text>
+  <text x="380" y="270" fill="#7e8aa0" font-family="system-ui,sans-serif" font-size="12.5" text-anchor="middle">Every byte the core touches must cross this gap. The math is fast; the <tspan fill="#f5b850">travel</tspan> is ~100× slower. That imbalance is the reason GPUs exist.</text>
+</svg>
+<div class="cap">The von Neumann gap. Arithmetic is almost free; moving data across the bus is the slow, expensive part — roughly a hundred times slower than the add that consumes it.</div>
+</div>
+<p>Here is the punchline that the rest of the course keeps returning to: <strong>the arithmetic is cheap; moving the data is expensive.</strong> Adding two numbers takes well under a nanosecond, but reaching all the way out to main memory for a number can cost on the order of a hundred nanoseconds. A processor that had to wait for every memory access would spend nearly all its time idle. Every fast computer — CPU or GPU — is, at heart, an elaborate scheme to avoid waiting on memory.</p>
+
+<h3>Why this matters for GPUs</h3>
+<p>A GPU runs the same fetch–execute loop. Nothing about it is magic. The difference is a design choice we'll unpack over the next five lessons: instead of one very clever core that tries hard not to wait, a GPU packs in <em>thousands</em> of simpler cores and keeps them busy by always having other work ready whenever one is waiting on memory. Same heartbeat, multiplied by thousands, and organized entirely around feeding them data. To understand that choice, we first have to meet its opposite — the CPU — which is the next lesson.</p>
+
+<h2>Worked example</h2>
+<div class="card">
+<p><strong>Task:</strong> A single 3&nbsp;GHz core adds two lists of one billion numbers, element by element. Roughly how long does it take if we <em>pretend</em> each add is one clock tick — and then, why is that estimate wildly optimistic?</p>
+<p><strong>1 — the naive compute estimate:</strong> one billion adds ÷ three billion ticks per second = <strong>0.33 seconds</strong>. That is the <em>best case</em>, counting only the arithmetic.</p>
+<p><strong>2 — the hidden cost:</strong> each add first needs two numbers <em>read</em> from memory and one result <em>written</em> back — three memory trips per add. If a memory trip can stall the core for ~100&nbsp;ns and nothing hides that wait, a billion elements could stall for many <em>seconds</em>, not a third of one. The adder was never the bottleneck; the bus was.</p>
+<p><strong>3 — the two ways out:</strong> (a) keep data close so you rarely pay the full memory cost — this is what <em>caches</em> do, and it's the CPU's whole personality (Lesson 0.2). (b) When one core stalls on memory, have thousands of <em>other</em> threads ready to run so the hardware is never idle — this is the GPU's whole personality (Lesson 0.3).</p>
+<p><strong>Decision made:</strong> "just buy a higher-GHz CPU" barely helps here, because the core is mostly <em>waiting</em>, not computing. The real levers are keeping data close and doing many things at once — which is exactly why the industry turned to parallel hardware like GPUs.</p>
+</div>
+
+<h2>Key points</h2>
+<ul class="keypoints">
+<li>A processor knows only a tiny menu of trivial operations (load, add, compare, jump, store). A program is millions of these in a row; the power is speed and quantity, not cleverness per step.</li>
+<li>Every core repeats the <strong>fetch–execute loop</strong>: fetch the instruction the program counter points to, decode, execute, write back, advance the PC, repeat. <code>if</code> and <code>for</code> are just instructions that change the PC.</li>
+<li>The <strong>clock</strong> sets the pace: 3&nbsp;GHz ≈ 3 billion ticks/second ≈ one tick every ⅓ nanosecond. But "more GHz" is not the same as "faster" — that's the rest of the course.</li>
+<li>Memory is a huge array of numbered bytes on a <em>separate</em> chip. The processor must haul data across a <strong>bus</strong> to work on it.</li>
+<li>The defining imbalance: <strong>arithmetic is nearly free (&lt;1&nbsp;ns); a trip to main memory is ~100× slower</strong>. Fast computers are elaborate schemes to avoid waiting on memory.</li>
+<li>A GPU is the same loop times thousands, designed so that while some cores wait on memory, others keep working — turning the memory-wait problem into an opportunity.</li>
+</ul>
+
+<h2>Quiz</h2>
+<div class="quiz">
+  <div class="q">1. What does the program counter (PC) hold?</div>
+  <button class="opt">The total number of programs currently running</button>
+  <button class="opt" data-c="1">The memory address of the next instruction to fetch</button>
+  <button class="opt">How many clock ticks are left before the program ends</button>
+  <button class="opt">The result of the last calculation</button>
+  <div class="expl">The PC is the processor's bookmark — the address of the next instruction. Loops and branches work by writing a new address into it, which is why "jump" is all you need to build <code>if</code> and <code>for</code>.</div>
+</div>
+<div class="quiz">
+  <div class="q">2. On a modern machine, roughly how do the costs of "add two numbers already in the core" and "fetch a number from main memory" compare?</div>
+  <button class="opt">They cost about the same</button>
+  <button class="opt">The add is a little slower than the fetch</button>
+  <button class="opt" data-c="1">The fetch is on the order of ~100× slower than the add</button>
+  <button class="opt">The fetch is instant; only arithmetic takes time</button>
+  <div class="expl">Arithmetic is well under a nanosecond; a main-memory fetch is on the order of ~100&nbsp;ns. This imbalance — cheap math, expensive data movement — is the reason both caches (CPU) and massive multithreading (GPU) exist.</div>
+</div>
+
+<h2>Exercises</h2>
+<details><summary>Exercise 1 — In one sentence each, describe what "fetch," "decode," "execute," and "write back" do, and say which one a <code>for</code>-loop secretly changes.</summary><div class="body">
+<p><strong>Fetch:</strong> read the instruction stored at the address in the program counter. <strong>Decode:</strong> work out what that instruction means and which data it needs. <strong>Execute:</strong> perform the operation (e.g. add). <strong>Write back:</strong> store the result into a register or memory. A <code>for</code>-loop changes the <strong>program counter</strong>: at the bottom of each pass it jumps the PC back to the top of the loop body, so fetch pulls the same instructions again.</p>
+</div></details>
+<details><summary>Exercise 2 — A 2&nbsp;GHz core executes one instruction per tick with no memory stalls. How many instructions does it run in one millisecond? Why is the real number usually lower?</summary><div class="body">
+<p>2&nbsp;GHz = 2 × 10⁹ ticks/second, so in 1&nbsp;ms (10⁻³&nbsp;s) it manages 2 × 10⁹ × 10⁻³ = <strong>2 million</strong> instructions. The real number is usually lower because instructions don't all finish in one tick — memory accesses in particular can stall the core for tens or hundreds of ticks while it waits for data to arrive across the bus.</p>
+</div></details>
+<details><summary>Exercise 3 — Explain, using only ideas from this lesson, why "just double the clock speed" is a weak way to make the array-adding example faster.</summary><div class="body">
+<p>In that example the core spends most of its time <em>waiting</em> for numbers to arrive from memory, not doing arithmetic. Doubling the clock makes the arithmetic (already the cheap part) twice as fast, but it does little for the waiting, which is set by memory latency, not by the core's clock. You'd pay for a faster metronome and still stand around idle. The effective fixes are keeping data close (caches) or overlapping many memory waits at once (parallel threads) — the CPU and GPU strategies we meet next.</p>
+</div></details>
+
+<hr>
+<h1>Go deeper — the complete guide</h1>
+<p>The card above makes you functional. This chapter makes the picture precise: what an instruction really is, how the loop pipelines, why the clock is only part of speed, and how the memory wall bends the entire history of computing hardware toward parallel machines like the GPU.</p>
+
+<h2>1. What an instruction really is</h2>
+<p>The menu of operations a particular processor understands is its <strong>instruction set architecture</strong> (ISA) — x86-64 on most laptops and desktops, ARM on phones and Apple Silicon, and a GPU has its own internal ISA underneath CUDA. An instruction is just a number: a pattern of bits the decode stage reads as "which operation" plus "which registers/addresses." A tiny, illustrative sequence to add two numbers from memory and store the result:</p>
+<pre><code>LOAD  r1, [0x1000]     ; copy the number at address 0x1000 into register r1
+LOAD  r2, [0x1004]     ; copy the number at address 0x1004 into register r2
+ADD   r3, r1, r2       ; r3 = r1 + r2   (this is the cheap part)
+STORE [0x1008], r3     ; write r3 back out to address 0x1008</code></pre>
+<p><strong>Registers</strong> (r1, r2, r3 above) are a handful of tiny storage slots <em>inside</em> the core — the only place arithmetic can actually happen. They are astonishingly fast and astonishingly few (on the order of dozens). Almost everything a processor does is a dance of pulling data from slow memory into fast registers, computing, and pushing results back out. Keep that dance in mind — in Module 5 you'll discover a GPU thread has its <em>own</em> private registers, and running out of them is a real performance limit.</p>
+
+<h2>2. The loop, pipelined</h2>
+<p>Doing fetch → decode → execute → write-back strictly one-at-a-time would waste hardware: while the execute unit works, the fetch unit sits idle. Real cores <strong>pipeline</strong> — like an assembly line, they fetch instruction 4 while decoding instruction 3, executing instruction 2, and writing back instruction 1. Done well, a pipelined core finishes roughly one instruction per tick even though each instruction takes several ticks end-to-end.</p>
+<p>Pipelining has a villain: <strong>branches</strong>. When the core reaches an <code>if</code>, it doesn't yet know which way execution goes, so it doesn't know which instruction to fetch next. Guess wrong and the half-built assembly line must be flushed and refilled — wasted work. CPUs spend enormous effort <em>predicting</em> branches (Lesson 0.2); GPUs, tellingly, handle branches very differently, and that difference is central to how they think (Lesson 0.3).</p>
+
+<h2>3. Why the clock is only part of the story</h2>
+<p>Performance is often summarized as: <strong>time = instructions × cycles-per-instruction ÷ clock rate</strong>. Three levers, not one:</p>
+<table>
+<tr><th>Lever</th><th>What it means</th><th>Who pushes it</th></tr>
+<tr><td>Fewer instructions</td><td>a smarter algorithm or compiler doing the same work in fewer steps</td><td>you, and the compiler</td></tr>
+<tr><td>Lower cycles-per-instruction</td><td>the core doing more per tick: pipelining, running several instructions at once, hiding memory stalls</td><td>the hardware architects</td></tr>
+<tr><td>Higher clock rate</td><td>more ticks per second</td><td>physics, and it has largely stalled</td></tr>
+</table>
+<p>That last row is one of the most important facts in modern computing. For decades, clocks climbed every year and software got faster for free. Around the mid-2000s that stopped: pushing clocks higher made chips too hot to cool. This is the <strong>power wall</strong>, and it forced the entire industry to a new plan — instead of one core running ever faster, put <em>many</em> cores on one chip and run them in parallel. GPUs are the most extreme expression of that plan.</p>
+<div class="note">The free lunch ended around 2005. Before it, you waited a year and your program ran faster on next year's chip. After it, going faster means going <em>parallel</em> — which is a skill, not a purchase. This course teaches that skill. The GPU is where it pays off most.</div>
+
+<h2>4. The memory wall — the theme beneath everything</h2>
+<p>Processor speed and memory speed did not improve at the same rate. Cores got dramatically faster; main memory got faster far more slowly. The gap between them — measured in how many instructions a core could have run in the time it waits for one memory access — grew for decades. This is the <strong>memory wall</strong>, and it is the reason so much of this course is about <em>data movement</em> rather than arithmetic.</p>
+<p>Two responses run through everything you'll learn:</p>
+<ul class="keypoints">
+<li><strong>Caches</strong> — small, fast memories that sit between the core and main memory, holding recently- and soon-to-be-used data close by. When the data you need is already in cache, you skip the long trip. This is the CPU's primary weapon (Lesson 0.2, and Module 4).</li>
+<li><strong>Latency hiding</strong> — if you have thousands of independent tasks, then whenever one is stalled waiting on memory, the hardware simply runs another. The wait still happens, but it's <em>hidden</em> behind useful work. This is the GPU's primary weapon (Lesson 0.3), and it's why a GPU wants far more threads than it has cores.</li>
+</ul>
+<p>You will eventually quantify all of this with a single, beautiful diagram called the <em>roofline</em> (Lesson 4.7 and the Labs). For now, just carry the instinct: <strong>the score is usually decided by how you move data, not by how you do arithmetic.</strong></p>
+
+<h2>5. Sequential by default — the road that leads to the GPU</h2>
+<p>A single core, left alone, does exactly one thing at a time: one stream of instructions, in order. There are only three ways to make it get more done:</p>
+<p><strong>(1) Raise the clock</strong> — blocked by the power wall. <strong>(2) Do more per tick</strong> on one instruction stream — pipelining and running several instructions at once; this is "instruction-level parallelism," and there's a ceiling to how much independent work a single stream contains. <strong>(3) Run many streams at once</strong> — many cores, many threads; this is the open-ended road, and it's the one the whole industry took. A CPU took a few steps down it (a handful of powerful cores). A GPU sprinted (thousands of small ones). Everything from Lesson 0.2 onward is about how these two very different machines make that choice — and how you, the programmer, feed them.</p>
+
+<h2>Gotchas</h2>
+<div class="gotcha"><strong>GHz across different chips means little.</strong> A 3&nbsp;GHz chip of one design can badly outperform a 4&nbsp;GHz chip of another, because they differ in work-per-tick and in how well they hide memory stalls. Never compare processors by clock alone — especially never a CPU against a GPU that way.</div>
+<div class="gotcha"><strong>"Memory" is not "storage."</strong> Memory (RAM) is the fast, temporary numbered-boxes the processor works from; it is wiped when power is lost. Storage (SSD/disk) is slower, larger, and permanent. In this course "memory" always means RAM and the GPU's own on-board memory unless we say otherwise.</div>
+<div class="gotcha"><strong>The core is often idle, not busy.</strong> Beginners picture the processor pinned at 100% doing math. In memory-heavy work it spends most cycles <em>stalled</em>, waiting for data. Optimizing the math it does while waiting is polishing a part that was never the bottleneck.</div>
+<div class="gotcha"><strong>Instructions and data share memory.</strong> Both your program's steps and its numbers live in the same addressed memory. This is the von Neumann design; it's why a program is "just data" that the PC walks through.</div>
+
+<h2>Scenario — the mystery of the idle supercomputer</h2>
+<p>A research team ports a physics simulation to a shiny new machine with cores twice as fast as their old one, and expects it to run twice as quickly. It runs barely faster at all. Baffled, they profile it — and find the cores sitting idle more than 70% of the time, stalled waiting for data to arrive from memory. The simulation touches a huge grid of numbers once each, so caches barely help, and there's only one stream of work, so nothing fills the waiting. The faster clock made the 30%-that-was-computing quicker and did nothing for the 70%-that-was-waiting. The real fix wasn't a faster core; it was restructuring the problem into thousands of independent pieces so the hardware always had something to do while any one piece waited — in other words, making it look like the kind of work a GPU devours. This lesson's humble ideas — the loop, the clock, the bus, the wait — are exactly the ideas that explain the disappointment and point to the cure. The rest of the course turns that cure into a craft.</p>
+
+<h2>Practice</h2>
+<details><summary>1. Write the four-instruction sequence (in the style shown) to compute <code>c = a + a</code> where <code>a</code> lives at address 0x2000 and <code>c</code> should go to 0x2008.</summary><div class="body"><pre><code>LOAD  r1, [0x2000]    ; r1 = a
+ADD   r2, r1, r1      ; r2 = a + a   (no second LOAD needed — reuse r1)
+STORE [0x2008], r2    ; c = r2</code></pre><p>Note you only load <code>a</code> once and reuse it from the fast register — a tiny example of the constant theme "touch slow memory as little as possible."</p></div></details>
+<details><summary>2. A program is 6 billion instructions. On a core that averages one instruction per tick at 3&nbsp;GHz, what's the ideal run time? Name one realistic reason it will be slower.</summary><div class="body"><p>6 × 10⁹ ÷ 3 × 10⁹ = <strong>2 seconds</strong> ideal. Realistically slower because many instructions stall on memory (cache misses), branches occasionally mispredict and flush the pipeline, and not every instruction truly retires in one tick — so the average cycles-per-instruction is above 1.</p></div></details>
+<details><summary>3. Explain the power wall in two sentences, and what the industry did in response.</summary><div class="body"><p>Pushing clock speeds ever higher made chips consume and dissipate too much power to cool, so around the mid-2000s clock rates largely stopped climbing. Rather than one ever-faster core, chipmakers put many cores on a chip and pursued parallelism — with GPUs, containing thousands of small cores, as the most extreme version of that strategy.</p></div></details>
+<details><summary>4. Why does a GPU want <em>more</em> threads than it has cores? (Answer with the memory wall.)</summary><div class="body"><p>Because threads frequently stall waiting on memory. If a GPU had exactly one thread per core, a stalled thread would leave its core idle. By over-subscribing — many more threads ready than cores — whenever one thread waits on memory, the core instantly switches to another that's ready, so the memory latency is <em>hidden</em> behind other work and the hardware stays busy. Latency hiding is the GPU's core trick, and it only works with an abundance of independent threads.</p></div></details>
+<details><summary>5. Reflection: in your own words, why is "the arithmetic is cheap, moving the data is expensive" the most important sentence in this lesson?</summary><div class="body"><p>Because it re-aims your attention. Almost every performance decision in the course — caches, coalescing, tiling, occupancy, the roofline — is about reducing or hiding the cost of moving data, not about doing the math faster. Once you believe that arithmetic is nearly free and data movement is the price, the design of both CPUs and GPUs (and the reason GPUs win at the right problems) stops being a list of facts and becomes one coherent idea.</p></div></details>
+
+<div class="pager">
+  <a href="../curriculum.html">← Curriculum</a>
+  <span class="dim" style="opacity:.6">Next: The CPU — built for latency (coming)</span>
+</div>
+<div class="footer">GPU Mastery · Module 0 · Lesson 1 — works offline · progress saved in your browser</div>
+</div>
+<script src="../assets/app.js"></script>
+</body>
+</html>
