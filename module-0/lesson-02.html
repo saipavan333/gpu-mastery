@@ -1,0 +1,234 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>0.2 The CPU — Built for Latency — GPU Mastery</title>
+<link rel="stylesheet" href="../assets/style.css">
+<!-- gm-seo:start -->
+<link rel="canonical" href="https://saipavan333.github.io/gpu-mastery/module-0/lesson-02.html">
+<link rel="manifest" href="https://saipavan333.github.io/gpu-mastery/manifest.webmanifest">
+<meta name="theme-color" content="#0b0e14">
+<link rel="apple-touch-icon" href="https://saipavan333.github.io/gpu-mastery/assets/img/favicon-180.png">
+<meta name="description" content="A CPU is engineered to finish one task as fast as possible. This lesson shows how — caches, branch prediction, and doing several instructions per tick — and why that makes it a few big, clever cores rather than many small ones.">
+<meta property="og:type" content="article">
+<meta property="og:site_name" content="GPU Mastery">
+<meta property="og:title" content="0.2 The CPU — Built for Latency — GPU Mastery">
+<meta property="og:description" content="A CPU is engineered to finish one task as fast as possible. This lesson shows how — caches, branch prediction, and doing several instructions per tick — and why that makes it a few big, clever cores rather than many small ones.">
+<meta property="og:url" content="https://saipavan333.github.io/gpu-mastery/module-0/lesson-02.html">
+<meta property="og:image" content="https://saipavan333.github.io/gpu-mastery/assets/img/og.png">
+<meta name="twitter:card" content="summary_large_image">
+<meta name="twitter:title" content="0.2 The CPU — Built for Latency — GPU Mastery">
+<meta name="twitter:description" content="A CPU is engineered to finish one task as fast as possible. This lesson shows how — caches, branch prediction, and doing several instructions per tick — and why that makes it a few big, clever cores rather than many small ones.">
+<meta name="twitter:image" content="https://saipavan333.github.io/gpu-mastery/assets/img/og.png">
+<!-- gm-seo:end -->
+</head>
+<body data-lesson="m0l2">
+<nav><div class="inner">
+  <a class="logo" href="../index.html">GPU<span>Mastery</span></a>
+  <a class="item" href="../index.html">Home</a>
+  <a class="item on" href="../curriculum.html">Curriculum</a>
+  <a class="item" href="../labs.html">Labs</a>
+  <a class="item" href="../setup.html">Lab setup</a>
+</div></nav>
+<div class="wrap">
+
+<div class="lesson-top">
+  <div><span class="badge">Module 0 · Lesson 2</span><span class="badge dim">≈ 1–2 h · prereq: 0.1</span></div>
+  <button id="donebtn" class="donebtn">Mark lesson complete</button>
+</div>
+<h1>The CPU — built for latency</h1>
+<p class="lead">Last lesson we found the villain: waiting on memory. The CPU is a machine built around one obsession — finish the task in front of it as fast as humanly (electronically) possible, which means never waiting if it can help it. Understanding how it fights the wait, and what that costs, is the perfect mirror for understanding the GPU, which makes the opposite bet.</p>
+
+<h2>Concept</h2>
+
+<h3>The CPU's one goal: low latency</h3>
+<p><strong>Latency</strong> is the time to finish a single task, start to end. A CPU is engineered to make that time as small as possible: open your laptop, click a link, run a script — you want the answer <em>now</em>, and usually there's only one main thing to do at a time. So the CPU pours nearly all of its ingenuity into a single question: <em>how do I keep one instruction stream racing forward without ever stalling?</em> Almost every famous CPU feature — caches, branch prediction, out-of-order execution — is an answer to that one question.</p>
+<div class="note">Keep this word <strong>latency</strong> close. The GPU (next lesson) optimizes a different word — <strong>throughput</strong> — and essentially every difference between the two machines flows from that one choice of what to make fast.</div>
+
+<h3>Caches: keep the data close so you rarely wait</h3>
+<p>Reaching main memory costs ~100 nanoseconds (Lesson 0.1). The CPU's headline weapon against that is the <strong>cache</strong>: small, extremely fast memories that sit right next to the core and hold recently-used data. If the number you need is already in the cache — a <em>cache hit</em> — you skip the long trip entirely and get it in a nanosecond or few. Modern CPUs stack several cache levels, each bigger and slower than the last:</p>
+<div class="diagram">
+<svg viewBox="0 0 760 320" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="The memory hierarchy as a ladder from registers to main memory. Registers are near-instant but hold only bytes; L1 cache is about a nanosecond and tens of kilobytes; L2 a few nanoseconds and hundreds of kilobytes; L3 around fifteen nanoseconds and tens of megabytes; main memory around a hundred nanoseconds and gigabytes. Smaller and faster on the left, bigger and slower on the right.">
+  <rect x="0" y="0" width="760" height="320" rx="14" fill="#12161d"/>
+  <text x="30" y="38" fill="#8fb6ff" font-family="ui-monospace,monospace" font-size="13" letter-spacing="1.2">THE MEMORY HIERARCHY · trade size for speed</text>
+  <g font-family="system-ui,sans-serif" text-anchor="middle">
+    <!-- Registers -->
+    <rect x="34" y="120" width="96" height="70" rx="9" fill="#16233d" stroke="#5b9bff" stroke-width="1.6"/>
+    <text x="82" y="150" fill="#e8edf5" font-size="14" font-weight="700">Registers</text>
+    <text x="82" y="210" fill="#9fb0c6" font-size="11.5">~0 ns</text>
+    <text x="82" y="228" fill="#6f7d92" font-size="11">~bytes</text>
+    <!-- L1 -->
+    <rect x="150" y="108" width="110" height="94" rx="9" fill="#16233d" stroke="#37e0c8" stroke-width="1.6"/>
+    <text x="205" y="150" fill="#e8edf5" font-size="14" font-weight="700">L1 cache</text>
+    <text x="205" y="222" fill="#9fb0c6" font-size="11.5">~1 ns · ~64 KB</text>
+    <!-- L2 -->
+    <rect x="280" y="96" width="120" height="118" rx="9" fill="#16233d" stroke="#37e0c8" stroke-width="1.4"/>
+    <text x="340" y="150" fill="#e8edf5" font-size="14" font-weight="700">L2 cache</text>
+    <text x="340" y="234" fill="#9fb0c6" font-size="11.5">~4 ns · ~1 MB</text>
+    <!-- L3 -->
+    <rect x="420" y="84" width="140" height="142" rx="9" fill="#16233d" stroke="#b48cff" stroke-width="1.4"/>
+    <text x="490" y="150" fill="#e8edf5" font-size="14" font-weight="700">L3 cache</text>
+    <text x="490" y="246" fill="#9fb0c6" font-size="11.5">~15 ns · ~32 MB</text>
+    <!-- RAM -->
+    <rect x="580" y="70" width="150" height="170" rx="9" fill="#16233d" stroke="#f5b850" stroke-width="1.6"/>
+    <text x="655" y="150" fill="#e8edf5" font-size="14" font-weight="700">Main memory</text>
+    <text x="655" y="260" fill="#f5b850" font-size="11.5">~100 ns · ~GBs</text>
+  </g>
+  <!-- direction bar -->
+  <line x1="34" y1="288" x2="730" y2="288" stroke="#3a4763" stroke-width="1"/>
+  <text x="60" y="306" fill="#37e0c8" font-family="ui-monospace,monospace" font-size="11.5" text-anchor="start">◀ smaller · faster · closer to the core</text>
+  <text x="700" y="306" fill="#f5b850" font-family="ui-monospace,monospace" font-size="11.5" text-anchor="end">bigger · slower · farther ▶</text>
+</svg>
+<div class="cap">Representative desktop-CPU figures. Each level up the ladder is roughly 3–10× slower but far larger. The whole art is arranging your data so most accesses are caught by the fast, small levels.</div>
+</div>
+<p>Caches work because real programs are <strong>predictable</strong>: they tend to reuse the same data soon (<em>temporal locality</em>) and to touch neighboring data next (<em>spatial locality</em>). A cache bets on both — when you ask for one byte it quietly grabs a whole neighboring chunk (a <em>cache line</em>, typically 64 bytes), guessing you'll want the neighbors too. When the guess is right, memory feels 100× faster than it is. When it's wrong — a <em>cache miss</em> — you pay the full ~100 ns. Writing cache-friendly code is one of the highest-leverage skills in all of computing, and it has a direct GPU cousin you'll meet in Lesson 5.7 (coalescing).</p>
+
+<h3>Branch prediction: guess so the pipeline never stalls</h3>
+<p>Recall the pipeline from 0.1: the core is an assembly line fetching future instructions before finishing current ones. A branch (<code>if</code>) threatens it — until the condition is computed, the core doesn't know which instructions come next. Rather than wait, a CPU <strong>guesses</strong> which way the branch will go and speculatively runs ahead. Modern predictors are startlingly good (well above 95% on typical code) because branches are habitual — a loop's "keep going?" test says "yes" thousands of times before the one "no." Guess right and there's no stall at all; guess wrong and the core throws away the speculative work and restarts — a real but occasional cost.</p>
+
+<h3>Out-of-order & superscalar: do more than one thing per tick</h3>
+<p>A CPU core doesn't run instructions in strict order at one-per-tick. It is <strong>superscalar</strong> (it has several execution units, so it can start multiple independent instructions in the same tick) and <strong>out-of-order</strong> (if the next instruction is stuck waiting on memory, it looks ahead and runs later instructions that are ready, then sorts the results out). This squeezes extra speed from a single instruction stream — called <em>instruction-level parallelism</em> — but there's a ceiling: one stream only contains so many independent instructions to overlap, and finding them costs a lot of transistors and power.</p>
+
+<h3>The shape this produces: a few big, clever cores</h3>
+<p>Add it up and a CPU core is <em>mostly not arithmetic</em>. The bulk of its silicon and energy goes to the machinery that avoids stalls — caches, branch predictors, reorder buffers, schedulers — wrapped around a relatively small set of arithmetic units. Because each core is so large and power-hungry, a chip only fits a handful of them (a typical laptop has, say, 4–16). They are a few Formula-1 cars: extraordinary at getting one driver around the track as fast as possible.</p>
+<div class="diagram">
+<svg viewBox="0 0 760 300" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="The anatomy of one CPU core, drawn by silicon area. Most of the area is control logic (branch prediction, scheduling, out-of-order machinery) and cache. Only a small region is the arithmetic units that actually compute. A CPU has only a handful of these large cores.">
+  <rect x="0" y="0" width="760" height="300" rx="14" fill="#12161d"/>
+  <text x="30" y="36" fill="#8fb6ff" font-family="ui-monospace,monospace" font-size="13" letter-spacing="1.2">ONE CPU CORE, BY AREA · most of it is not math</text>
+  <!-- big core rectangle divided into regions -->
+  <rect x="40" y="58" width="480" height="210" rx="12" fill="#0e1420" stroke="#3a4763" stroke-width="1.4"/>
+  <g font-family="system-ui,sans-serif" text-anchor="middle">
+    <!-- control -->
+    <rect x="56" y="74" width="230" height="120" rx="9" fill="#1a2740" stroke="#5b9bff" stroke-width="1.4"/>
+    <text x="171" y="128" fill="#cfe0ff" font-size="14" font-weight="700">Control &amp; scheduling</text>
+    <text x="171" y="150" fill="#9fb0c6" font-size="11.5">branch predictor, out-of-order,</text>
+    <text x="171" y="166" fill="#9fb0c6" font-size="11.5">reorder buffer — avoiding stalls</text>
+    <!-- cache -->
+    <rect x="296" y="74" width="208" height="120" rx="9" fill="#12261f" stroke="#37e0c8" stroke-width="1.4"/>
+    <text x="400" y="130" fill="#c8f5ea" font-size="14" font-weight="700">L1 / L2 cache</text>
+    <text x="400" y="152" fill="#9fb0c6" font-size="11.5">keep data close</text>
+    <!-- ALU small -->
+    <rect x="56" y="204" width="448" height="50" rx="9" fill="#241a33" stroke="#b48cff" stroke-width="1.4"/>
+    <text x="280" y="234" fill="#e4d4ff" font-size="13.5" font-weight="700">Arithmetic units (ALU/FPU) — the part that actually computes</text>
+  </g>
+  <!-- few cores note -->
+  <g font-family="system-ui,sans-serif">
+    <text x="560" y="92" fill="#e8edf5" font-size="14" font-weight="700">A whole CPU:</text>
+    <rect x="560" y="106" width="40" height="30" rx="5" fill="#1a2740" stroke="#5b9bff"/>
+    <rect x="606" y="106" width="40" height="30" rx="5" fill="#1a2740" stroke="#5b9bff"/>
+    <rect x="652" y="106" width="40" height="30" rx="5" fill="#1a2740" stroke="#5b9bff"/>
+    <rect x="560" y="142" width="40" height="30" rx="5" fill="#1a2740" stroke="#5b9bff"/>
+    <rect x="606" y="142" width="40" height="30" rx="5" fill="#1a2740" stroke="#5b9bff"/>
+    <rect x="652" y="142" width="40" height="30" rx="5" fill="#1a2740" stroke="#5b9bff"/>
+    <text x="626" y="196" fill="#9fb0c6" font-size="11.5" text-anchor="middle">a handful of big cores</text>
+    <text x="626" y="214" fill="#6f7d92" font-size="11" text-anchor="middle">(e.g. 4–16) + a shared L3</text>
+  </g>
+</svg>
+<div class="cap">Proportions are illustrative, but the message is real: a CPU core spends most of its silicon on <em>not waiting</em> (control + cache), and relatively little on arithmetic. That is the price of low latency — and precisely the budget the GPU spends differently.</div>
+</div>
+
+<h3>Why this is the wrong tool for a million identical jobs</h3>
+<p>All this cleverness is perfect when you have one urgent, unpredictable, branchy task. But now imagine the Lesson 0.1 job: add two arrays of a billion numbers. There are no clever branches to predict, no reuse to cache cleverly — just a billion identical, independent little sums. A CPU's Formula-1 machinery is wasted here; you don't want <em>one</em> incredibly fast driver, you want <em>ten thousand</em> ordinary ones each carrying a parcel. That realization is the whole reason the next lesson exists.</p>
+
+<h2>Worked example</h2>
+<div class="card">
+<p><strong>Task:</strong> A loop reads one million values from memory. On our representative CPU, an access costs ~1 ns if it hits L1 cache and ~100 ns if it misses to main memory. Compare the total read time at a 95% hit rate versus a 5% hit rate, and draw the lesson.</p>
+<p><strong>1 — 95% hits (cache-friendly):</strong> 950,000 × 1 ns + 50,000 × 100 ns = 0.95 ms + 5 ms ≈ <strong>5.95 ms</strong>.</p>
+<p><strong>2 — 5% hits (cache-hostile):</strong> 50,000 × 1 ns + 950,000 × 100 ns = 0.05 ms + 95 ms ≈ <strong>95 ms</strong>.</p>
+<p><strong>3 — the punchline:</strong> same code, same million reads, same CPU — but a <strong>~16× difference</strong> in run time, decided entirely by whether your data access pattern is friendly to the cache. The arithmetic never changed; only the data movement did (exactly the theme from 0.1).</p>
+<p><strong>Decision made:</strong> this is why experienced engineers restructure loops to march through memory in order (spatial locality) and reuse data while it's hot (temporal locality). The same instinct, transplanted to the GPU, becomes <em>memory coalescing</em> — and it is worth roughly the same 8–16× there. Data layout is not a detail; it is often the whole game.</p>
+</div>
+
+<h2>Key points</h2>
+<ul class="keypoints">
+<li><strong>The CPU optimizes latency</strong> — the time to finish one task — because that's what interactive, mostly-serial workloads need.</li>
+<li><strong>Caches</strong> (L1/L2/L3) are small fast memories that exploit locality; a hit is ~100× faster than main memory. Cache-friendly data layout can swing real programs by 10× or more.</li>
+<li><strong>Branch prediction</strong> guesses the direction of <code>if</code>s so the pipeline never stalls; it's right &gt;95% of the time on typical code, and a misprediction costs a pipeline flush.</li>
+<li><strong>Superscalar + out-of-order</strong> execution extracts instruction-level parallelism from one stream, but a single stream has a hard ceiling on how much independent work it contains.</li>
+<li>All this makes a core <strong>big and power-hungry</strong> and mostly <em>not</em> arithmetic — so a CPU has only a handful of cores. A few Formula-1 cars, not a swarm.</li>
+<li>For one urgent branchy task, this is ideal. For a million identical independent tasks, it's the wrong shape — which is the door the GPU walks through.</li>
+</ul>
+
+<h2>Quiz</h2>
+<div class="quiz">
+  <div class="q">1. What does it mean that a CPU is optimized for "latency"?</div>
+  <button class="opt">It can hold the largest possible amount of data</button>
+  <button class="opt" data-c="1">It's built to finish a single task in as little time as possible</button>
+  <button class="opt">It uses the least electrical power of any processor</button>
+  <button class="opt">It can run the most tasks per second, regardless of individual speed</button>
+  <div class="expl">Latency is time-to-finish-one-task. The CPU's caches, branch predictors, and out-of-order machinery all exist to race a single instruction stream forward without stalling. "Most tasks per second regardless of individual speed" describes <em>throughput</em> — the GPU's goal, next lesson.</div>
+</div>
+<div class="quiz">
+  <div class="q">2. Most of a CPU core's silicon area is spent on…</div>
+  <button class="opt">arithmetic units that do the actual math</button>
+  <button class="opt" data-c="1">control logic and caches — the machinery that avoids waiting</button>
+  <button class="opt">the clock generator</button>
+  <button class="opt">storage for the operating system</button>
+  <div class="expl">A CPU spends the bulk of its transistors and energy on caches, branch prediction, and scheduling — everything needed to keep one stream from stalling. Only a small fraction is arithmetic. The GPU flips this budget, spending most of its area on arithmetic units.</div>
+</div>
+
+<h2>Exercises</h2>
+<details><summary>Exercise 1 — Define temporal and spatial locality in one sentence each, and give an everyday code example of each.</summary><div class="body">
+<p><strong>Temporal locality:</strong> data used recently is likely to be used again soon — e.g. a loop counter or an accumulator variable touched every iteration. <strong>Spatial locality:</strong> data near recently-used data is likely to be used soon — e.g. walking through the elements of an array <code>a[0], a[1], a[2]…</code> in order, where each cache line brings in several neighbors at once. Caches exploit both: they keep hot data and prefetch neighbors.</p>
+</div></details>
+<details><summary>Exercise 2 — A branch predictor is right 97% of the time; a misprediction wastes ~15 cycles. On average, how many cycles does a branch cost in wasted work? Why does this favor loops?</summary><div class="body">
+<p>Average waste = 0.03 × 15 ≈ <strong>0.45 cycles per branch</strong> — almost free. Loops are ideal for predictors because the loop-back branch is taken many times in a row before the single "exit" — a highly regular pattern the predictor learns instantly. Unpredictable, data-dependent branches (e.g. <code>if (random_value &gt; x)</code>) are the ones that hurt, and — foreshadowing 0.3 — they hurt GPUs far more.</p>
+</div></details>
+<details><summary>Exercise 3 — Using the worked example's numbers, at what cache hit rate does the million-read loop take about 20 ms?</summary><div class="body">
+<p>Let h be the hit rate. Time (ms) ≈ 1,000,000 × [h × 1 ns + (1−h) × 100 ns] = h + 100(1−h) in milliseconds… let's keep units: total ns = 10⁶[h·1 + (1−h)·100] = 10⁶[100 − 99h] ns = [100 − 99h] ms. Set 100 − 99h = 20 → 99h = 80 → <strong>h ≈ 0.808</strong>, about an 81% hit rate. Notice how nonlinear it is: going from 81% to 95% hits nearly halves the time again, because every avoided miss is worth ~100 hits.</p>
+</div></details>
+
+<hr>
+<h1>Go deeper — the complete guide</h1>
+<p>The card makes the CPU's strategy clear. This chapter sharpens the numbers and the limits, so that when the GPU makes the opposite choice next lesson, you'll feel exactly what it's trading away.</p>
+
+<h2>1. The memory hierarchy, with numbers</h2>
+<p>Approximate figures for a modern desktop CPU (they vary by chip, but the <em>ratios</em> are the point):</p>
+<table>
+<tr><th>Level</th><th>Typical latency</th><th>Typical size</th><th>Idea</th></tr>
+<tr><td>Registers</td><td>immediate</td><td>a few KB total</td><td>the only place math happens</td></tr>
+<tr><td>L1 cache</td><td>~1 ns (~4 cycles)</td><td>~32–64 KB per core</td><td>hottest data, split for code/data</td></tr>
+<tr><td>L2 cache</td><td>~4 ns (~12 cycles)</td><td>~256 KB–2 MB per core</td><td>overflow from L1</td></tr>
+<tr><td>L3 cache</td><td>~15–40 ns</td><td>~8–64 MB shared</td><td>shared across cores</td></tr>
+<tr><td>Main memory (DRAM)</td><td>~80–120 ns</td><td>~8–128 GB</td><td>the slow, big backstop</td></tr>
+<tr><td>SSD storage</td><td>~50,000–100,000 ns</td><td>~TBs</td><td>persistent; another world away</td></tr>
+</table>
+<p>The jaw-dropping row is the last: an SSD is roughly <em>a thousand times</em> slower than main memory, which is itself ~100× slower than a cache hit. The processor lives at the top of a cliff of speed, and every level down is a plunge. This is why "just read it from disk each time" is never a plan, and why a GPU carries its own dedicated high-speed memory (Lesson 0.3).</p>
+
+<h2>2. Locality, and the cache line</h2>
+<p>When you read one byte, the cache fetches an aligned <strong>64-byte line</strong> containing it. This is a bet on spatial locality, and it has a sharp consequence: reading an array <em>in order</em> gets ~63 free neighbors per miss, while reading it in a scattered order can miss on nearly every access. The classic demonstration is looping over a 2D array in row-major order versus column-major order — same data, same total reads, but the row-major version can be several times faster purely because it walks memory the way the cache lines are laid out. Every serious performance story eventually comes back to "am I moving through memory the way the hardware wants?"</p>
+
+<h2>3. Speculation: fast, but not free, and not without risk</h2>
+<p>Branch prediction is one form of <em>speculation</em> — doing work before you're sure you need it. CPUs speculate aggressively because on average it wins big. But it has two costs worth knowing. First, a misprediction wastes the speculative work and refills the pipeline (tens of cycles). Second — a modern twist — speculation can be a <em>security</em> issue: the Spectre and Meltdown class of vulnerabilities (2018) exploited traces that speculative execution left in the cache. You don't need the details now; the takeaway is that the CPU's cleverness is deep enough to have surprising side effects, and that "guess and maybe undo" is a fundamentally different philosophy from the GPU's "bring so much work that guessing is unnecessary."</p>
+
+<h2>4. The ceiling on instruction-level parallelism</h2>
+<p>Out-of-order execution overlaps independent instructions from one stream. But how many independent instructions are there to find? In typical code, not that many — real programs are full of dependencies (this result feeds that one). Decades of research show that squeezing more parallelism from a single stream yields diminishing returns while costing rapidly more transistors and power. That wall is central: once you can't make one stream go much faster, and you can't raise the clock (the power wall from 0.1), the <em>only</em> road left is more streams — more cores, more threads. The CPU took a few steps down that road; the GPU built a superhighway on it.</p>
+
+<h2>5. Why the CPU can't just "add thousands of cores"</h2>
+<p>If more cores is the answer, why doesn't a CPU simply ship 5,000 of its cores? Because each CPU core is <em>enormous</em> — all that cache and control logic — and <em>power-hungry</em>. Thousands of them wouldn't fit on a chip or within any sane power and heat budget. To put thousands of cores on one chip, you must make each core small and simple: strip out the big private caches, the fancy branch predictor, the out-of-order machinery. But a stripped-down core stalls constantly on memory and mispredicts branches — unless you change the entire strategy so that stalling doesn't matter. That change of strategy <em>is</em> the GPU, and it's the subject of the next lesson.</p>
+
+<h2>Gotchas</h2>
+<div class="gotcha"><strong>"More cores always means faster."</strong> Only if your task splits into independent pieces. A single-threaded, dependency-heavy task runs on one core no matter how many the chip has; this is Amdahl's law, which we'll make precise in 0.4.</div>
+<div class="gotcha"><strong>Ignoring the cache line.</strong> Touching one byte pulls in 64. Data structures that scatter related fields across memory waste most of every line; packing hot fields together (or choosing arrays-of-structs vs structs-of-arrays wisely) is a real speedup, on CPU and GPU alike.</div>
+<div class="gotcha"><strong>Assuming caches make memory "fast."</strong> They make <em>predictable reuse</em> fast. Stream through data larger than the cache exactly once — as many scientific and AI kernels do — and the cache barely helps; you're back to raw memory bandwidth, and bandwidth (not latency) becomes the limit. That regime is exactly where GPUs shine.</div>
+<div class="gotcha"><strong>Benchmarking with tiny data.</strong> A loop over 1,000 elements fits entirely in L1 and looks lightning-fast; the same code over 100 million elements tells a completely different, memory-bound story. Always test at realistic sizes.</div>
+
+<h2>Scenario — the loop that got 10× faster without changing the math</h2>
+<p>An engineer profiles an image filter that crawls. The inner loop walks the image <em>column by column</em> — <code>for x: for y: process(pixel[y][x])</code> — because that felt natural. But the image is stored row by row in memory, so each step jumps a whole row's width ahead, landing on a fresh cache line almost every time: near-100% miss rate. She swaps the loop order to <code>for y: for x</code> so it marches along memory the way it's laid out. Now each 64-byte line serves ~16 consecutive pixels before the next miss. The arithmetic is byte-for-byte identical; only the access order changed — and the filter runs roughly 10× faster. She didn't optimize the computation at all; she stopped fighting the cache. This is the CPU's entire personality in one story: it will reward you enormously for feeding it data in a predictable, local order, and punish you for scattering it. Hold onto that instinct — on the GPU, the very same instinct (with the very same payoff) is called coalescing, and it is one of the most valuable things this course will teach you.</p>
+
+<h2>Practice</h2>
+<details><summary>1. In one sentence, why does a CPU devote most of its area to caches and control rather than arithmetic?</summary><div class="body">Because its goal is low latency for one mostly-serial stream, and the biggest threat to that is waiting on memory and stalling on branches — so most of its silicon is spent preventing those waits (caches, predictors, out-of-order scheduling), leaving arithmetic a small slice.</div></details>
+<details><summary>2. A task is 1 million independent square-roots. Argue briefly whether a CPU's fancy features (branch prediction, out-of-order, big caches) help much here.</summary><div class="body">They help very little. There are essentially no branches to predict (it's a straight-line computation), little reuse for caches to exploit (each value is read once), and the parallelism is <em>across</em> the million tasks, not within one stream — which out-of-order execution can't reach. This is a throughput problem wearing a latency machine's clothes: the ideal hardware is many simple cores, i.e. a GPU.</div></details>
+<details><summary>3. Estimate: streaming once through a 4 GB array that does not fit in cache, at ~20 GB/s effective memory bandwidth, takes about how long — and does adding L3 cache change it much?</summary><div class="body">4 GB ÷ 20 GB/s = <strong>~0.2 s</strong>, set entirely by bandwidth since each byte is read once and the array dwarfs the cache. Adding or enlarging L3 barely helps — there's no reuse for it to capture. This "streaming, bandwidth-bound, cache doesn't help" regime is extremely common in AI and scientific computing, and it's precisely where the GPU's huge memory bandwidth (Lesson 0.3 and Module 4) pays off.</div></details>
+<details><summary>4. Why are unpredictable, data-dependent branches especially bad — and why should you remember this before we reach the GPU?</summary><div class="body">Unpredictable branches defeat the branch predictor, causing frequent pipeline flushes (tens of wasted cycles each). On a CPU that's a moderate tax. On a GPU, as you'll see in 0.3, threads run in lockstep groups, and a data-dependent branch can force the group to execute <em>both</em> sides — a much steeper penalty called divergence. Learning to avoid branchy inner loops now pays off doubly later.</div></details>
+<details><summary>5. Reflection: state the CPU's core bet in one sentence, and predict the GPU's opposite bet.</summary><div class="body">The CPU bets that you have a few urgent, unpredictable tasks, so it spends its silicon making a small number of streams as fast as possible (caches, prediction, out-of-order) to minimize latency. The GPU will bet the opposite: that you have an ocean of identical independent tasks, so it will spend its silicon on a huge number of simple arithmetic units and hide memory waits by always having other work ready — maximizing throughput even if any single task is slow.</div></details>
+
+<div class="pager">
+  <a href="lesson-01.html">← 0.1 What a computer does</a>
+  <span class="dim" style="opacity:.6">Next: The GPU — built for throughput (coming)</span>
+</div>
+<div class="footer">GPU Mastery · Module 0 · Lesson 2 — works offline · progress saved in your browser</div>
+</div>
+<script src="../assets/app.js"></script>
+</body>
+</html>
