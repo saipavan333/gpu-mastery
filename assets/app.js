@@ -15,6 +15,7 @@
     js(assetBase + "gm-motion.js");
     js(assetBase + "gm-backdrop.js");                                            // course-wide ambient backdrop (every page)
     if (document.getElementById("hero-canvas")) js(assetBase + "gm-hero.js");   // animated hero (home only)
+    css(assetBase + "gm-search.css");                                            // was missing → overlay rendered unstyled at page bottom
     js(assetBase + "gm-search.js");
     css(assetBase + "gm-glossary.css");
     js(assetBase + "gm-glossary.js");
