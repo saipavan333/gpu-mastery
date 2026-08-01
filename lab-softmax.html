@@ -1,0 +1,176 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Softmax Stability Explorer — GPU Mastery Labs</title>
+<link rel="stylesheet" href="assets/style.css">
+<style>
+  .tool{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:18px 20px;margin:16px 0}
+  .chips{display:flex;flex-wrap:wrap;gap:8px;margin:6px 0 14px}
+  .chip{background:var(--card2);color:var(--dim);border:1px solid var(--line);border-radius:999px;padding:5px 12px;font-size:13px;cursor:pointer}
+  .chip:hover{border-color:var(--acc);color:var(--tx)} .chip.on{background:var(--accBg);color:var(--accT);border-color:var(--acc)}
+  .logits{display:grid;grid-template-columns:repeat(6,1fr);gap:8px;margin:6px 0 4px}
+  @media (max-width:620px){ .logits{grid-template-columns:repeat(3,1fr)} }
+  .logits label{font-size:11px;color:var(--dim2);font-family:var(--mono);text-align:center;display:flex;flex-direction:column;gap:3px}
+  .logits input{background:#10141d;color:var(--tx);border:1px solid var(--line);border-radius:6px;padding:6px;font:13px var(--mono);text-align:center;width:100%;box-sizing:border-box}
+  .panel{margin-top:16px}
+  .panel h3{margin:0 0 4px;font-size:14.5px}
+  .panel .sub{font-size:12px;color:var(--dim2);margin:0 0 8px;font-family:var(--mono)}
+  .barrow{display:flex;align-items:center;gap:10px;margin:5px 0;font-size:12.5px}
+  .barrow .ix{width:74px;color:var(--dim);font-family:var(--mono);flex:0 0 auto}
+  .barrow .track{flex:1;height:20px;background:#10141d;border:1px solid var(--line);border-radius:5px;overflow:hidden}
+  .barrow .fill{height:100%;border-radius:4px 0 0 4px;transition:width .35s var(--ease)}
+  .barrow .val{width:118px;text-align:right;font-family:var(--mono);font-variant-numeric:tabular-nums;color:var(--tx);flex:0 0 auto}
+  .naive .fill{background:linear-gradient(90deg,var(--warn),#c98a2e)} .stable .fill{background:linear-gradient(90deg,var(--acc2),#1f9e6e)}
+  .broken{color:var(--bad);font-weight:700}
+  .verdict{font-size:14.5px;border-radius:10px;padding:12px 14px;margin-top:14px}
+  .verdict.good{background:var(--goodBg);border:1px solid rgba(54,201,138,.3)} .verdict.bad{background:var(--badBg);border:1px solid rgba(255,107,107,.3)}
+  .verdict b{color:var(--ink)}
+</style>
+<!-- gm-seo:start -->
+<link rel="canonical" href="https://saipavan333.github.io/gpu-mastery/lab-softmax.html">
+<link rel="manifest" href="https://saipavan333.github.io/gpu-mastery/manifest.webmanifest">
+<meta name="theme-color" content="#0b0e14">
+<link rel="apple-touch-icon" href="https://saipavan333.github.io/gpu-mastery/assets/img/favicon-180.png">
+<meta name="description" content="Softmax turns a vector of scores into probabilities, and it sits inside every attention layer of every transformer. Written the obvious way, it silently…">
+<meta property="og:type" content="website">
+<meta property="og:site_name" content="GPU Mastery">
+<meta property="og:title" content="Softmax Stability Explorer — GPU Mastery Labs">
+<meta property="og:description" content="Softmax turns a vector of scores into probabilities, and it sits inside every attention layer of every transformer. Written the obvious way, it silently…">
+<meta property="og:url" content="https://saipavan333.github.io/gpu-mastery/lab-softmax.html">
+<meta property="og:image" content="https://saipavan333.github.io/gpu-mastery/assets/img/og.png">
+<meta name="twitter:card" content="summary_large_image">
+<meta name="twitter:title" content="Softmax Stability Explorer — GPU Mastery Labs">
+<meta name="twitter:description" content="Softmax turns a vector of scores into probabilities, and it sits inside every attention layer of every transformer. Written the obvious way, it silently…">
+<meta name="twitter:image" content="https://saipavan333.github.io/gpu-mastery/assets/img/og.png">
+<!-- gm-seo:end -->
+</head>
+<body data-lesson="lab-softmax">
+<nav><div class="inner">
+  <a class="logo" href="index.html">GPU<span>Mastery</span></a>
+  <a class="item" href="index.html">Home</a>
+  <a class="item" href="curriculum.html">Curriculum</a>
+  <a class="item on" href="labs.html">Labs</a>
+  <a class="item" href="setup.html">Lab setup</a>
+</div></nav>
+<div class="wrap">
+
+<div class="lesson-top">
+  <div><span class="badge">Interactive Lab</span><span class="badge dim">Track A · ML / attention</span></div>
+  <a class="badge good" href="labs.html">← all labs</a>
+</div>
+<h1>Softmax Stability Explorer</h1>
+<p class="lead">Softmax turns a vector of scores into probabilities, and it sits inside every attention layer of every transformer. Written the obvious way, it silently blows up on large scores — <code>exp</code> overflows and the whole thing becomes <code>NaN</code>. The fix is one line that every serious implementation uses (and that FlashAttention builds on). Type in some logits and watch the naive version break while the stable version stays exact.</p>
+
+<div class="tool">
+  <div class="chips" id="presets"></div>
+  <div class="logits" id="logits"></div>
+  <p class="dim" style="font-size:12px;margin:4px 0 0">Edit any value. fp32's <code>exp</code> overflows around <b>x ≈ 88.7</b> (exp ≈ 3.4×10³⁸); fp64 (what this page computes in) overflows around <b>x ≈ 709</b>. Either way, the naive form is a time bomb.</p>
+
+  <div class="panel naive">
+    <h3 style="color:var(--warn)">Naive softmax</h3>
+    <p class="sub">p_i = exp(x_i) / Σ exp(x_j)</p>
+    <div id="naiveBars"></div>
+  </div>
+  <div class="panel stable">
+    <h3 style="color:var(--acc2)">Stable softmax — subtract the max first</h3>
+    <p class="sub">m = max(x);  p_i = exp(x_i − m) / Σ exp(x_j − m)</p>
+    <div id="stableBars"></div>
+  </div>
+  <div class="verdict" id="verdict"></div>
+</div>
+
+<h2>How to read it</h2>
+<p>Both formulas are <em>mathematically identical</em> — subtracting the max <em>m</em> multiplies every term, top and bottom, by <code>exp(−m)</code>, which cancels. So the stable version changes nothing about the answer; it only changes what the hardware has to compute. The naive form evaluates <code>exp(x_i)</code> directly, and for a large score that number is astronomically big — past the largest value the float type can hold, it becomes <code>inf</code>, and <code>inf/inf</code> is <code>NaN</code>. The stable form first shifts every score so the biggest is 0: now the largest <code>exp</code> is exactly <code>exp(0) = 1</code>, everything else is smaller, and nothing can overflow. Same probabilities, no explosion.</p>
+<p>This is not a toy concern. Attention scores in a large model routinely reach magnitudes that overflow fp16 (whose <code>exp</code> overflows near x ≈ 11) and even fp32, so the max-subtraction is mandatory in production. <strong>FlashAttention</strong> — Track A's centerpiece — pushes the idea further: it computes attention in tiles that never fit the whole score row in memory, keeping a <em>running max</em> and rescaling partial sums as it goes (an "online softmax"), so it gets the stable result without ever materializing the full attention matrix. Understanding why the max-subtraction is exact (this lab) is the first step to understanding why FlashAttention is both correct and fast. It also echoes Lesson 1.8's theme: floating point has limits, and numerically-aware code is the difference between a model that trains and one that fills with <code>NaN</code>.</p>
+
+<div class="footer">GPU Mastery · Labs · Softmax Stability Explorer — works offline</div>
+</div>
+
+<script>
+const $ = id => document.getElementById(id);
+const N = 6;
+const PRESETS = {
+  'Typical scores': [2.0, 1.0, 0.1, -0.5, 3.0, 0.0],
+  'Confident (one big)': [10, 1, 1, 1, 1, 1],
+  'fp32 overflow (x≈90)': [90, 89, 88, 91, 87, 90],
+  'fp64 overflow (x≈1000)': [1000, 999, 998, 1001, 997, 1000],
+  'All equal': [5, 5, 5, 5, 5, 5]
+};
+const FP32_MAX = 3.4028235e38;
+let x = PRESETS['Typical scores'].slice();
+
+function softmaxNaive(v){
+  const e = v.map(Math.exp);
+  const s = e.reduce((a,b)=>a+b,0);
+  return { e, probs: e.map(ei => ei/s), sum:s };
+}
+function softmaxStable(v){
+  const m = Math.max.apply(null, v);
+  const e = v.map(xi => Math.exp(xi - m));
+  const s = e.reduce((a,b)=>a+b,0);
+  return { e, probs: e.map(ei => ei/s), sum:s, m };
+}
+function fp32OverflowsExp(xi){ return Math.exp(xi) > FP32_MAX; }   // would be inf if computed in fp32
+
+function fmt(p){
+  if (!isFinite(p)) return isNaN(p) ? 'NaN' : (p>0?'+inf':'-inf');
+  return (p*100).toFixed(2) + '%';
+}
+function bars(host, res){
+  var maxP = 0; res.probs.forEach(function(p){ if(isFinite(p)&&p>maxP) maxP=p; });
+  host.innerHTML = res.probs.map(function(p, i){
+    var broken = !isFinite(p);
+    var w = (broken || maxP<=0) ? 0 : Math.max(0, p/maxP*100);
+    var expInf = !isFinite(res.e[i]);
+    return '<div class="barrow"><span class="ix">x'+i+'='+x[i]+'</span>'+
+      '<div class="track"><div class="fill" style="width:'+w+'%"></div></div>'+
+      '<span class="val '+(broken?'broken':'')+'">'+fmt(p)+(expInf?' <span class="broken">(exp=inf)</span>':'')+'</span></div>';
+  }).join('');
+}
+
+function render(){
+  var naive = softmaxNaive(x), stable = softmaxStable(x);
+  bars($('naiveBars'), naive);
+  bars($('stableBars'), stable);
+  var naiveBroke = naive.probs.some(function(p){ return !isFinite(p); });
+  var wouldOverflowFp32 = x.some(fp32OverflowsExp);
+  var stableOk = stable.probs.every(function(p){ return isFinite(p) && p>=0; });
+  // do the two agree where naive is finite?
+  var agree = naive.probs.every(function(p,i){ return !isFinite(p) || Math.abs(p - stable.probs[i]) < 1e-9; });
+  var v = $('verdict');
+  if (naiveBroke){
+    v.className = 'verdict bad';
+    v.innerHTML = '<b>Naive softmax broke — it returned NaN.</b> A score was large enough that exp() overflowed to inf in fp64, and inf/inf is NaN: the whole probability vector is destroyed. The <b>stable</b> version, subtracting max = '+stable.m+', returns a clean, correct distribution from the identical inputs. This is exactly the failure the max-subtraction exists to prevent — and it happens for real attention scores.';
+  } else if (wouldOverflowFp32){
+    v.className = 'verdict bad';
+    v.innerHTML = '<b>Survives in fp64, but this would overflow in fp32.</b> At least one score exceeds x ≈ 88.7, so exp() would be inf in 32-bit floats (the precision GPUs actually use), producing NaN there even though this fp64 page holds on. Production code must subtract the max — the stable row shows the correct answer.';
+  } else {
+    v.className = 'verdict good';
+    v.innerHTML = '<b>Both agree here'+(agree?'':' (rounding aside)')+'.</b> With modest scores, naive and stable give the same probabilities — because they are the same formula. The stable version costs one extra pass to find the max and is <em>always</em> used anyway, because you can never guarantee the scores stay small. Free insurance against a NaN that would silently ruin a training run.';
+  }
+}
+
+function buildInputs(){
+  var host = $('logits'); host.innerHTML = '';
+  for (var i=0;i<N;i++){
+    var l = document.createElement('label'); l.textContent = 'x'+i;
+    var inp = document.createElement('input'); inp.type='number'; inp.step='0.5'; inp.value=x[i]; inp.setAttribute('data-i', i);
+    inp.addEventListener('input', function(){ var k=+this.getAttribute('data-i'); var val=parseFloat(this.value); x[k]=isNaN(val)?0:val; [].forEach.call($('presets').children,function(c){c.classList.remove('on');}); render(); });
+    l.appendChild(inp); host.appendChild(l);
+  }
+}
+function buildPresets(){
+  var host = $('presets'); host.innerHTML='';
+  Object.keys(PRESETS).forEach(function(name){
+    var b = document.createElement('span'); b.className='chip'; b.textContent=name;
+    b.onclick = function(){ x = PRESETS[name].slice(); buildInputs(); [].forEach.call(host.children,function(c){c.classList.remove('on');}); b.classList.add('on'); render(); };
+    host.appendChild(b);
+  });
+  host.firstChild.classList.add('on');
+}
+buildPresets(); buildInputs(); render();
+</script>
+<script src="assets/app.js"></script>
+</body>
+</html>
