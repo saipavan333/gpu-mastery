@@ -1,0 +1,237 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>0.4 CPU vs GPU — The Trade-off — GPU Mastery</title>
+<link rel="stylesheet" href="../assets/style.css">
+<!-- gm-seo:start -->
+<link rel="canonical" href="https://saipavan333.github.io/gpu-mastery/module-0/lesson-04.html">
+<link rel="manifest" href="https://saipavan333.github.io/gpu-mastery/manifest.webmanifest">
+<meta name="theme-color" content="#0b0e14">
+<link rel="apple-touch-icon" href="https://saipavan333.github.io/gpu-mastery/assets/img/favicon-180.png">
+<meta name="description" content="When should you reach for a GPU, and when is a CPU the right tool? This lesson turns the latency-vs-throughput idea into a decision rule, explains the host+device partnership, and uses Amdahl's law to reveal the honest ceiling on any speedup.">
+<meta property="og:type" content="article">
+<meta property="og:site_name" content="GPU Mastery">
+<meta property="og:title" content="0.4 CPU vs GPU — The Trade-off — GPU Mastery">
+<meta property="og:description" content="When should you reach for a GPU, and when is a CPU the right tool? This lesson turns the latency-vs-throughput idea into a decision rule, explains the host+device partnership, and uses Amdahl's law to reveal the honest ceiling on any speedup.">
+<meta property="og:url" content="https://saipavan333.github.io/gpu-mastery/module-0/lesson-04.html">
+<meta property="og:image" content="https://saipavan333.github.io/gpu-mastery/assets/img/og.png">
+<meta name="twitter:card" content="summary_large_image">
+<meta name="twitter:title" content="0.4 CPU vs GPU — The Trade-off — GPU Mastery">
+<meta name="twitter:description" content="When should you reach for a GPU, and when is a CPU the right tool? This lesson turns the latency-vs-throughput idea into a decision rule, explains the host+device partnership, and uses Amdahl's law to reveal the honest ceiling on any speedup.">
+<meta name="twitter:image" content="https://saipavan333.github.io/gpu-mastery/assets/img/og.png">
+<!-- gm-seo:end -->
+</head>
+<body data-lesson="m0l4">
+<nav><div class="inner">
+  <a class="logo" href="../index.html">GPU<span>Mastery</span></a>
+  <a class="item" href="../index.html">Home</a>
+  <a class="item on" href="../curriculum.html">Curriculum</a>
+  <a class="item" href="../labs.html">Labs</a>
+  <a class="item" href="../setup.html">Lab setup</a>
+</div></nav>
+<div class="wrap">
+
+<div class="lesson-top">
+  <div><span class="badge">Module 0 · Lesson 4</span><span class="badge dim">≈ 1–2 h · prereq: 0.1–0.3</span></div>
+  <button id="donebtn" class="donebtn">Mark lesson complete</button>
+</div>
+<h1>CPU vs GPU — the trade-off</h1>
+<p class="lead">You now know two machines with opposite personalities: the CPU minimizes latency, the GPU maximizes throughput. This lesson turns that contrast into something you can act on — a rule for which tool a problem wants, how the two work as a team, and the honest ceiling (Amdahl's law) that stops even a perfect GPU from making a whole program infinitely fast.</p>
+
+<h2>Concept</h2>
+
+<h3>The difference, in one table</h3>
+<p>Everything from the last two lessons collapses into a single contrast. Read it as a lens, not a scoreboard — neither machine is "better," they're built for different questions.</p>
+<table>
+<tr><th></th><th>CPU</th><th>GPU</th></tr>
+<tr><td>Optimizes for</td><td>latency (time per task)</td><td>throughput (tasks per second)</td></tr>
+<tr><td>Cores</td><td>a few, large, complex</td><td>thousands, small, simple</td></tr>
+<tr><td>Silicon spent on</td><td>caches &amp; control (avoid waiting)</td><td>arithmetic units (do more math)</td></tr>
+<tr><td>Handles branches</td><td>well (prediction)</td><td>poorly (warp divergence)</td></tr>
+<tr><td>Best at</td><td>serial, branchy, irregular, urgent work</td><td>massively parallel, uniform, regular work</td></tr>
+<tr><td>Memory</td><td>lower latency, ~tens of GB/s</td><td>higher latency, ~TB/s bandwidth</td></tr>
+</table>
+
+<h3>The decision rule</h3>
+<p>Before writing a line of GPU code, ask four questions. A GPU pays off only when the answer to all four leans "yes":</p>
+<ul class="keypoints">
+<li><strong>Is there a lot of parallel work?</strong> Thousands to millions of independent items, not dozens. The GPU needs to be flooded to hide latency.</li>
+<li><strong>Do the items do the same thing?</strong> The same operation across the data (data-parallel), so SIMT groups stay in step and branches stay uniform.</li>
+<li><strong>Is the work arithmetic- or bandwidth-heavy?</strong> Enough math (or enough regular streaming) to justify the machine — not a trickle of scattered pointer-chasing.</li>
+<li><strong>Is it worth the trip?</strong> The data must be copied to the GPU and back; the job has to be big enough that the copy cost is small next to the compute saved.</li>
+</ul>
+<p>Image and video processing, deep learning, physics simulation, and rendering all answer "yes, yes, yes, yes." Parsing a config file, walking a tree, or running branchy business logic answer "no" — those stay on the CPU.</p>
+
+<h3>They're a team: host and device</h3>
+<p>In practice you never choose <em>only</em> a GPU. The CPU (the <strong>host</strong>) runs your program, does the serial and branchy parts, and acts as a manager: it copies data over to the GPU (the <strong>device</strong>), tells it which parallel job to run, and copies results back. The GPU is a specialist coprocessor the CPU dispatches work to — never the boss. Crucially, the two have <em>separate</em> memories, and the bridge between them is far slower than either chip's own memory:</p>
+<div class="diagram">
+<svg viewBox="0 0 760 330" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="The host-device model. On the left, the host: a CPU with a few cores and its system RAM. On the right, the device: a GPU with thousands of cores and its own high-bandwidth memory. Between them a narrow bridge labeled PCIe or NVLink carries data, at tens to hundreds of gigabytes per second, far slower than the GPU's own multi-terabyte-per-second internal memory. The CPU dispatches parallel work and data across the bridge.">
+  <rect x="0" y="0" width="760" height="330" rx="14" fill="#12161d"/>
+  <text x="30" y="34" fill="#8fb6ff" font-family="ui-monospace,monospace" font-size="13" letter-spacing="1.1">HOST + DEVICE · the CPU manages, the GPU computes, the bridge is the bottleneck</text>
+  <!-- Host -->
+  <rect x="34" y="70" width="250" height="200" rx="11" fill="#0e1420" stroke="#5b9bff" stroke-width="1.5"/>
+  <text x="159" y="98" fill="#e8edf5" font-family="system-ui,sans-serif" font-size="15" font-weight="700" text-anchor="middle">Host — CPU</text>
+  <g font-family="system-ui,sans-serif" text-anchor="middle">
+    <rect x="54" y="112" width="210" height="52" rx="8" fill="#1a2740" stroke="#3a4763"/>
+    <text x="159" y="135" fill="#cfe0ff" font-size="12.5" font-weight="600">a few fast cores</text>
+    <text x="159" y="153" fill="#9fb0c6" font-size="11">runs the program · serial parts</text>
+    <rect x="54" y="176" width="210" height="72" rx="8" fill="#131a26" stroke="#3a4763"/>
+    <text x="159" y="206" fill="#e8edf5" font-size="13" font-weight="600">System RAM</text>
+    <text x="159" y="226" fill="#9fb0c6" font-size="11">~tens of GB/s</text>
+  </g>
+  <!-- Device -->
+  <rect x="476" y="70" width="250" height="200" rx="11" fill="#0e1420" stroke="#37e0c8" stroke-width="1.5"/>
+  <text x="601" y="98" fill="#e8edf5" font-family="system-ui,sans-serif" font-size="15" font-weight="700" text-anchor="middle">Device — GPU</text>
+  <g font-family="system-ui,sans-serif" text-anchor="middle">
+    <rect x="496" y="112" width="210" height="52" rx="8" fill="#123027" stroke="#3a4763"/>
+    <text x="601" y="135" fill="#c8f5ea" font-size="12.5" font-weight="600">thousands of cores</text>
+    <text x="601" y="153" fill="#9fb0c6" font-size="11">runs the parallel job</text>
+    <rect x="496" y="176" width="210" height="72" rx="8" fill="#122019" stroke="#3a4763"/>
+    <text x="601" y="206" fill="#e8edf5" font-size="13" font-weight="600">GPU memory (VRAM)</text>
+    <text x="601" y="226" fill="#37e0c8" font-size="11">~TB/s — very high bandwidth</text>
+  </g>
+  <!-- bridge -->
+  <g stroke="#f5b850" stroke-width="3" fill="none" marker-end="url(#b1)" marker-start="url(#b2)"><line x1="286" y1="170" x2="474" y2="170"/></g>
+  <defs>
+    <marker id="b1" markerWidth="10" markerHeight="10" refX="8" refY="5" orient="auto"><path d="M0,0 L10,5 L0,10 Z" fill="#f5b850"/></marker>
+    <marker id="b2" markerWidth="10" markerHeight="10" refX="2" refY="5" orient="auto"><path d="M10,0 L0,5 L10,10 Z" fill="#f5b850"/></marker>
+  </defs>
+  <text x="380" y="158" fill="#f5b850" font-family="system-ui,sans-serif" font-size="12.5" font-weight="700" text-anchor="middle">PCIe / NVLink</text>
+  <text x="380" y="188" fill="#f5b850" font-family="ui-monospace,monospace" font-size="11" text-anchor="middle">the copy</text>
+  <text x="380" y="300" fill="#7e8aa0" font-family="system-ui,sans-serif" font-size="12.5" text-anchor="middle">The bridge is ~10–100× slower than the GPU's own memory. Crossing it is the tax you pay to use the GPU — so you minimize copies and keep data resident on the device.</text>
+</svg>
+<div class="cap">The host–device model. Your program lives on the CPU and hands parallel work + data to the GPU across a comparatively narrow bridge. Minimizing that traffic is one of the first things separating fast GPU code from slow.</div>
+</div>
+
+<h3>Amdahl's law — the serial part is your ceiling</h3>
+<p>Here is the sobering truth that keeps GPU expectations honest. Suppose 90% of your program's time is parallelizable and 10% is stubbornly serial (reading a file, a sequential setup step). Even if the GPU makes the parallel 90% <em>infinitely</em> fast — zero time — you're still stuck paying the serial 10%. The whole program can get at most <strong>10× faster</strong>, never more. This is <strong>Amdahl's law</strong>, and it's why "we put it on a GPU" sometimes yields a disappointing 3× instead of the 100× the marketing promised.</p>
+<div class="diagram">
+<svg viewBox="0 0 760 300" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="Amdahl's law shown as three time bars. The baseline bar is 10 percent serial plus 90 percent parallel. When the GPU makes the parallel part fifty times faster, the parallel portion shrinks to nearly nothing but the serial 10 percent is unchanged, giving about 8.5 times overall. Even with an infinitely fast GPU, only the serial 10 percent remains, capping the speedup at 10 times. The serial part is a wall.">
+  <rect x="0" y="0" width="760" height="300" rx="14" fill="#12161d"/>
+  <text x="30" y="34" fill="#8fb6ff" font-family="ui-monospace,monospace" font-size="13" letter-spacing="1.1">AMDAHL'S LAW · the serial part caps the speedup</text>
+  <!-- scale: 100% = 500px, x0 = 150 -->
+  <g font-family="system-ui,sans-serif" font-size="12.5" fill="#9fb0c6" text-anchor="end">
+    <text x="132" y="88">Baseline</text>
+    <text x="132" y="150">GPU 50×</text>
+    <text x="132" y="212">GPU ∞</text>
+  </g>
+  <!-- baseline: serial 50px + parallel 450px -->
+  <rect x="150" y="70" width="50" height="30" rx="4" fill="#f5b850"/>
+  <rect x="200" y="70" width="450" height="30" rx="4" fill="#5b9bff"/>
+  <text x="662" y="90" fill="#9fb0c6" font-family="ui-monospace,monospace" font-size="11">1×</text>
+  <!-- GPU 50x: serial 50 + parallel 9 -->
+  <rect x="150" y="132" width="50" height="30" rx="4" fill="#f5b850"/>
+  <rect x="200" y="132" width="9" height="30" rx="3" fill="#5b9bff"/>
+  <text x="222" y="152" fill="#c8f5ea" font-family="ui-monospace,monospace" font-size="11">≈ 8.5× faster</text>
+  <!-- GPU inf: serial 50 only -->
+  <rect x="150" y="194" width="50" height="30" rx="4" fill="#f5b850"/>
+  <text x="212" y="214" fill="#c8f5ea" font-family="ui-monospace,monospace" font-size="11">10× — the ceiling</text>
+  <!-- serial wall -->
+  <line x1="200" y1="60" x2="200" y2="236" stroke="#ff6b6b" stroke-width="1.4" stroke-dasharray="4 3"/>
+  <text x="205" y="252" fill="#ff6b6b" font-family="system-ui,sans-serif" font-size="11.5">the serial wall — no GPU can cross it</text>
+  <!-- legend -->
+  <rect x="470" y="244" width="14" height="12" rx="2" fill="#f5b850"/><text x="490" y="254" fill="#9fb0c6" font-family="system-ui,sans-serif" font-size="11.5">serial 10%</text>
+  <rect x="568" y="244" width="14" height="12" rx="2" fill="#5b9bff"/><text x="588" y="254" fill="#9fb0c6" font-family="system-ui,sans-serif" font-size="11.5">parallel 90%</text>
+</svg>
+<div class="cap">Speeding up the parallel part shrinks the blue; it can never shrink the yellow. The serial fraction sets a hard ceiling — the first thing to estimate before expecting a big GPU win.</div>
+</div>
+<p>The practical takeaways are liberating, not depressing: to get a big speedup you must (1) make the parallel fraction as large as possible — often by rethinking the algorithm so more of it is data-parallel — and (2) attack the serial part too, because past a point it, not the GPU, is your limit. The best GPU engineers spend a surprising amount of effort shrinking the serial 10%.</p>
+
+<h2>Worked example</h2>
+<div class="card">
+<p><strong>Task:</strong> A program spends 90% of its time in a parallelizable loop and 10% in serial setup. You move the loop to a GPU that runs it 50× faster. What is the overall speedup — and what's the absolute ceiling even with an infinitely fast GPU?</p>
+<p><strong>1 — Amdahl's formula:</strong> speedup = 1 ÷ [ (serial fraction) + (parallel fraction ÷ GPU speedup) ]. Here serial = 0.10, parallel = 0.90, GPU speedup = 50.</p>
+<p><strong>2 — plug in:</strong> 1 ÷ [ 0.10 + 0.90/50 ] = 1 ÷ [ 0.10 + 0.018 ] = 1 ÷ 0.118 ≈ <strong>8.5×</strong> overall.</p>
+<p><strong>3 — the ceiling:</strong> let the GPU speedup go to infinity, so the parallel term vanishes: 1 ÷ 0.10 = <strong>10×</strong>. No GPU on earth takes this program past 10×, because 10% of it never left the CPU.</p>
+<p><strong>Decision made:</strong> a 50×-faster kernel bought only 8.5× overall — a classic "why isn't it faster?" moment. Before celebrating a fast kernel, estimate the serial fraction: if it's 10%, your dream is capped at 10×. To do better, you'd re-architect to shrink that serial 10% (overlap it, parallelize part of it, or eliminate it) — which is exactly what senior GPU work looks like. (This is why 0.5 and Module 5 care so much about keeping data on the device and overlapping copies with compute.)</p>
+</div>
+
+<h2>Key points</h2>
+<ul class="keypoints">
+<li>Pick the tool by the work: <strong>CPU</strong> for serial, branchy, irregular, latency-sensitive tasks; <strong>GPU</strong> for massively parallel, uniform, regular, throughput-hungry tasks.</li>
+<li>The GPU decision rule: lots of independent work, doing the same operation, arithmetic/bandwidth-heavy, and big enough to be worth the copy.</li>
+<li>They work as a team — <strong>host (CPU)</strong> runs the program and dispatches parallel jobs to the <strong>device (GPU)</strong>; the GPU is a coprocessor, never the boss.</li>
+<li>The two have separate memories joined by a <strong>comparatively slow bridge</strong> (PCIe/NVLink). Copying across it is a real tax; minimize copies and keep data resident on the GPU.</li>
+<li><strong>Amdahl's law</strong>: if a fraction <em>s</em> is serial, your speedup can never exceed 1/<em>s</em>, no matter how fast the GPU makes the rest. A 10% serial part caps you at 10×.</li>
+<li>Big real speedups come from <em>maximizing the parallel fraction</em> and <em>attacking the serial part</em> — not just from a fast kernel.</li>
+</ul>
+
+<h2>Quiz</h2>
+<div class="quiz">
+  <div class="q">1. A program is 80% parallelizable. What is the maximum possible speedup from moving the parallel part to an infinitely fast GPU?</div>
+  <button class="opt">80×</button>
+  <button class="opt">Unlimited — a fast enough GPU removes all limits</button>
+  <button class="opt" data-c="1">5× — the serial 20% caps it at 1 ÷ 0.20</button>
+  <button class="opt">1.25×</button>
+  <div class="expl">Amdahl's law: with serial fraction s = 0.20, the ceiling is 1/s = 1/0.20 = 5×, even if the parallel 80% takes zero time. The serial part you can't parallelize is what limits you — which is why shrinking it matters as much as speeding up the rest.</div>
+</div>
+<div class="quiz">
+  <div class="q">2. In the host–device model, which statement is correct?</div>
+  <button class="opt">The GPU runs the main program and calls the CPU for help</button>
+  <button class="opt" data-c="1">The CPU runs the program and dispatches parallel work and data to the GPU across a relatively slow bridge</button>
+  <button class="opt">The CPU and GPU share one memory, so no copying is ever needed</button>
+  <button class="opt">Data on the GPU is always faster to reach from the CPU than the CPU's own RAM</button>
+  <div class="expl">The CPU (host) is the manager: it runs the program, handles serial parts, and copies data/work to the GPU (device) over PCIe or NVLink. Their memories are separate, and that bridge is much slower than either chip's own memory — so minimizing crossings is a core skill.</div>
+</div>
+
+<h2>Exercises</h2>
+<details><summary>Exercise 1 — A task is 99% parallel and 1% serial. What is the maximum speedup? What does this tell you about very-large-scale (many-GPU) computing?</summary><div class="body">
+<p>Ceiling = 1 / 0.01 = <strong>100×</strong>. This is why supercomputing chases the parallel fraction relentlessly: at 99% parallel you cap at 100×, but at 99.9% you cap at 1000×. When you're using hundreds or thousands of GPUs, even a 1% serial part is catastrophic to scaling — so enormous effort goes into driving the serial fraction toward zero (overlapping communication, parallelizing setup, avoiding global synchronization). Amdahl's law is the single most important sentence in parallel computing.</p>
+</div></details>
+<details><summary>Exercise 2 — You have two jobs: (a) apply the same brightness filter to 20 million pixels, (b) parse a 5 KB JSON config and branch on its fields. Assign each to CPU or GPU and justify with the decision rule.</summary><div class="body">
+<p><strong>(a) GPU.</strong> Twenty million independent items, all doing the same operation, arithmetic over a regular grid, and big enough to dwarf the copy cost — every part of the decision rule says "yes." <strong>(b) CPU.</strong> A tiny amount of work, inherently serial and branchy (it's all <code>if</code> on parsed fields), no parallelism to exploit, and far too small to be worth shipping to the GPU — every part says "no." Real programs do exactly this: parse config on the CPU, then hand the pixel work to the GPU.</p>
+</div></details>
+<details><summary>Exercise 3 — Your GPU kernel is 100× faster than the CPU version, but the end-to-end program only got 4× faster. Give two plausible causes and how you'd check each.</summary><div class="body">
+<p><strong>Cause 1 — Amdahl:</strong> a large serial fraction. Check by timing the non-kernel parts; if setup/serial work is ~25% of the original time, your ceiling is 1/0.25 = 4×, exactly what you see. <strong>Cause 2 — copy overhead:</strong> time lost shuttling data across the PCIe/NVLink bridge to and from the GPU. Check by timing the host-to-device and device-to-host copies separately; if they rival or exceed the kernel time, the fix is to copy less (keep data resident on the GPU across steps) or overlap copies with compute. Both are diagnosed by <em>measuring the parts</em>, not guessing — which is why profiling is a core skill (Module 5).</p>
+</div></details>
+
+<hr>
+<h1>Go deeper — the complete guide</h1>
+<p>The card gives you a decision rule and a ceiling. This chapter adds the numbers behind the copy tax, the counter-argument to Amdahl that keeps big GPUs relevant, and the mindset of heterogeneous computing that real systems use.</p>
+
+<h2>1. The copy tax, quantified</h2>
+<p>The bridge between CPU and GPU has historically been PCI Express. Representative one-direction bandwidths: PCIe 4.0 ×16 delivers ~32 GB/s, PCIe 5.0 ×16 ~64 GB/s. NVIDIA's NVLink, used between GPUs and on some CPU–GPU systems, reaches hundreds of GB/s and up. Compare those to a high-end GPU's <em>internal</em> memory bandwidth of multiple TB/s, and the picture is stark: the road onto the GPU is roughly 10–100× narrower than the highways inside it. Consequences that shape real code: (1) a job must be large enough that compute time dwarfs copy time; (2) you keep data resident on the GPU across many operations instead of copying back and forth each step; (3) advanced code <em>overlaps</em> copying with computing so the bridge and the cores work at the same time. Newer designs blur this line with unified or coherent memory, but "moving data is expensive" — the theme since Lesson 0.1 — is as true across the PCIe bridge as it was across the memory bus.</p>
+
+<h2>2. Amdahl vs Gustafson — why huge GPUs still make sense</h2>
+<p>Amdahl's law sounds like a death sentence for massive parallelism: if serial work caps you, why build machines with tens of thousands of cores? The answer is <strong>Gustafson's law</strong>, the optimistic counterpart. Amdahl fixes the <em>problem size</em> and asks how much faster you can solve it (pessimistic). Gustafson observes that in practice, when people get a bigger machine, they solve a <em>bigger problem</em> — a finer simulation grid, a larger model, more data — and in that regime the parallel part grows while the serial setup stays roughly constant, so the effective parallel fraction rises toward 100% and near-linear speedups return. Both laws are true; they answer different questions. The practical wisdom: GPUs shine when you scale <em>up the work</em>, not just when you re-run a fixed small job faster. This is exactly why AI kept training ever-larger models on ever-larger GPU clusters.</p>
+
+<h2>3. Heterogeneous computing — use both, deliberately</h2>
+<p>The professional stance is not "CPU or GPU" but "CPU <em>and</em> GPU, each on what it's best at." Two everyday examples:</p>
+<ul class="keypoints">
+<li><strong>Training a neural network:</strong> the CPU loads and prepares batches of data (branchy, I/O-bound, serial-ish) while the GPU does the matrix-heavy forward and backward passes (massively parallel). Done well, the CPU prepares the next batch <em>while</em> the GPU trains on the current one — the two overlap, and neither waits.</li>
+<li><strong>A game:</strong> the CPU runs game logic, AI, and physics decisions (branchy, latency-sensitive); the GPU renders millions of pixels and vertices (throughput). Sixty times a second they hand off.</li>
+</ul>
+<p>Designing this hand-off — what runs where, how data flows, how to overlap the two so neither idles — is the heart of real GPU engineering, and everything after Module 0 is, in some sense, teaching you to do it well.</p>
+
+<h2>4. Beyond speed: throughput per watt and per dollar</h2>
+<p>Speed isn't the only axis. Data centers care intensely about <em>energy</em> and <em>cost</em>: performance per watt and performance per unit of money. For the right throughput-shaped workloads, GPUs deliver far more computation per watt and per hardware dollar than CPUs, which is why they dominate AI and large-scale science — the electricity bill and the hardware budget often decide the architecture as much as raw speed. You'll see this made concrete in Track D's honest cost-and-watt benchmark, where the fastest chip is not always the one you'd actually buy. The lesson: "which is faster?" is only part of the real question, which is "which finishes the work for the least energy and money?"</p>
+
+<h2>5. A checklist you can actually use</h2>
+<p>When someone asks "should this go on the GPU?", walk the list: <strong>(1)</strong> Is there parallel work in the thousands-plus? <strong>(2)</strong> Is it the same operation across the data? <strong>(3)</strong> Are branches rare/uniform, and is memory access regular? <strong>(4)</strong> Is the data big enough that compute dwarfs the copy? <strong>(5)</strong> What is the serial fraction — what's my Amdahl ceiling? <strong>(6)</strong> Can I keep data resident and overlap copies with compute? If (1)–(4) are yes and (5)–(6) are healthy, the GPU will likely pay off. If not, a well-written CPU version may win — and shipping the right answer, not the fashionable one, is what makes you valuable.</p>
+
+<h2>Gotchas</h2>
+<div class="gotcha"><strong>Believing the marketing multiplier.</strong> "100× faster" usually means the <em>kernel</em>, not the program. Amdahl and copy overhead routinely turn a 100× kernel into a 3–10× end-to-end win. Always reason about the whole pipeline.</div>
+<div class="gotcha"><strong>Forgetting the copy in the timing.</strong> A kernel that runs in 1 ms is no bargain if you spent 20 ms copying data to the GPU and back. Time the copies; keep data resident; overlap.</div>
+<div class="gotcha"><strong>Ignoring the serial fraction.</strong> Teams optimize the kernel to perfection and are baffled it barely helps — because a big serial part was the real ceiling all along. Estimate the serial fraction <em>first</em>.</div>
+<div class="gotcha"><strong>Porting a tiny job.</strong> Below a size threshold, launch and copy overhead exceed any compute savings; the CPU answers before the GPU has started. Parallel hardware is for large work.</div>
+
+<h2>Scenario — the port that made everything slower</h2>
+<p>A team ports a data-cleaning step to the GPU expecting a big win. The kernel benchmarks beautifully — 60× faster than the CPU loop. But the end-to-end job runs <em>slower</em> than before. Profiling reveals two culprits, both from this lesson. First, the step processes a modest amount of data, so the time to copy it to the GPU and the results back (across the PCIe bridge) is larger than the compute it saved — the copy tax ate the win. Second, the surrounding pipeline is 40% serial file parsing and formatting that never moved to the GPU, so even a perfect kernel was capped at 1/0.40 = 2.5×. The fix wasn't a faster kernel; it was <em>architectural</em> — keep the data resident on the GPU across several steps so it's copied once, and parallelize or overlap the parsing so the serial fraction shrinks. After that, the same kernel finally delivered a real speedup. The moral is the throughline of this whole module: performance is decided by how you move data and how much of the work is truly parallel — not by how fast any single piece computes.</p>
+
+<h2>Practice</h2>
+<details><summary>1. State Amdahl's law in words and give the ceiling for serial fractions of 50%, 10%, and 1%.</summary><div class="body">Amdahl's law: if a fraction <em>s</em> of the work must run serially, the maximum overall speedup is 1/<em>s</em>, no matter how fast the rest is made. Ceilings: 50% serial → 2×; 10% serial → 10×; 1% serial → 100×. Halving the serial fraction doubles your ceiling — which is why chasing the serial part is so valuable.</div></details>
+<details><summary>2. Give two questions from the decision rule that "sorting 100 integers" fails, and conclude which processor to use.</summary><div class="body">It fails "is there a lot of parallel work?" (100 items is tiny — nowhere near enough to fill thousands of cores or hide latency) and "is it worth the trip?" (copying 100 integers to the GPU and back costs more than sorting them outright). Conclusion: sort on the CPU. GPUs sort brilliantly, but only at large scale (millions of keys), where the parallelism and data size justify the machine.</div></details>
+<details><summary>3. Why do modern AI systems keep model weights and activations resident on the GPU for the whole training run instead of copying them back to the CPU each step?</summary><div class="body">Because the CPU–GPU bridge is ~10–100× slower than the GPU's own memory, and training touches those tensors constantly. Copying them across the bridge every step would make the bridge — not the cores — the bottleneck, and would waste most of the GPU's speed. Keeping data resident means it's copied to the device once and then reused at the GPU's full internal bandwidth, with only small inputs/outputs crossing the bridge. Minimizing bridge traffic is one of the highest-leverage decisions in GPU system design.</div></details>
+<details><summary>4. Explain how Amdahl and Gustafson can both be true, using AI model training as the example.</summary><div class="body">For a <em>fixed</em> model and dataset, Amdahl holds: the serial parts (data loading, occasional synchronization) cap how much faster more GPUs make that exact job. But in practice teams don't re-run a fixed tiny job — given more GPUs, they train a <em>bigger</em> model on <em>more</em> data (Gustafson): the parallel matrix work grows while the serial overhead stays roughly fixed, so the effective parallel fraction climbs toward 100% and adding GPUs keeps paying off. Amdahl describes speeding up a fixed problem; Gustafson describes scaling up the problem to fit the machine. Real large-scale computing lives in Gustafson's world.</div></details>
+<details><summary>5. Reflection: in one paragraph, describe how you'd decide, for a new project, which parts run on the CPU and which on the GPU.</summary><div class="body">I'd profile first to find where time actually goes, then classify each hot part by the decision rule: parts with thousands-plus of independent, uniform, regular-access items go to the GPU; serial, branchy, irregular, or small parts stay on the CPU. I'd estimate the serial fraction to get an Amdahl ceiling and sanity-check whether a GPU port is even worth it. For the GPU parts, I'd design the data flow to copy across the bridge as little as possible — keeping data resident and overlapping any necessary copies with compute — and I'd aim to overlap CPU and GPU work so neither idles. Finally I'd measure end-to-end, not just the kernel, because Amdahl and copy overhead decide the real win. In short: measure, match each part to the machine it fits, minimize data movement, and validate on the whole pipeline.</div></details>
+
+<div class="pager">
+  <a href="lesson-03.html">← 0.3 The GPU</a>
+  <span class="dim" style="opacity:.6">Next: How the GPU evolved (coming)</span>
+</div>
+<div class="footer">GPU Mastery · Module 0 · Lesson 4 — works offline · progress saved in your browser</div>
+</div>
+<script src="../assets/app.js"></script>
+</body>
+</html>
