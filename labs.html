@@ -68,6 +68,7 @@
 <div class="grid">
   <a class="labcard" href="lab-allreduce.html"><h3>All-Reduce Visualizer →</h3><p>Step a gradient around a ring of GPUs and watch ring all-reduce move a balanced 2(N&minus;1)/N&middot;D per GPU while a parameter server chokes one link. The operation at the heart of multi-GPU training.</p><span class="tag">Track A &middot; B &middot; distributed</span></a>
   <a class="labcard" href="lab-softmax.html"><h3>Softmax Stability Explorer →</h3><p>Type in logits and watch naive softmax overflow to NaN while the stable max-subtraction version — the trick behind FlashAttention — stays exact.</p><span class="tag">Track A · ML</span></a>
+  <a class="labcard" href="lab-attention.html"><h3>Attention-Tiling Visualizer →</h3><p>Sweep the N×N attention matrix one tile at a time and watch FlashAttention land bit-for-bit on standard attention — while never storing the full matrix. The softmax lab's sequel.</p><span class="tag">Track A · attention</span></a>
   <a class="labcard" href="lab-montecarlo.html"><h3>Monte Carlo Convergence Lab →</h3><p>Throw random points, watch &pi; emerge, and watch the error track the 1/&radic;N law exactly — the idea behind every Monte Carlo method in HPC.</p><span class="tag">Track B · HPC</span></a>
   <a class="labcard" href="lab-pbr.html"><h3>PBR Material Explorer →</h3><p>A live Cook-Torrance BRDF, shaded per pixel in your browser. Dial roughness, metallic, and light position and watch a real material respond.</p><span class="tag">Track C · Graphics</span></a>
 </div>

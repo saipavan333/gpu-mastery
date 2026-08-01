@@ -1,0 +1,291 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>The Attention-Tiling Visualizer — GPU Mastery Labs</title>
+<link rel="stylesheet" href="assets/style.css">
+<style>
+  .lab-card{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:18px 20px;margin:16px 0}
+  .lab-row{display:flex;flex-wrap:wrap;gap:16px;align-items:center;margin:6px 0 12px}
+  .lab-row label{font-size:13.5px;color:var(--dim);display:flex;align-items:center;gap:8px}
+  .lab-row select{background:#10141d;color:var(--tx);border:1px solid var(--line);border-radius:6px;padding:6px 8px;font-size:13.5px}
+  .seg{display:inline-flex;border:1px solid var(--line);border-radius:8px;overflow:hidden}
+  .seg button{background:var(--card2);color:var(--dim);border:0;padding:7px 13px;font-size:13.5px;cursor:pointer}
+  .seg button.on{background:var(--accBg);color:var(--accT);font-weight:600}
+  .btns{display:flex;gap:8px;flex-wrap:wrap}
+  .runbtn{background:var(--accBg);color:var(--accT);border:1px solid rgba(91,155,255,.4);border-radius:7px;padding:8px 15px;font-weight:600;cursor:pointer;font-size:13.5px}
+  .runbtn:hover{background:#1c2f52} .runbtn.ghost{background:transparent;color:var(--dim);border-color:var(--line)} .runbtn:disabled{opacity:.4;cursor:not-allowed}
+  canvas{width:100%;max-width:760px;height:auto;background:#0d1119;border:1px solid var(--line);border-radius:10px;display:block;margin:8px 0}
+  #readout{font-size:13.5px;font-family:var(--mono);color:var(--dim);min-height:20px;margin:6px 0}
+  #readout b{color:var(--tx)}
+  .tally{display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-top:10px}
+  @media (max-width:560px){ .tally{grid-template-columns:1fr} }
+  .tcell{background:var(--card2);border:1px solid var(--line);border-radius:9px;padding:11px 13px}
+  .tcell h4{margin:0 0 3px;font-size:12px;text-transform:uppercase;letter-spacing:.04em;color:var(--dim2);font-family:var(--mono)}
+  .tcell .big{font-size:20px;font-weight:700;font-variant-numeric:tabular-nums}
+  .tcell .sub{font-size:12px;color:var(--dim);margin-top:2px}
+  .std .big{color:var(--warn)} .flash .big{color:var(--acc2)}
+  .verdict{font-size:14.5px;border-radius:10px;padding:12px 14px;margin-top:14px;background:var(--goodBg);border:1px solid rgba(54,201,138,.3)}
+  .verdict b{color:var(--ink)}
+</style>
+<!-- gm-seo:start -->
+<link rel="canonical" href="https://saipavan333.github.io/gpu-mastery/lab-attention.html">
+<link rel="manifest" href="https://saipavan333.github.io/gpu-mastery/manifest.webmanifest">
+<meta name="theme-color" content="#0b0e14">
+<link rel="apple-touch-icon" href="https://saipavan333.github.io/gpu-mastery/assets/img/favicon-180.png">
+<meta name="description" content="Attention compares every token with every other token, so the score matrix it builds is N × N — and for a long sequence that matrix is far too big to keep in…">
+<meta property="og:type" content="website">
+<meta property="og:site_name" content="GPU Mastery">
+<meta property="og:title" content="The Attention-Tiling Visualizer — GPU Mastery Labs">
+<meta property="og:description" content="Attention compares every token with every other token, so the score matrix it builds is N × N — and for a long sequence that matrix is far too big to keep in…">
+<meta property="og:url" content="https://saipavan333.github.io/gpu-mastery/lab-attention.html">
+<meta property="og:image" content="https://saipavan333.github.io/gpu-mastery/assets/img/og.png">
+<meta name="twitter:card" content="summary_large_image">
+<meta name="twitter:title" content="The Attention-Tiling Visualizer — GPU Mastery Labs">
+<meta name="twitter:description" content="Attention compares every token with every other token, so the score matrix it builds is N × N — and for a long sequence that matrix is far too big to keep in…">
+<meta name="twitter:image" content="https://saipavan333.github.io/gpu-mastery/assets/img/og.png">
+<!-- gm-seo:end -->
+</head>
+<body data-lesson="lab-attention">
+<nav><div class="inner">
+  <a class="logo" href="index.html">GPU<span>Mastery</span></a>
+  <a class="item" href="index.html">Home</a>
+  <a class="item" href="curriculum.html">Curriculum</a>
+  <a class="item on" href="labs.html">Labs</a>
+  <a class="item" href="setup.html">Lab setup</a>
+</div></nav>
+<div class="wrap">
+
+<div class="lesson-top">
+  <div><span class="badge">Interactive Lab</span><span class="badge dim">Track A · attention</span><span class="badge dim">the FlashAttention idea</span></div>
+  <a class="badge good" href="labs.html">← all labs</a>
+</div>
+<h1>The Attention-Tiling Visualizer</h1>
+<p class="lead">Attention compares every token with every other token, so the score matrix it builds is <code>N × N</code> — and for a long sequence that matrix is far too big to keep in fast memory. <strong>FlashAttention</strong> is the trick that computes the exact same answer without ever storing the whole matrix, by sweeping it one tile at a time and carrying a running softmax. Watch the tiles light up, and watch the tiled output land bit-for-bit on the standard one.</p>
+
+<div class="lab-card">
+  <div class="lab-row">
+    <label>sequence length (N): <select id="n"><option>4</option><option selected>8</option><option>12</option><option>16</option></select></label>
+    <label>tile size (B): <select id="b"><option>2</option><option selected>4</option></select></label>
+    <span class="seg" id="mode">
+      <button data-m="flash" class="on">FlashAttention (tiled)</button>
+      <button data-m="standard">Standard (full matrix)</button>
+    </span>
+  </div>
+  <div class="btns">
+    <button class="runbtn" id="play">▶ Play sweep</button>
+    <button class="runbtn ghost" id="step">Step ›</button>
+    <button class="runbtn ghost" id="reset">⟲ Reset</button>
+  </div>
+  <div id="readout">&nbsp;</div>
+  <canvas id="stage" width="760" height="470"></canvas>
+  <div class="tally">
+    <div class="tcell std"><h4>Standard · matrix in memory</h4><div class="big" id="stdVal">—</div><div class="sub">the full N×N score matrix, written to HBM</div></div>
+    <div class="tcell flash"><h4>FlashAttention · matrix in memory</h4><div class="big" id="flashVal">0</div><div class="sub" id="flashSub">never materialized — one tile + a running softmax</div></div>
+  </div>
+  <div class="verdict" id="verdict"></div>
+</div>
+
+<h2>How to read it</h2>
+<p>The grid is the attention score matrix: row <code>i</code> is a query, column <code>j</code> is a key, and each cell is how much token <code>i</code> attends to token <code>j</code> (brighter = more weight, after softmax). <strong>Standard attention</strong> computes the whole grid, writes all <code>N²</code> cells to memory, softmaxes each row, then multiplies by the values. That <code>N²</code> is the problem: double the sequence length and the matrix quadruples, and for real sequence lengths it will not fit in the on-chip memory that makes GPUs fast.</p>
+<p><strong>FlashAttention</strong> walks the grid one tile at a time. For each block of query rows it sweeps left to right across the key/value tiles, and for each tile it updates three small running quantities per query row: the <em>running maximum</em> <code>m</code> (so the exponentials never overflow — exactly the trick from the <a href="lab-softmax.html">Softmax Stability lab</a>), the <em>running normalizer</em> <code>ℓ</code>, and the <em>output accumulator</em> <code>O</code>, which is rescaled by <code>exp(m_old − m_new)</code> every time a bigger score appears. When the sweep of a row-block finishes, its output is already final and correct — and the full <code>N²</code> matrix was never stored. The memory cost drops from <code>N²</code> to <code>O(N)</code>, which is why FlashAttention made long-context transformers practical.</p>
+<p>The claim that matters is <em>exactness</em>: this is not an approximation. The running-softmax rescaling is algebraically identical to computing the whole row at once, so the tiled output equals the standard output to the last bit the hardware can represent — the badge above shows the measured difference on live random data, and it sits at the floating-point floor (~1e-16). Fast <em>and</em> exact is a rare combination; understanding why the rescale is exact (this lab, built on the softmax lab) is the core of Track A's Lesson A-series on attention.</p>
+
+<div class="footer">GPU Mastery · Labs · The Attention-Tiling Visualizer — works offline</div>
+</div>
+
+<script>
+(function(){
+  var $ = function(id){ return document.getElementById(id); };
+  var cv = $('stage'), ctx = cv.getContext('2d'), W = cv.width, H = cv.height;
+  var reduceMotion = matchMedia('(prefers-reduced-motion: reduce)').matches;
+  var C = { bg:'#0d1119', grid:'#1a2130', line:'#2a3550', txt:'#e8ecf3', dim:'#8a93a6',
+            acc:'#5b9bff', green:'#35c98a', warn:'#f5b850', cellHi:'#5b9bff' };
+
+  var N = 8, B = 4, d = 4, mode = 'flash', scale = 1/Math.sqrt(4);
+  var Q, K, V, S, P, refO, flashO, diff;
+  var rb, cb, ri, cj, done, mrun, lrun, rowDone, playing = false, busy = false;
+
+  function mulberry32(a){ return function(){ a|=0; a=a+0x6D2B79F5|0; var t=Math.imul(a^a>>>15,1|a); t=t+Math.imul(t^t>>>7,61|t)^t; return ((t^t>>>14)>>>0)/4294967296; }; }
+  function build(){
+    scale = 1/Math.sqrt(d);
+    var rnd = mulberry32(42 + N*100 + B);
+    Q=[];K=[];V=[];
+    for(var i=0;i<N;i++){ var q=[],k=[],v=[]; for(var t=0;t<d;t++){ q.push(rnd()*2-1); k.push(rnd()*2-1); v.push(rnd()*2-1);} Q.push(q);K.push(k);V.push(v); }
+    // scores + softmax (reference)
+    S=[];P=[];
+    for(i=0;i<N;i++){ var s=[]; for(var j=0;j<N;j++){ var dot=0; for(t=0;t<d;t++) dot+=Q[i][t]*K[j][t]; s.push(dot*scale);} S.push(s);
+      var m=-Infinity; for(j=0;j<N;j++) if(s[j]>m) m=s[j];
+      var den=0, p=[]; for(j=0;j<N;j++){ var e=Math.exp(s[j]-m); p.push(e); den+=e; } for(j=0;j<N;j++) p[j]/=den; P.push(p);
+    }
+    refO = refAttention(); flashO = flashAttentionFull(); diff = maxDiff(refO, flashO);
+  }
+  function refAttention(){ var O=[]; for(var i=0;i<N;i++){ var o=new Array(d).fill(0); for(var j=0;j<N;j++){ for(var t=0;t<d;t++) o[t]+=P[i][j]*V[j][t]; } O.push(o);} return O; }
+  function flashAttentionFull(){
+    var O=[]; for(var i=0;i<N;i++){ var m=-Infinity,l=0,acc=new Array(d).fill(0);
+      for(var j0=0;j0<N;j0+=B){ var j1=Math.min(N,j0+B), mB=-Infinity, sb=[];
+        for(var j=j0;j<j1;j++){ var dot=0; for(var t=0;t<d;t++) dot+=Q[i][t]*K[j][t]; var s=dot*scale; sb.push(s); if(s>mB) mB=s; }
+        var mN=Math.max(m,mB), corr=Math.exp(m-mN), ps=0, pv=new Array(d).fill(0);
+        for(var kk=0;kk<sb.length;kk++){ var p=Math.exp(sb[kk]-mN); ps+=p; var jj=j0+kk; for(t=0;t<d;t++) pv[t]+=p*V[jj][t]; }
+        l=corr*l+ps; for(t=0;t<d;t++) acc[t]=corr*acc[t]+pv[t]; m=mN;
+      }
+      var o=new Array(d); for(t=0;t<d;t++) o[t]=acc[t]/l; O.push(o);
+    } return O;
+  }
+  function maxDiff(A,Bm){ var mx=0; for(var i=0;i<A.length;i++) for(var t=0;t<d;t++) mx=Math.max(mx,Math.abs(A[i][t]-Bm[i][t])); return mx; }
+
+  function initSweep(){ rb=N/B; cb=N/B; ri=0; cj=0; done=false; playing=false;
+    mrun=[]; lrun=[]; rowDone=new Array(N).fill(false);
+    for(var i=0;i<N;i++){ mrun.push(-Infinity); lrun.push(0); }
+  }
+
+  // geometry: grid on the left, output column O on the right
+  function geom(){
+    var cs = Math.min(40, Math.floor(392/N));
+    var gx = 92, gy = 58, gpx = cs*N;
+    return { cs:cs, gx:gx, gy:gy, gpx:gpx, ox: gx+gpx+40 };
+  }
+
+  function cell(g, i, j){ return { x:g.gx+j*g.cs, y:g.gy+i*g.cs }; }
+
+  function render(){
+    var g = geom();
+    ctx.clearRect(0,0,W,H); ctx.fillStyle=C.bg; ctx.fillRect(0,0,W,H);
+    // axis labels
+    ctx.fillStyle=C.dim; ctx.font='600 12px ui-monospace,monospace'; ctx.textAlign='left'; ctx.textBaseline='alphabetic';
+    ctx.fillText('keys  j →', g.gx, g.gy-14);
+    ctx.save(); ctx.translate(g.gx-52, g.gy+g.gpx/2); ctx.rotate(-Math.PI/2); ctx.textAlign='center'; ctx.fillText('queries  i →', 0, 0); ctx.restore();
+    // cells
+    for(var i=0;i<N;i++) for(var j=0;j<N;j++){
+      var c = cell(g,i,j);
+      var revealed = (mode==='standard') || cellRevealed(i,j);
+      var weight = P[i][j];
+      if(revealed){
+        // heatmap by attention weight (green ramp)
+        var t = Math.min(1, weight*N*0.9);   // normalize-ish for visibility
+        ctx.fillStyle = mixHex('#131a26', '#35c98a', t);
+      } else { ctx.fillStyle = '#0f1420'; }
+      ctx.fillRect(c.x+1, c.y+1, g.cs-2, g.cs-2);
+    }
+    // grid lines + tile boundaries
+    ctx.strokeStyle=C.line; ctx.lineWidth=1;
+    for(i=0;i<=N;i++){ ctx.beginPath(); ctx.moveTo(g.gx, g.gy+i*g.cs); ctx.lineTo(g.gx+g.gpx, g.gy+i*g.cs); ctx.stroke();
+      ctx.beginPath(); ctx.moveTo(g.gx+i*g.cs, g.gy); ctx.lineTo(g.gx+i*g.cs, g.gy+g.gpx); ctx.stroke(); }
+    ctx.strokeStyle='#3a4a5c'; ctx.lineWidth=2;
+    for(i=0;i<=N;i+=B){ ctx.beginPath(); ctx.moveTo(g.gx, g.gy+i*g.cs); ctx.lineTo(g.gx+g.gpx, g.gy+i*g.cs); ctx.stroke();
+      ctx.beginPath(); ctx.moveTo(g.gx+i*g.cs, g.gy); ctx.lineTo(g.gx+i*g.cs, g.gy+g.gpx); ctx.stroke(); }
+    // active tile highlight (flash mode)
+    if(mode==='flash' && !done){
+      var bx = g.gx + cj*B*g.cs, by = g.gy + ri*B*g.cs;
+      ctx.strokeStyle=C.acc; ctx.lineWidth=3; ctx.strokeRect(bx+1, by+1, B*g.cs-2, B*g.cs-2);
+      // row-block marker
+      ctx.fillStyle='rgba(91,155,255,.10)'; ctx.fillRect(g.gx, by, g.gpx, B*g.cs);
+    }
+    // output column O (per query row)
+    ctx.fillStyle=C.dim; ctx.font='600 11px ui-monospace,monospace'; ctx.textAlign='center';
+    ctx.fillText('output O', g.ox+g.cs/2, g.gy-14);
+    for(i=0;i<N;i++){
+      var oy=g.gy+i*g.cs, fin = (mode==='standard') || rowDone[i];
+      ctx.fillStyle = fin ? C.green : '#0f1420';
+      ctx.fillRect(g.ox, oy+1, g.cs-2, g.cs-2);
+      ctx.strokeStyle=C.line; ctx.lineWidth=1; ctx.strokeRect(g.ox, oy+1, g.cs-2, g.cs-2);
+      if(fin){ ctx.fillStyle='#06210f'; ctx.font='700 11px ui-monospace,monospace'; ctx.textAlign='center'; ctx.textBaseline='middle'; ctx.fillText('✓', g.ox+g.cs/2, oy+g.cs/2); ctx.textBaseline='alphabetic'; }
+    }
+    // caption
+    ctx.fillStyle=C.dim; ctx.font='600 12px ui-monospace,monospace'; ctx.textAlign='left';
+    var cap;
+    if(mode==='standard'){ cap = 'standard: all '+(N*N)+' cells computed and stored at once'; }
+    else if(done){ cap = 'sweep complete — every row-block finalized, matrix never stored'; }
+    else { cap = 'row-block '+(ri+1)+'/'+rb+' · sweeping key tile '+(cj+1)+'/'+cb; }
+    ctx.fillText(cap, g.gx, g.gy+g.gpx+26);
+    updatePanel();
+  }
+
+  function cellRevealed(i,j){
+    // a cell is revealed once its row-block has swept past its column-block
+    var rblock = Math.floor(i/B), cblock = Math.floor(j/B);
+    if(rblock < ri) return true;
+    if(rblock === ri) return cblock < cj || (cblock===cj);
+    return false;
+  }
+
+  function mixHex(a,b,t){
+    function h(s){ return [parseInt(s.substr(1,2),16),parseInt(s.substr(3,2),16),parseInt(s.substr(5,2),16)]; }
+    var A=h(a),Bb=h(b); t=Math.max(0,Math.min(1,t));
+    return 'rgb('+Math.round(A[0]+(Bb[0]-A[0])*t)+','+Math.round(A[1]+(Bb[1]-A[1])*t)+','+Math.round(A[2]+(Bb[2]-A[2])*t)+')';
+  }
+
+  function fmt(x){ return x.toExponential(1); }
+  function updatePanel(){
+    $('stdVal').textContent = (N*N) + ' cells';
+    $('flashVal').textContent = '0 cells';
+    $('flashSub').textContent = 'one '+B+'×'+B+' tile + a running (m, ℓ, O) per row';
+    var rd = $('readout');
+    if(mode==='standard'){
+      rd.innerHTML = 'Standard attention holds the entire <b>'+N+'×'+N+' = '+(N*N)+'</b>-cell score matrix in memory before it can finish a single output row.';
+    } else if(done){
+      rd.innerHTML = '<b>Done.</b> Tiled output matches the standard output to <b>'+fmt(diff)+'</b> — exact — and the '+(N*N)+'-cell matrix was never stored.';
+    } else {
+      // running m,l for the active row-block's first row (representative)
+      var i0 = ri*B;
+      var mv = mrun[i0]===-Infinity ? '−∞' : mrun[i0].toFixed(2);
+      rd.innerHTML = 'Row-block '+(ri+1)+', key tile '+(cj+1)+' · running max m=<b>'+mv+'</b>, normalizer ℓ=<b>'+lrun[i0].toFixed(3)+'</b> (rescaling O by exp(m_old−m_new)).';
+    }
+    var v = $('verdict');
+    v.innerHTML = '<b>Memory:</b> standard stores <b>N² = '+(N*N)+'</b> cells; FlashAttention stores <b>0</b> of the matrix — just a '+B+'×'+B+' tile and O(N) running softmax state. Same answer to <b>'+fmt(diff)+'</b> (floating-point exact). Double N and the standard matrix quadruples while FlashAttention grows only linearly.';
+  }
+
+  // process one key-tile for the current row-block, updating running m,l and finalizing rows when the row sweep ends
+  function commitStep(){
+    var j0 = cj*B, j1 = Math.min(N, j0+B);
+    for(var r=0;r<B;r++){
+      var i = ri*B + r; if(i>=N) break;
+      var mB=-Infinity, sb=[];
+      for(var j=j0;j<j1;j++){ sb.push(S[i][j]); if(S[i][j]>mB) mB=S[i][j]; }
+      var mN=Math.max(mrun[i], mB), corr=Math.exp(mrun[i]-mN), ps=0;
+      for(var kk=0;kk<sb.length;kk++) ps+=Math.exp(sb[kk]-mN);
+      lrun[i]=corr*lrun[i]+ps; mrun[i]=mN;
+    }
+    // advance indices
+    cj++;
+    if(cj>=cb){ // finished this row-block's sweep
+      for(var rr=0;rr<B;rr++){ var ii=ri*B+rr; if(ii<N) rowDone[ii]=true; }
+      cj=0; ri++;
+      if(ri>=rb){ done=true; }
+    }
+  }
+
+  function stepOnce(){ if(mode!=='flash' || busy || done) return; if(reduceMotion){ commitStep(); render(); return; }
+    busy=true; var t0=performance.now(), dur=reduceMotion?0:340;
+    (function frame(now){ var t=Math.min(1,(now-t0)/dur); render(); if(t<1){ requestAnimationFrame(frame); } else { commitStep(); busy=false; render(); } })(performance.now());
+  }
+  function play(){ if(mode!=='flash'||busy) return; if(done) initSweep();
+    playing=true; $('play').textContent='⏸ Pause';
+    (function loop(){ if(!playing||done){ playing=false; $('play').textContent='▶ Play sweep'; return; }
+      if(reduceMotion){ commitStep(); render(); setTimeout(loop, 220); }
+      else { busy=true; var t0=performance.now(); (function frame(now){ var t=Math.min(1,(now-t0)/300); render(); if(t<1) requestAnimationFrame(frame); else { commitStep(); busy=false; render(); setTimeout(loop, 90); } })(performance.now()); }
+    })();
+  }
+  function togglePlay(){ if(playing){ playing=false; $('play').textContent='▶ Play sweep'; } else play(); }
+  function reset(){ playing=false; $('play').textContent='▶ Play sweep'; initSweep(); render(); }
+  function rebuild(){ N=+$('n').value; B=+$('b').value; if(N%B!==0) B=2; build(); initSweep(); syncButtons(); render(); }
+  function syncButtons(){ var f = mode==='flash'; $('play').disabled=!f; $('step').disabled=!f; }
+
+  $('n').addEventListener('change', rebuild);
+  $('b').addEventListener('change', rebuild);
+  $('play').addEventListener('click', togglePlay);
+  $('step').addEventListener('click', function(){ playing=false; $('play').textContent='▶ Play sweep'; stepOnce(); });
+  $('reset').addEventListener('click', reset);
+  Array.prototype.forEach.call($('mode').querySelectorAll('button'), function(btn){
+    btn.addEventListener('click', function(){
+      Array.prototype.forEach.call($('mode').querySelectorAll('button'), function(x){ x.classList.remove('on'); });
+      btn.classList.add('on'); mode=btn.getAttribute('data-m'); playing=false; $('play').textContent='▶ Play sweep'; initSweep(); syncButtons(); render();
+    });
+  });
+
+  build(); initSweep(); syncButtons(); render();
+})();
+</script>
+<script src="assets/app.js"></script>
+</body>
+</html>

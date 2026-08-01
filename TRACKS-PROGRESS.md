@@ -613,3 +613,28 @@ remains deferred by the owner's explicit "build product, defer selling" decision
 - Prose has NO literal $ (uses <code>2(N-1)/N · D</code>), American English, reduced-motion
   guard (no auto token animation; steps still work), canvas sized to grow radius with N so
   cards never collide.
+
+## Attention-Tiling Visualizer (lab-attention.html) + glossary control fix
+
+- **Glossary fix (gm-glossary.js):** the auto-linker was injecting term tooltips into
+  interactive control labels (e.g. "fp32" inside the softmax lab's preset chips, which
+  are span.chip not <button>). acceptNode now rejects text inside button/select/textarea/
+  label/[role=button] and the widget containers .chip/.chips/.seg/.btns/.runbtn/.lab-card/
+  .lab-row/.tool/.controls/.tally. Prose (first occurrence outside controls) still links.
+  SW cache v19. QA clean.
+- **lab-attention.html — The Attention-Tiling Visualizer (Track A).** The sequel to the
+  softmax lab: animates the FlashAttention block sweep over the N×N score matrix. Heatmap
+  cells = softmax attention weights; tiles reveal as each query row-block sweeps the key
+  tiles; running max m / normalizer ℓ / output rescale shown live; standard-vs-flash toggle;
+  memory tally (N² cells stored vs 0 — never materialized) + a live EXACTNESS badge.
+- **Verification (verify_flash.js):** online-softmax tiled attention == reference
+  softmax(QKᵀ)V to worst 4.4e-16 across N,d,Bc ∈ {(8,4,2),(16,8,4),(32,16,8),(7,5,3),
+  (64,8,16)}, including a 40× logit stress (online max keeps it stable); memory ref N²
+  vs flash O(N·d) (5.3× at N=64,d=8, ratio grows with N).
+- **Runtime verification (harness3.js, DOM/canvas shim):** drove the real page script
+  through the FULL sweep for every N∈{4,8,12,16} × B∈{2,4} in both modes plus reduced-
+  motion — zero exceptions, every sweep reaches "Done", the exactness badge lands at the
+  float floor (5.6e-17…2.2e-16), extra Step is a no-op, standard shows N² cells.
+- Auto-indexed (build-seo 115 urls, build-index search). Wired into labs.html "Go deeper"
+  right after the softmax card. SW cache v20. QA: ALL CLEAN ✓. No literal $, American
+  English, reduced-motion guard, deterministic (mulberry32 seed).
