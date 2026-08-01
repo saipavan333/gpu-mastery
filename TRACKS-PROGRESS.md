@@ -663,3 +663,16 @@ Reason-with-it: amdahl, roofline, occupancy, coalescing, reduction, floatbits (6
 Run-it (WebGPU): reduction(track-d), matmul, stride (3). Go-deeper: allreduce, softmax,
 attention, montecarlo, pbr (5). Study loop: review/interview/exam/glossary/cheatsheet/
 concept-map. Track A now a full set (softmax→attention→allreduce). SW v21.
+
+## Live-QA sweep of the three new labs (deployed, real Chrome)
+All three verified on the live site (GitHub Pages) via Chrome — canvas actually renders
+(non-background pixel counts: reduction 21.5k, attention 118k, allreduce 17.4k), controls
+throw nothing, numbers exact:
+- lab-reduction: N=8 depth "3 steps" / work "7 adds"; scan work "17 adds"; N=16 depth "4 steps".
+- lab-attention: stdVal 64→256 cells as N 8→16; flashVal "0 cells"; exactness badge present
+  (verdict carries the e-16 diff).
+- lab-allreduce: ring 600 MB / PS 1.17 GB at N=4,D=400; ring 700 MB / PS 2.73 GB at N=8.
+Earlier same-session: glossary fix confirmed live (softmax fp32 chip now clean, no gm-term
+in controls, prose tooltips intact); stride lab "WebGPU ready · amd gcn-5"; softmax fp64
+preset naive→NaN vs stable exact. Full labs suite (17 interactive tools) now deployed +
+live-verified. SW v21. QA ALL CLEAN.
