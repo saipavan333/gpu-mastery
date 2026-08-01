@@ -28,8 +28,8 @@
     var walker = document.createTreeWalker(main, NodeFilter.SHOW_TEXT, {
       acceptNode: function (n) {
         var p = n.parentNode, tag = p && p.tagName ? p.tagName.toLowerCase() : "";
-        if (/^(code|pre|a|h1|h2|h3|button|summary|kbd|script|style)$/.test(tag)) return NodeFilter.FILTER_REJECT;
-        if (p && p.closest && p.closest(".gm-term, .keypoints, .quiz .opt, nav, .footer, .lesson-top, .diagram")) return NodeFilter.FILTER_REJECT;
+        if (/^(code|pre|a|h1|h2|h3|button|select|option|textarea|input|label|summary|kbd|script|style)$/.test(tag)) return NodeFilter.FILTER_REJECT;
+        if (p && p.closest && p.closest(".gm-term, .keypoints, .quiz .opt, nav, .footer, .lesson-top, .diagram, button, select, textarea, label, [role=\"button\"], .chip, .chips, .seg, .btns, .runbtn, .lab-card, .lab-row, .tool, .controls, .tally")) return NodeFilter.FILTER_REJECT;
         if (!/[A-Za-z]{3,}/.test(n.nodeValue)) return NodeFilter.FILTER_REJECT;
         return NodeFilter.FILTER_ACCEPT;
       }
