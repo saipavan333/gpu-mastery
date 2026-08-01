@@ -122,6 +122,38 @@
       hits.map(function (e) { return srcItem(e, ""); }).join("") + "</ul></div>";
   }
 
+  /* ---------- KaTeX for AI answers (Gemini writes math as $…$, $$…$$, \(…\), \[…\]) ----------
+     gm-site.js renders course prose WITHOUT the single-$ delimiter (currency collision), but the
+     assistant's answers legitimately use $…$, so it runs its own pass that includes it. KaTeX is
+     lazy-loaded the first time an answer contains math (it may not be on a non-math page). */
+  var KX_LOADING = false, KX_QUEUE = [];
+  function kxRender(node) {
+    if (!window.renderMathInElement || !node) return;
+    try {
+      window.renderMathInElement(node, {
+        delimiters: [
+          { left: "$$", right: "$$", display: true },
+          { left: "\\[", right: "\\]", display: true },
+          { left: "\\(", right: "\\)", display: false },
+          { left: "$", right: "$", display: false }
+        ],
+        ignoredTags: ["script", "noscript", "style", "textarea", "pre", "code", "option"],
+        throwOnError: false
+      });
+    } catch (e) {}
+  }
+  function renderMathIn(node) {
+    if (!node || !/\$|\\\(|\\\[/.test(node.textContent || "")) return;   // no delimiters → nothing to do
+    if (window.renderMathInElement) { kxRender(node); return; }
+    KX_QUEUE.push(node);
+    if (KX_LOADING) return;
+    KX_LOADING = true;
+    var css = document.createElement("link"); css.rel = "stylesheet"; css.href = A() + "katex/katex.min.css"; document.head.appendChild(css);
+    loadScript(A() + "katex/katex.min.js", function () {
+      loadScript(A() + "katex/contrib/auto-render.min.js", function () { KX_QUEUE.forEach(kxRender); KX_QUEUE = []; });
+    });
+  }
+
   /* answer cache — repeat first-turn questions return instantly, no quota spent */
   var ACACHE = "gm_ans_cache_v1", TTL = 7 * 864e5;
   function normQ(q) { return (q || "").toLowerCase().replace(/\s+/g, " ").trim(); }
@@ -162,13 +194,13 @@
       addBubble("user", esc(q).replace(/\n/g, "<br>")); input.value = ""; autoresize();
       var firstTurn = !convo.length, aiMode = !!proxyUrl();
       if (aiMode && firstTurn) { var hit = cacheGet(q);
-        if (hit) { addBubble("bot", mdToHtml(hit.a) + sourcesHtml(hit.h)); convo.push({ role: "user", text: q }); convo.push({ role: "model", text: hit.a }); return; } }
+        if (hit) { renderMathIn(addBubble("bot", mdToHtml(hit.a) + sourcesHtml(hit.h))); convo.push({ role: "user", text: q }); convo.push({ role: "model", text: hit.a }); return; } }
       var typing = addBubble("bot", '<span class="gma-typing" aria-label="Thinking"><i></i><i></i><i></i></span>');
       setBusy(true);
       function done(txt, err, hits) {
         setBusy(false); typing.remove();
         if (err || !txt) { var r = retrievalAnswer(q); addBubble("bot", '<p class="gma-err">Couldn’t get an AI answer' + (err ? " (" + esc(err) + ")" : "") + ". Here’s what the course says:</p>" + r.html); }
-        else { addBubble("bot", mdToHtml(txt) + sourcesHtml(hits)); if (firstTurn) cachePut(q, txt, hits); convo.push({ role: "user", text: q }); convo.push({ role: "model", text: txt }); if (convo.length > 12) convo = convo.slice(-12); }
+        else { renderMathIn(addBubble("bot", mdToHtml(txt) + sourcesHtml(hits))); if (firstTurn) cachePut(q, txt, hits); convo.push({ role: "user", text: q }); convo.push({ role: "model", text: txt }); if (convo.length > 12) convo = convo.slice(-12); }
       }
       if (proxyUrl()) { askViaProxy(q, convo.slice(-6), done); }
       else { var delay = reduceMotion() ? 0 : 240; setTimeout(function () { setBusy(false); typing.remove(); addBubble("bot", retrievalAnswer(q).html); }, delay); }
