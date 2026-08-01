@@ -2,7 +2,7 @@
    Precache the shell, stale-while-revalidate for assets, network-first for pages.
    Bump CACHE when shipping new content so clients refresh. */
 'use strict';
-var CACHE = 'gpu-mastery-v8';   /* bump on any asset change so clients refresh past the cache */
+var CACHE = 'gpu-mastery-v9';   /* bump on any asset change so clients refresh past the cache */
 
 /* Core shell — kept resilient: a single 404 won't fail the whole install. */
 var SHELL = [
