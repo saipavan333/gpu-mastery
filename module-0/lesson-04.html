@@ -137,6 +137,7 @@
 <div class="cap">Speeding up the parallel part shrinks the blue; it can never shrink the yellow. The serial fraction sets a hard ceiling — the first thing to estimate before expecting a big GPU win.</div>
 </div>
 <p>The practical takeaways are liberating, not depressing: to get a big speedup you must (1) make the parallel fraction as large as possible — often by rethinking the algorithm so more of it is data-parallel — and (2) attack the serial part too, because past a point it, not the GPU, is your limit. The best GPU engineers spend a surprising amount of effort shrinking the serial 10%.</p>
+<p class="dim" style="margin-top:0">Play with it yourself: the <a href="../lab-amdahl.html">Amdahl's Law Explorer</a> lab lets you dial <em>p</em> and <em>s</em> and watch the ceiling move in real time.</p>
 
 <h2>Worked example</h2>
 <div class="card">

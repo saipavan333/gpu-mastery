@@ -546,3 +546,24 @@ remains deferred by the owner's explicit "build product, defer selling" decision
   numeric claims across the six lessons re-derived in node (clock ticks, cache-hit
   totals + 16× swing, throughput inversion 625×, Amdahl ceilings, layer MAC count)
   — ALL PASS. `qa.js` ALL CLEAN. `sw.js` CACHE → v12.
+
+## Module 0 assessment integration + Amdahl's Law Explorer lab
+
+- **Exam now includes Module 0**: re-ran `build-exam.js` (recursive walk auto-picks
+  module-0) → 180 MCQs (was 168), Core group 98. Module 0 is now in EVERY system:
+  search, concept map, review deck, prereqs/misconceptions, and the job-readiness exam.
+  (Interview bank is a hand-curated advanced set, intentionally left as-is.)
+- **New lab: `lab-amdahl.html`** — Amdahl's Law Explorer, tied to Lesson 0.4. Two
+  live canvases (the serial-wall time bars + the diminishing-returns speedup curve
+  with the ceiling asymptote), parallel-fraction + parallel-speedup sliders, preset
+  serial fractions, plain-English verdict. Deterministic (no GPU/timing), chosen
+  over the promised Stride-Cliff timing lab precisely because it's fully verifiable.
+  Wired into labs.html "Reason with it" grid; cross-linked from lesson 0.4.
+- **Verified:** `node --check` on the inline script; the full render pipeline
+  executed across 220 slider combinations (incl. p=0, p→1, s=1) via a canvas-shim
+  harness with zero throws; and the Amdahl math re-derived in Node — overall(0.9,50)=
+  8.47, ceiling(0.9)=10, ceiling(0.99)=100, overall(0.8,∞)=5, overall(p,1)=1 — all
+  pass. search-data + SEO/sitemap rebuilt (111 urls). `qa.js` ALL CLEAN. SW cache v15.
+- Note: the labs.html "Stride Cliff (coming next)" WebGPU placeholder is deliberately
+  still pending — a hardware-timed microbenchmark whose result can't be verified from
+  the sandbox; deferred rather than shipped unverified.

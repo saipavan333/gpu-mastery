@@ -1,0 +1,205 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Amdahl's Law Explorer — GPU Mastery Labs</title>
+<link rel="stylesheet" href="assets/style.css">
+<style>
+  .tool{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:18px 20px;margin:16px 0}
+  .row{display:flex;flex-wrap:wrap;gap:16px;align-items:flex-end;margin:10px 0}
+  .row label{font-size:13px;color:var(--dim);display:flex;flex-direction:column;gap:4px}
+  .row input[type=range]{width:280px}
+  .chip{background:var(--card2);color:var(--dim);border:1px solid var(--line);border-radius:999px;padding:5px 12px;font-size:13px;cursor:pointer}
+  .chip:hover{border-color:var(--acc);color:var(--tx)}
+  .chip.on{background:var(--accBg);color:var(--accT);border-color:var(--acc)}
+  .cvgrid{display:grid;grid-template-columns:1fr 1fr;gap:18px;align-items:start;margin-top:8px}
+  @media (max-width:760px){ .cvgrid{grid-template-columns:1fr} }
+  canvas{width:100%;height:auto;background:#10141d;border:1px solid var(--line);border-radius:10px;display:block}
+  .capt{font-size:12.5px;color:var(--dim2);margin:6px 0 0;line-height:1.5}
+  .verdict{font-size:15px;border-radius:10px;padding:12px 14px;margin-top:12px;background:var(--accBg);border:1px solid rgba(91,155,255,.28)}
+  .verdict b{color:var(--ink)} .kv{font-variant-numeric:tabular-nums;color:var(--tx)}
+  .muted{color:var(--dim);font-size:13px}
+  .lg{display:flex;gap:16px;flex-wrap:wrap;margin-top:8px;font-size:12.5px;color:var(--dim)}
+  .lg span{display:inline-flex;align-items:center;gap:6px}
+  .sw{width:13px;height:13px;border-radius:3px;display:inline-block}
+</style>
+<!-- gm-seo:start -->
+<link rel="canonical" href="https://saipavan333.github.io/gpu-mastery/lab-amdahl.html">
+<link rel="manifest" href="https://saipavan333.github.io/gpu-mastery/manifest.webmanifest">
+<meta name="theme-color" content="#0b0e14">
+<link rel="apple-touch-icon" href="https://saipavan333.github.io/gpu-mastery/assets/img/favicon-180.png">
+<meta name="description" content="The most sobering — and most useful — limit in all of parallel computing (Lesson 0.4). Speed up the parallel part of a program as much as you like; the…">
+<meta property="og:type" content="website">
+<meta property="og:site_name" content="GPU Mastery">
+<meta property="og:title" content="Amdahl's Law Explorer — GPU Mastery Labs">
+<meta property="og:description" content="The most sobering — and most useful — limit in all of parallel computing (Lesson 0.4). Speed up the parallel part of a program as much as you like; the…">
+<meta property="og:url" content="https://saipavan333.github.io/gpu-mastery/lab-amdahl.html">
+<meta property="og:image" content="https://saipavan333.github.io/gpu-mastery/assets/img/og.png">
+<meta name="twitter:card" content="summary_large_image">
+<meta name="twitter:title" content="Amdahl's Law Explorer — GPU Mastery Labs">
+<meta name="twitter:description" content="The most sobering — and most useful — limit in all of parallel computing (Lesson 0.4). Speed up the parallel part of a program as much as you like; the…">
+<meta name="twitter:image" content="https://saipavan333.github.io/gpu-mastery/assets/img/og.png">
+<!-- gm-seo:end -->
+</head>
+<body data-lesson="lab-amdahl">
+<nav><div class="inner">
+  <a class="logo" href="index.html">GPU<span>Mastery</span></a>
+  <a class="item" href="index.html">Home</a>
+  <a class="item" href="curriculum.html">Curriculum</a>
+  <a class="item on" href="labs.html">Labs</a>
+  <a class="item" href="setup.html">Lab setup</a>
+</div></nav>
+<div class="wrap">
+
+<div class="lesson-top">
+  <div><span class="badge">Interactive Lab</span><span class="badge dim">0.4 · Amdahl's law</span></div>
+  <a class="badge good" href="labs.html">← all labs</a>
+</div>
+<h1>Amdahl's Law Explorer</h1>
+<p class="lead">The most sobering — and most useful — limit in all of parallel computing (Lesson 0.4). Speed up the parallel part of a program as much as you like; the serial part you <em>can't</em> parallelize sets a hard ceiling on the whole thing. Dial the two knobs below and watch the wall appear.</p>
+
+<div class="tool">
+  <div class="muted">Preset serial fractions (from the lesson):</div>
+  <div class="row" id="presets"></div>
+  <div class="row">
+    <label>parallel fraction of the work = <span class="kv" id="pval">90%</span>
+      <input type="range" id="p" min="0" max="0.999" step="0.001" value="0.9"></label>
+    <label>speedup of the parallel part = <span class="kv" id="sval">50×</span>
+      <input type="range" id="s" min="0" max="3" step="0.01" value="1.70"></label>
+  </div>
+  <div class="cvgrid">
+    <div>
+      <canvas id="bars" width="380" height="300"></canvas>
+      <p class="capt">Run time as three bars: the baseline, your current speedup, and the best any hardware could ever do (infinite parallel speedup). The <span style="color:var(--warn)">serial slice</span> never shrinks — that's the wall.</p>
+    </div>
+    <div>
+      <canvas id="curve" width="380" height="300"></canvas>
+      <p class="capt">Overall speedup as you make the parallel part faster and faster. It climbs, then flattens against the ceiling (dashed) — diminishing returns you can't escape by throwing more cores at it.</p>
+    </div>
+  </div>
+  <div class="lg">
+    <span><span class="sw" style="background:var(--warn)"></span> serial part (can't parallelize)</span>
+    <span><span class="sw" style="background:var(--acc)"></span> parallel part</span>
+    <span><span class="sw" style="background:var(--bad)"></span> ceiling (serial wall)</span>
+  </div>
+  <div class="verdict" id="verdict"></div>
+</div>
+
+<h2>How to read it</h2>
+<p>Amdahl's law is one line: <strong>overall speedup = 1 &divide; ( (1&minus;p) + p&frasl;s )</strong>, where <em>p</em> is the fraction of the work that's parallelizable and <em>s</em> is how much faster you make that parallel part. The magic — and the trap — is in the limit. Push <em>s</em> to infinity (an infinitely fast GPU) and the <code>p/s</code> term vanishes, leaving <strong>ceiling = 1 &divide; (1&minus;p)</strong>. That ceiling depends <em>only</em> on the serial fraction: 10% serial caps you at 10×, 1% serial at 100×, no matter how much hardware you buy.</p>
+<p>The practical lessons are liberating, not depressing. First, a blazing-fast kernel is not enough: if 20% of your program is serial, you're capped at 5× overall even with a perfect GPU — so the left canvas's yellow slice is what to attack. Second, this is why large-scale computing obsesses over driving the serial fraction toward zero (overlapping communication, parallelizing setup, avoiding global synchronization): halving the serial part <em>doubles</em> your ceiling. Third, it explains the classic "we put it on the GPU and only got 3×" disappointment — measure the whole pipeline, not just the kernel, and find the serial part first. This is the honest companion to the Roofline: the roofline tells you how fast one kernel can go; Amdahl tells you how much that kernel can help the <em>program</em>.</p>
+<p class="muted">Note the optimistic counterpart, Gustafson's law (Lesson 0.4): in practice people don't re-run a fixed job faster — given a bigger machine they solve a <em>bigger</em> problem, which grows the parallel fraction toward 100% and restores near-linear scaling. Amdahl bounds a fixed problem; Gustafson describes scaling the problem to the machine. Both are true.</p>
+
+<div class="footer">GPU Mastery · Labs · Amdahl's Law Explorer — works offline</div>
+</div>
+
+<script>
+const $ = id => document.getElementById(id);
+const barsC = $('bars'), bx = barsC.getContext('2d');
+const curveC = $('curve'), cx = curveC.getContext('2d');
+const C = { line:'#2a3245', tx:'#e8edf5', dim:'#7e8aa0', acc:'#5b9bff', good:'#36c98a', warn:'#f5b850', bad:'#ff6b6b' };
+
+const PRESETS = [ ['50% serial', 0.5], ['10% serial', 0.9], ['5% serial', 0.95], ['1% serial', 0.99], ['0.1% serial', 0.999] ];
+let p = 0.9, s = 50;
+
+// --- Amdahl core (the one formula this whole lab is about) ---
+function overall(pf, sp){ return 1 / ((1 - pf) + (sp > 0 ? pf / sp : pf)); }
+function ceiling(pf){ return pf >= 1 ? Infinity : 1 / (1 - pf); }
+
+function buildPresets(){
+  const host = $('presets'); host.innerHTML = '';
+  PRESETS.forEach(function(pr){
+    const b = document.createElement('span'); b.className = 'chip'; b.textContent = pr[0];
+    b.onclick = function(){ p = pr[1]; $('p').value = p; [].forEach.call(host.children, c=>c.classList.remove('on')); b.classList.add('on'); render(); };
+    host.appendChild(b);
+  });
+}
+
+function fmt(x){ if(!isFinite(x)) return '∞'; return x >= 100 ? x.toFixed(0) : x >= 10 ? x.toFixed(1) : x.toFixed(2); }
+
+// --- left canvas: three time bars (baseline / current / ceiling) ---
+function drawBars(){
+  const W = barsC.width, H = barsC.height;
+  bx.clearRect(0,0,W,H);
+  bx.font = '12px ui-monospace, monospace';
+  const x0 = 96, x1 = W - 20, fullW = x1 - x0;   // baseline time = 1.0 maps to fullW
+  const rows = [
+    { label:'1× baseline', ser:(1-p), par:p, sp:1 },
+    { label:fmt(overall(p,s))+'× now', ser:(1-p), par:p/s, sp:overall(p,s) },
+    { label:(isFinite(ceiling(p))?fmt(ceiling(p)):'∞')+'× max', ser:(1-p), par:0, sp:ceiling(p) }
+  ];
+  const ys = [70, 140, 210], bh = 34;
+  bx.fillStyle = C.dim; bx.textAlign='left';
+  bx.fillText('RUN TIME (baseline = 1.0)', x0, 34);
+  for(let i=0;i<rows.length;i++){
+    const r = rows[i], y = ys[i];
+    bx.fillStyle = C.dim; bx.textAlign='right'; bx.fillText(r.label, x0-8, y+bh/2+4);
+    // serial segment
+    const sw = r.ser * fullW, pw = r.par * fullW;
+    bx.fillStyle = C.warn; bx.fillRect(x0, y, Math.max(sw,0), bh);
+    bx.fillStyle = C.acc;  bx.fillRect(x0+sw, y, Math.max(pw,0), bh);
+    // total time label
+    bx.fillStyle = C.tx; bx.textAlign='left';
+    const total = r.ser + r.par;
+    bx.fillText('t=' + total.toFixed(3), x0 + Math.max(sw+pw, 2) + 6, y+bh/2+4);
+  }
+  // the serial wall
+  const wallX = x0 + (1-p)*fullW;
+  bx.strokeStyle = C.bad; bx.lineWidth = 1.4; bx.setLineDash([4,3]);
+  bx.beginPath(); bx.moveTo(wallX, 58); bx.lineTo(wallX, 250); bx.stroke(); bx.setLineDash([]);
+  bx.fillStyle = C.bad; bx.textAlign='left'; bx.fillText('serial wall', wallX+5, 268);
+}
+
+// --- right canvas: overall speedup vs parallel-part speedup (log x) ---
+const Sx0=52, Sx1=364, Sy0=250, Sy1=40, SMIN=1, SMAX=1024;
+function Xp(v){ return Sx0 + (Math.log10(v)-Math.log10(SMIN))/(Math.log10(SMAX)-Math.log10(SMIN))*(Sx1-Sx0); }
+function drawCurve(){
+  const W = curveC.width, H = curveC.height;
+  cx.clearRect(0,0,W,H);
+  cx.font='11px ui-monospace, monospace';
+  const cap = ceiling(p), yMax = isFinite(cap) ? cap*1.12 : overall(p,SMAX)*1.3;
+  function Yp(v){ return Sy0 - (v-1)/(yMax-1)*(Sy0-Sy1); }
+  // axes + grid
+  cx.strokeStyle=C.line; cx.fillStyle=C.dim; cx.lineWidth=1;
+  for(let e=0;e<=3;e++){ const v=Math.pow(10,e); const x=Xp(v); cx.globalAlpha=.5; cx.beginPath(); cx.moveTo(x,Sy1); cx.lineTo(x,Sy0); cx.stroke(); cx.globalAlpha=1; cx.textAlign='center'; cx.fillText(v+'×', x, Sy0+16); }
+  cx.textAlign='center'; cx.fillText('speedup of the parallel part →', (Sx0+Sx1)/2, H-6);
+  cx.save(); cx.translate(14,(Sy0+Sy1)/2); cx.rotate(-Math.PI/2); cx.fillText('overall speedup', 0, 0); cx.restore();
+  // ceiling asymptote
+  if(isFinite(cap)){
+    const yc = Yp(cap);
+    cx.strokeStyle=C.bad; cx.setLineDash([5,4]); cx.lineWidth=1.4; cx.beginPath(); cx.moveTo(Sx0,yc); cx.lineTo(Sx1,yc); cx.stroke(); cx.setLineDash([]);
+    cx.fillStyle=C.bad; cx.textAlign='left'; cx.fillText('ceiling '+fmt(cap)+'×', Sx0+6, yc-6);
+  }
+  // the curve
+  cx.strokeStyle=C.acc; cx.lineWidth=2.2; cx.beginPath(); let started=false;
+  for(let lx=Math.log10(SMIN); lx<=Math.log10(SMAX); lx+=0.02){ const S=Math.pow(10,lx); const y=Yp(overall(p,S)); const x=Xp(S); if(!started){cx.moveTo(x,y);started=true;} else cx.lineTo(x,y); }
+  cx.stroke();
+  // current point
+  const cxp=Xp(Math.min(s,SMAX)), cyp=Yp(overall(p,s));
+  cx.fillStyle=C.good; cx.beginPath(); cx.arc(cxp,cyp,5,0,7); cx.fill();
+  cx.fillStyle=C.tx; cx.textAlign='left'; cx.fillText(fmt(overall(p,s))+'× at '+fmt(s)+'×', Math.min(cxp+8, Sx1-90), cyp-8);
+}
+
+function render(){
+  p = parseFloat($('p').value);
+  s = Math.pow(10, parseFloat($('s').value));
+  $('pval').textContent = (p*100).toFixed(p>=0.995?1:0) + '%';
+  $('sval').textContent = fmt(s) + '×';
+  drawBars(); drawCurve();
+  const ov = overall(p,s), cap = ceiling(p), pct = isFinite(cap)? (ov/cap*100):0;
+  const v = $('verdict');
+  let msg = '<b>Overall speedup: <span class="kv">'+fmt(ov)+'×</span></b> — with '+(p*100).toFixed(0)+'% of the work parallel, sped up '+fmt(s)+'×. ';
+  msg += 'Ceiling (infinitely fast parallel part): <span class="kv">'+(isFinite(cap)?fmt(cap)+'×':'unbounded')+'</span>';
+  if(isFinite(cap)) msg += ' — you are already at <span class="kv">'+pct.toFixed(0)+'%</span> of it.';
+  msg += '<br>';
+  if(p>=0.999) msg += 'Near-perfectly parallel: the serial part is negligible, so speedup scales almost linearly with the parallel speedup — the Gustafson regime.';
+  else if(pct>85 && isFinite(cap)) msg += 'You are near the wall: making the parallel part faster now barely helps. The only way up is to shrink the '+((1-p)*100).toFixed(0)+'% serial part.';
+  else msg += 'Room to climb: a faster parallel part still pays off here. But note the ceiling — the '+((1-p)*100).toFixed(0)+'% serial part caps you at '+fmt(cap)+'× however fast the GPU gets.';
+  v.innerHTML = msg;
+}
+['p','s'].forEach(id=>$(id).addEventListener('input', function(){ [].forEach.call($('presets').children, c=>c.classList.remove('on')); render(); }));
+buildPresets(); render();
+</script>
+<script src="assets/app.js"></script>
+</body>
+</html>
