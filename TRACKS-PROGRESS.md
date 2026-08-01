@@ -676,3 +676,18 @@ Earlier same-session: glossary fix confirmed live (softmax fp32 chip now clean, 
 in controls, prose tooltips intact); stride lab "WebGPU ready · amd gcn-5"; softmax fp64
 preset naive→NaN vs stable exact. Full labs suite (17 interactive tools) now deployed +
 live-verified. SW v21. QA ALL CLEAN.
+
+## Labs cross-linked into their lessons (discovery fix)
+Found the labs were orphaned — only module-0/lesson-04 linked a lab; the other ~16 were
+reachable only from the Labs page. Added a consistent "Try it live." callout before the
+pager in each source lesson, linking the lab(s) that make its concept interactive:
+- 1.8 Floating Point + A6 Mixed Precision → lab-floatbits
+- 4.7 Roofline → lab-roofline
+- 5.5 Tiling → lab-matmul   · 5.6 Occupancy → lab-occupancy
+- 5.7 Coalescing → lab-coalescing + lab-stride
+- 5.8 Reductions → lab-reduction + track-d/lab-webgpu
+- A5 Softmax/FlashAttention → lab-softmax + lab-attention
+- A7 Multi-GPU/NCCL → lab-allreduce
+- B4 Monte Carlo → lab-montecarlo · C6 Lighting/PBR → lab-pbr
+11 lessons edited, no literal $, QA ALL CLEAN, SW cache v22. Labs are now discoverable in
+context, not just from the hub — closing the content↔lab loop.
